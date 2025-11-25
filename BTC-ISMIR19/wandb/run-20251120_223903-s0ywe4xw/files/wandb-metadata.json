@@ -1,0 +1,56 @@
+{
+  "os":  "Linux-6.8.0-1043-gcp-x86_64-with-glibc2.35",
+  "python":  "CPython 3.10.19",
+  "startedAt":  "2025-11-20T22:39:03.245953Z",
+  "args":  [
+    "--curriculum",
+    "True",
+    "--index",
+    "1",
+    "--kfold",
+    "0",
+    "--model",
+    "btc",
+    "--dataset1",
+    "billboard",
+    "--dataset2",
+    "jaah",
+    "--test_dataset",
+    "rwc"
+  ],
+  "program":  "/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/train_curriculum.py",
+  "codePath":  "train_curriculum.py",
+  "codePathLocal":  "train_curriculum.py",
+  "git":  {
+    "remote":  "https://github.com/jayg996/BTC-ISMIR19.git",
+    "commit":  "2682317be668032e6e4b269ded36adaa2ad57df0"
+  },
+  "email":  "biabcaval@gmail.com",
+  "root":  "/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19",
+  "host":  "daniel-chords-machine",
+  "executable":  "/home/daniel.melo/miniconda3/envs/BTC_py310/bin/python",
+  "cpu_count":  8,
+  "cpu_count_logical":  16,
+  "gpu":  "Tesla T4",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "2081087713280",
+      "used":  "193880125440"
+    }
+  },
+  "memory":  {
+    "total":  "33649225728"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "Tesla T4",
+      "memoryTotal":  "16106127360",
+      "cudaCores":  2560,
+      "architecture":  "Turing",
+      "uuid":  "GPU-255aff01-3898-911f-38b3-5eb65cc2e2e7"
+    }
+  ],
+  "cudaVersion":  "12.4",
+  "writerId":  "6gtukf93etjp5g32dhykvctn5kcijxpw"
+}
