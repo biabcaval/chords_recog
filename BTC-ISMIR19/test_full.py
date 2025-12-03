@@ -2,7 +2,6 @@
 """Test a specific checkpoint on a test dataset"""
 import os
 import sys
-import argparse
 import torch
 import numpy as np
 from utils import logger
@@ -15,16 +14,17 @@ logger.logging_verbosity(1)
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
 
-parser = argparse.ArgumentParser(description='Test a specific checkpoint')
-parser.add_argument('--checkpoint', type=str, required=True, help='Path to checkpoint file (e.g., assets/model/idx_2_044.pth.tar)')
-parser.add_argument('--config', type=str, default='run_config.yaml', help='Config file path')
-parser.add_argument('--test_dataset', type=str, default='rwc', help='Test dataset name')
-parser.add_argument('--kfold', type=int, default=0, help='K-fold index (for normalization file)')
-parser.add_argument('--model', type=str, default='btc', help='Model type: btc, cnn, crnn')
-args = parser.parse_args()
+# ==== HARDCODED PARAMETERS START ====
+# Set your checkpoint, config, test_dataset, kfold, model_type here!
+CHECKPOINT_PATH = "/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/assets/exp2_btc_billboard_jaah_dj_avan_rwc_voca_curriculum/kfold_2/model_037.pth.tar"  # Example path, change as needed
+CONFIG_PATH = "run_config.yaml"
+TEST_DATASET = "rwc"
+KFOLD_INDEX = 2
+MODEL_TYPE = "btc"
+# ==== HARDCODED PARAMETERS END ====
 
 # Load config
-config = HParams.load(args.config)
+config = HParams.load(CONFIG_PATH)
 large_voca = config.feature.get('large_voca', False)
 
 if large_voca:
@@ -41,7 +41,7 @@ mp3_config = config.mp3
 feature_config = config.feature
 mp3_string = "%d_%.1f_%.1f" % (mp3_config['song_hz'], mp3_config['inst_len'], mp3_config['skip_interval'])
 feature_string = "_%s_%d_%d_%d_" % ('cqt', feature_config['n_bins'], feature_config['bins_per_octave'], feature_config['hop_length'])
-z_path = os.path.join(config.path['root_path'], 'result', mp3_string + feature_string + 'mix_kfold_'+ str(args.kfold) +'_normalization.pt')
+z_path = os.path.join(config.path['root_path'], 'result', mp3_string + feature_string + 'mix_kfold_'+ str(KFOLD_INDEX) +'_normalization.pt')
 
 if os.path.exists(z_path):
     normalization = torch.load(z_path)
@@ -52,20 +52,20 @@ else:
     raise FileNotFoundError(f"Normalization file not found: {z_path}. You may need to preprocess the training data first.")
 
 # Create model
-if args.model == 'btc':
+if MODEL_TYPE == 'btc':
     model = BTC_model(config=config.model).to(device)
 else:
-    raise NotImplementedError(f"Model type {args.model} not implemented in this script")
+    raise NotImplementedError(f"Model type {MODEL_TYPE} not implemented in this script")
 
 # Load checkpoint
-if os.path.isfile(args.checkpoint):
-    checkpoint = torch.load(args.checkpoint)
+if os.path.isfile(CHECKPOINT_PATH):
+    checkpoint = torch.load(CHECKPOINT_PATH)
     model.load_state_dict(checkpoint['model'])
-    logger.info(f"Loaded checkpoint: {args.checkpoint}")
+    logger.info(f"Loaded checkpoint: {CHECKPOINT_PATH}")
     if 'epoch' in checkpoint:
         logger.info(f"Checkpoint epoch: {checkpoint['epoch']}")
 else:
-    raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
+    raise FileNotFoundError(f"Checkpoint not found: {CHECKPOINT_PATH}")
 
 # Load test dataset
 def load_all_test_data(config, root_dir, dataset_name):
@@ -100,7 +100,7 @@ def load_all_test_data(config, root_dir, dataset_name):
     logger.info(f"Loaded {len(used_song_names)} songs with {len(all_paths)} instances from {dataset_name}")
     return used_song_names, all_paths
 
-test_song_names, test_paths = load_all_test_data(config, config.path['root_path'], args.test_dataset)
+test_song_names, test_paths = load_all_test_data(config, config.path['root_path'], TEST_DATASET)
 
 class TestDataset(torch.utils.data.Dataset):
     def __init__(self, paths, song_names, config, root_dir, dataset_name):
@@ -120,26 +120,26 @@ class TestDataset(torch.utils.data.Dataset):
         res['chord'] = data['chord']
         return res
 
-test_dataset = TestDataset(test_paths, test_song_names, config, config.path['root_path'], args.test_dataset)
+test_dataset = TestDataset(test_paths, test_song_names, config, config.path['root_path'], TEST_DATASET)
 
 # Run testing
-logger.info("==== Starting testing on %s dataset ====" % args.test_dataset)
+logger.info("==== Starting testing on %s dataset ====" % TEST_DATASET)
 
 if large_voca:
     score_metrics = ['root', 'thirds', 'triads', 'sevenths', 'tetrads', 'majmin', 'mirex']
     score_list_dict, song_length_list, average_score_dict = large_voca_score_calculation(
-        valid_dataset=test_dataset, config=config, model=model, model_type=args.model, 
+        valid_dataset=test_dataset, config=config, model=model, model_type=MODEL_TYPE, 
         mean=mean, std=std, device=device
     )
     for m in score_metrics:
-        logger.info('==== TEST %s score on %s: %.4f' % (m, args.test_dataset, average_score_dict[m]))
+        logger.info('==== TEST %s score on %s: %.4f' % (m, TEST_DATASET, average_score_dict[m]))
 else:
     score_metrics = ['root', 'majmin']
     score_list_dict, song_length_list, average_score_dict = root_majmin_score_calculation(
-        valid_dataset=test_dataset, config=config, model=model, model_type=args.model, 
+        valid_dataset=test_dataset, config=config, model=model, model_type=MODEL_TYPE, 
         mean=mean, std=std, device=device
     )
     for m in score_metrics:
-        logger.info('==== TEST %s score on %s: %.4f' % (m, args.test_dataset, average_score_dict[m]))
+        logger.info('==== TEST %s score on %s: %.4f' % (m, TEST_DATASET, average_score_dict[m]))
 
 logger.info("==== Testing completed ====")

@@ -47,6 +47,6 @@ model:
 
 path:
   ckpt_path : 'model'
-  result_path : 'result'
+  result_path : '/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/RESULTS'
   asset_path : '/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/assets'
   root_path : '/home/daniel.melo/datasets'

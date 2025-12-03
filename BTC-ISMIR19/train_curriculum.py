@@ -38,14 +38,15 @@ device = torch.device("cuda" if use_cuda else "cpu")
 parser = argparse.ArgumentParser()
 parser.add_argument('--index', type=int, help='Experiment Number', default='e')
 parser.add_argument('--kfold', type=int, help='5 fold (0,1,2,3,4)', default='e')
-parser.add_argument('--voca', type=bool, help='large voca is True', default=False)
+parser.add_argument('--voca', action='store_true', help='large voca is True', default=False)
 parser.add_argument('--model', type=str, help='btc, cnn, crnn', default='btc')
 parser.add_argument('--dataset1', type=str, help='Dataset', default='billboard')
 parser.add_argument('--dataset2', type=str, help='Dataset', default='jaah')
+parser.add_argument('--dataset3', type=str, help='Third Dataset', default=None)
 parser.add_argument('--test_dataset', type=str, help='Test Dataset', default='rwc')
 parser.add_argument('--restore_epoch', type=int, default=1000)
-parser.add_argument('--early_stop', type=bool, help='no improvement during 10 epoch -> stop', default=True)
-parser.add_argument('--curriculum', type=bool, help='Enable curriculum learning', default=False)
+parser.add_argument('--early_stop', action='store_true', help='no improvement during 10 epoch -> stop', default=True)
+parser.add_argument('--curriculum', action='store_true', help='Enable curriculum learning', default=False)
 args = parser.parse_args()
 
 config = HParams.load("run_config.yaml")
@@ -108,6 +109,7 @@ if WANDB_AVAILABLE:
                 'model': args.model,
                 'dataset1': args.dataset1,
                 'dataset2': args.dataset2,
+                'dataset3': args.dataset3 if args.dataset3 else 'None',
                 'test_dataset': args.test_dataset,
                 'voca': args.voca,
                 'curriculum': args.curriculum,
@@ -171,15 +173,25 @@ def load_all_test_data(config, root_dir, dataset_name):
     return used_song_names, all_paths
 
 # Data loader
-# Training datasets: billboard and jaah (with k-fold split)
+# Training datasets: billboard, jaah, and optionally dj_avan (with k-fold split)
 train_dataset1 = AudioDataset(config, root_dir=config.path['root_path'], dataset_names=(args.dataset1,), num_workers=20, preprocessing=False, train=True, kfold=args.kfold)
 train_dataset2 = AudioDataset(config, root_dir=config.path['root_path'], dataset_names=(args.dataset2,), num_workers=20, preprocessing=False, train=True, kfold=args.kfold)
 train_dataset = train_dataset1.__add__(train_dataset2)
 
-# Validation datasets: billboard and jaah (one fold for validation)
+# Add third dataset if provided
+if args.dataset3:
+    train_dataset3 = AudioDataset(config, root_dir=config.path['root_path'], dataset_names=(args.dataset3,), num_workers=20, preprocessing=False, train=True, kfold=args.kfold)
+    train_dataset = train_dataset.__add__(train_dataset3)
+
+# Validation datasets: billboard, jaah, and optionally dj_avan (one fold for validation)
 valid_dataset1 = AudioDataset(config, root_dir=config.path['root_path'], dataset_names=(args.dataset1,), preprocessing=False, train=False, kfold=args.kfold)
 valid_dataset2 = AudioDataset(config, root_dir=config.path['root_path'], dataset_names=(args.dataset2,), preprocessing=False, train=False, kfold=args.kfold)
 valid_dataset = valid_dataset1.__add__(valid_dataset2)
+
+# Add third dataset to validation if provided
+if args.dataset3:
+    valid_dataset3 = AudioDataset(config, root_dir=config.path['root_path'], dataset_names=(args.dataset3,), preprocessing=False, train=False, kfold=args.kfold)
+    valid_dataset = valid_dataset.__add__(valid_dataset3)
 
 # Test dataset: rwc (entire dataset, no k-fold split)
 test_song_names, test_paths = load_all_test_data(config, config.path['root_path'], args.test_dataset)

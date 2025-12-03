@@ -20,10 +20,14 @@ def create_experiment_folder_name(args):
         args.model,
         args.dataset1,
         args.dataset2,
+    ]
+    if args.dataset3:
+        parts.append(args.dataset3)
+    parts.extend([
         args.test_dataset,
         "voca" if args.voca else "majmin",
         "curriculum" if args.curriculum else "standard"
-    ]
+    ])
     return "_".join(parts)
 
 def main():
@@ -31,14 +35,15 @@ def main():
     parser.add_argument('--index', type=int, help='Experiment Number', required=True)
     parser.add_argument('--kfold_start', type=int, help='Starting k-fold (default: 0)', default=0)
     parser.add_argument('--kfold_end', type=int, help='Ending k-fold (default: 4)', default=4)
-    parser.add_argument('--voca', type=bool, help='large voca is True', default=False)
+    parser.add_argument('--voca', action='store_true', help='large voca is True', default=False)
     parser.add_argument('--model', type=str, help='btc, cnn, crnn', default='btc')
     parser.add_argument('--dataset1', type=str, help='Dataset', default='billboard')
     parser.add_argument('--dataset2', type=str, help='Dataset', default='jaah')
+    parser.add_argument('--dataset3', type=str, help='Third Dataset', default=None)
     parser.add_argument('--test_dataset', type=str, help='Test Dataset', default='rwc')
     parser.add_argument('--restore_epoch', type=int, default=1000)
-    parser.add_argument('--early_stop', type=bool, help='no improvement during 10 epoch -> stop', default=True)
-    parser.add_argument('--curriculum', type=bool, help='Enable curriculum learning', default=False)
+    parser.add_argument('--early_stop', action='store_true', help='no improvement during 10 epoch -> stop', default=True)
+    parser.add_argument('--curriculum', action='store_true', help='Enable curriculum learning', default=False)
     
     args = parser.parse_args()
     
@@ -69,12 +74,19 @@ def main():
             '--dataset2', args.dataset2,
             '--test_dataset', args.test_dataset,
             '--restore_epoch', str(args.restore_epoch),
-            '--early_stop', str(args.early_stop),
-            '--curriculum', str(args.curriculum),
         ]
         
+        if args.dataset3:
+            cmd.extend(['--dataset3', args.dataset3])
+        
         if args.voca:
-            cmd.extend(['--voca', 'True'])
+            cmd.append('--voca')
+        
+        if args.early_stop:
+            cmd.append('--early_stop')
+        
+        if args.curriculum:
+            cmd.append('--curriculum')
         
         # Add experiment folder as environment variable so train_curriculum.py can use it
         env = os.environ.copy()

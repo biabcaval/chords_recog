@@ -16,7 +16,6 @@ from utils import logger
 from utils.hparams import HParams
 from btc_model import *
 from utils.mir_eval_modules import audio_file_to_features, idx2chord, idx2voca_chord, get_audio_paths
-import argparse
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -24,48 +23,20 @@ logger.logging_verbosity(1)
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda" if use_cuda else "cpu")
 
-# # hyperparameters
-# parser = argparse.ArgumentParser()
-# parser.add_argument('--voca', default=True, type=lambda x: (str(x).lower() == 'true'))
-# parser.add_argument('--audio_dir', type=str, default='./test')
-# parser.add_argument('--save_dir', type=str, default='./test')
-# args = parser.parse_args()
+# ==== HARDCODED PARAMETERS START ====
+# Set your checkpoint, config, audio directory, save directory, kfold, and voca here!
+CHECKPOINT_PATH = "/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/assets/exp2_btc_billboard_jaah_dj_avan_rwc_voca_curriculum/kfold_2/model_037.pth.tar"  # Path to checkpoint file (or None to use legacy model files)
+CONFIG_PATH = "/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/run_config.yaml"
+AUDIO_DIR = "/home/daniel.melo/datasets/rwc/audio"  # Directory containing audio files to process
+SAVE_DIR = "/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/RESULTS"  # Directory to save .lab and .midi files
+KFOLD_INDEX = 2  # K-fold index for normalization file
+LARGE_VOCA = True  # Use large vocabulary (170 chords) or majmin (25 chords)
+# ==== HARDCODED PARAMETERS END ====
 
-# config = HParams.load("run_config.yaml")
+# Load config
+config = HParams.load(CONFIG_PATH)
 
-# if args.voca is True:
-#     config.feature['large_voca'] = True
-#     config.model['num_chords'] = 170
-#     model_file = './test/btc_model_large_voca.pt'
-#     idx_to_chord = idx2voca_chord()
-#     logger.info("label type: large voca")
-# else:
-#     model_file = './test/btc_model.pt'
-#     idx_to_chord = idx2chord
-#     logger.info("label type: Major and minor")
-
-# model = BTC_model(config=config.model).to(device)
-
-# # Load model
-# if os.path.isfile(model_file):
-#     checkpoint = torch.load(model_file)
-#     mean = checkpoint['mean']
-#     std = checkpoint['std']
-#     model.load_state_dict(checkpoint['model'])
-#     logger.info("restore model")
-
-# hyperparameters
-parser = argparse.ArgumentParser()
-parser.add_argument('--voca', default=True, type=lambda x: (str(x).lower() == 'true'))
-parser.add_argument('--audio_dir', type=str, default='./test')
-parser.add_argument('--save_dir', type=str, default='./test')
-parser.add_argument('--checkpoint', type=str, default=None, help='Path to checkpoint file (e.g., assets/model/idx_2_044.pth.tar)')
-parser.add_argument('--kfold', type=int, default=0, help='K-fold index for normalization file')
-args = parser.parse_args()
-
-config = HParams.load("run_config.yaml")
-
-if args.voca is True:
+if LARGE_VOCA:
     config.feature['large_voca'] = True
     config.model['num_chords'] = 170
     idx_to_chord = idx2voca_chord()
@@ -79,18 +50,18 @@ else:
 model = BTC_model(config=config.model).to(device)
 
 # Load model and normalization
-if args.checkpoint:
+if CHECKPOINT_PATH:
     # Load from training checkpoint format
-    checkpoint = torch.load(args.checkpoint)
+    checkpoint = torch.load(CHECKPOINT_PATH)
     model.load_state_dict(checkpoint['model'])
-    logger.info(f"Loaded checkpoint: {args.checkpoint}")
+    logger.info(f"Loaded checkpoint: {CHECKPOINT_PATH}")
     
     # Load normalization from separate file
     mp3_config = config.mp3
     feature_config = config.feature
     mp3_string = "%d_%.1f_%.1f" % (mp3_config['song_hz'], mp3_config['inst_len'], mp3_config['skip_interval'])
     feature_string = "_%s_%d_%d_%d_" % ('cqt', feature_config['n_bins'], feature_config['bins_per_octave'], feature_config['hop_length'])
-    z_path = os.path.join(config.path['root_path'], 'result', mp3_string + feature_string + 'mix_kfold_'+ str(args.kfold) +'_normalization.pt')
+    z_path = os.path.join(config.path['root_path'], 'result', mp3_string + feature_string + 'mix_kfold_'+ str(KFOLD_INDEX) +'_normalization.pt')
     
     if os.path.exists(z_path):
         normalization = torch.load(z_path)
@@ -101,7 +72,7 @@ if args.checkpoint:
         raise FileNotFoundError(f"Normalization file not found: {z_path}")
 else:
     # Original behavior - load from combined checkpoint
-    if args.voca:
+    if LARGE_VOCA:
         model_file = './test/btc_model_large_voca.pt'
     else:
         model_file = './test/btc_model.pt'
@@ -116,7 +87,7 @@ else:
         raise FileNotFoundError(f"Model file not found: {model_file}")
 
 # Audio files with format of wav and mp3
-audio_paths = get_audio_paths(args.audio_dir)
+audio_paths = get_audio_paths(AUDIO_DIR)
 
 # Chord recognition and save lab file
 for i, audio_path in enumerate(audio_paths):
@@ -159,9 +130,9 @@ for i, audio_path in enumerate(audio_paths):
                     break
 
     # lab file write
-    if not os.path.exists(args.save_dir):
-        os.makedirs(args.save_dir)
-    save_path = os.path.join(args.save_dir, os.path.split(audio_path)[-1].replace('.mp3', '').replace('.wav', '') + '.lab')
+    if not os.path.exists(SAVE_DIR):
+        os.makedirs(SAVE_DIR)
+    save_path = os.path.join(SAVE_DIR, os.path.split(audio_path)[-1].replace('.mp3', '').replace('.wav', '') + '.lab')
     with open(save_path, 'w') as f:
         for line in lines:
             f.write(line)
