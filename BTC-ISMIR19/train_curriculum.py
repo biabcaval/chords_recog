@@ -15,6 +15,7 @@ from utils.hparams import HParams
 import argparse
 from utils.pytorch_utils import adjusting_learning_rate
 from utils.mir_eval_modules import root_majmin_score_calculation, large_voca_score_calculation
+from utils.transformer_modules import compute_class_weights
 from curriculum_learning import CurriculumLearning, CurriculumDataLoader
 import warnings
 import torch
@@ -124,6 +125,9 @@ if WANDB_AVAILABLE:
                 'curriculum_pacing': config.curriculum.get('pacing', 'N/A'),
                 'curriculum_start_ratio': config.curriculum.get('start_ratio', 'N/A'),
                 'curriculum_pace_epochs': config.curriculum.get('pace_epochs', 'N/A'),
+                'class_weights_enabled': config.class_weights.get('enabled', False),
+                'class_weights_gamma': config.class_weights.get('gamma', 'N/A'),
+                'class_weights_w_max': config.class_weights.get('w_max', 'N/A'),
             },
             tags=[args.model, f"kfold{args.kfold}", "curriculum" if args.curriculum else "standard"]
         )
@@ -241,13 +245,28 @@ else:
 valid_dataloader = AudioDataLoader(dataset=valid_dataset, batch_size=config.experiment['batch_size'], drop_last=False)
 test_dataloader = AudioDataLoader(dataset=test_dataset, batch_size=config.experiment['batch_size'], drop_last=False)
 
+# Compute class weights if enabled
+class_weights = None
+if config.class_weights.get('enabled', False):
+    logger.info("==== Computing Class Weights for Reweighted Loss ====")
+    class_weights = compute_class_weights(
+        train_dataset=train_dataset,
+        num_classes=config.model['num_chords'],
+        gamma=config.class_weights.get('gamma', 0.5),
+        w_max=config.class_weights.get('w_max', 10.0),
+        device=device
+    )
+    logger.info(f"Class weights computed: min={class_weights.min():.4f}, max={class_weights.max():.4f}, mean={class_weights.mean():.4f}")
+    # Log weight distribution
+    logger.info(f"Weight statistics: std={class_weights.std():.4f}, median={class_weights.median():.4f}")
+
 # Model and Optimizer
 if args.model == 'cnn':
     model = CNN(config=config.model).to(device)
 elif args.model == 'crnn':
     model = CRNN(config=config.model).to(device)
 elif args.model == 'btc':
-    model = BTC_model(config=config.model).to(device)
+    model = BTC_model(config=config.model, class_weights=class_weights).to(device)
 else: 
     raise NotImplementedError
 optimizer = optim.Adam(model.parameters(), lr=config.experiment['learning_rate'], weight_decay=config.experiment['weight_decay'], betas=(0.9, 0.98), eps=1e-9)

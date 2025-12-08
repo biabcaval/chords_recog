@@ -7,6 +7,48 @@ import torch.nn.functional as F
 import numpy as np
 import math
 
+
+def compute_class_weights(train_dataset, num_classes=170, gamma=0.5, w_max=10.0, device=None):
+    """
+    Compute class weights inversely proportional to class frequency.
+    
+    Args:
+        train_dataset: Dataset to compute weights from (must have __getitem__ returning dict with 'chord' key)
+        num_classes: Number of chord classes
+        gamma: Exponent for weight calculation (lower = more smoothing)
+        w_max: Maximum weight cap to prevent extreme weights
+        device: Device to put weights on (defaults to cuda if available)
+    
+    Returns:
+        torch.Tensor: Class weights of shape (num_classes,)
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    class_counts = torch.zeros(num_classes)
+    
+    for i in range(len(train_dataset)):
+        data = train_dataset[i]
+        chords = data['chord']
+        if isinstance(chords, np.ndarray):
+            chords = torch.from_numpy(chords)
+        elif not isinstance(chords, torch.Tensor):
+            chords = torch.tensor(chords)
+        
+        # Count occurrences of each chord class
+        for c in chords.view(-1):
+            if 0 <= c < num_classes:
+                class_counts[c] += 1
+    
+    # Avoid division by zero
+    class_counts = torch.clamp(class_counts, min=1)
+    
+    # Weight inversely proportional to frequency: (N_max / N_class)^gamma
+    N_max = class_counts.max()
+    weights = torch.clamp((N_max / class_counts) ** gamma, max=w_max)
+    
+    return weights.to(device)
+
 def _gen_bias_mask(max_length):
     """
     Generates bias values (-Inf) to mask future timesteps during attention
@@ -56,21 +98,30 @@ class OutputLayer(nn.Module):
     Abstract base class for output layer.
     Handles projection to output labels
     """
-    def __init__(self, hidden_size, output_size, probs_out=False):
+    def __init__(self, hidden_size, output_size, probs_out=False, class_weights=None):
         super(OutputLayer, self).__init__()
         self.output_size = output_size
         self.output_projection = nn.Linear(hidden_size, output_size)
         self.probs_out = probs_out
         self.lstm = nn.LSTM(input_size=hidden_size, hidden_size=int(hidden_size/2), batch_first=True, bidirectional=True)
         self.hidden_size = hidden_size
+        # Register class weights as a buffer (not a parameter, but moves with model)
+        if class_weights is not None:
+            self.register_buffer('class_weights', class_weights)
+        else:
+            self.class_weights = None
 
     def loss(self, hidden, labels):
         raise NotImplementedError('Must implement {}.loss'.format(self.__class__.__name__))
 
+
 class SoftmaxOutputLayer(OutputLayer):
     """
-    Implements a softmax based output layer
+    Implements a softmax based output layer with optional class reweighting.
     """
+    def __init__(self, hidden_size, output_size, probs_out=False, class_weights=None):
+        super(SoftmaxOutputLayer, self).__init__(hidden_size, output_size, probs_out, class_weights)
+
     def forward(self, hidden):
         logits = self.output_projection(hidden)
         probs = F.softmax(logits, -1)
@@ -86,7 +137,7 @@ class SoftmaxOutputLayer(OutputLayer):
     def loss(self, hidden, labels):
         logits = self.output_projection(hidden)
         log_probs = F.log_softmax(logits, -1)
-        return F.nll_loss(log_probs.view(-1, self.output_size), labels.view(-1))
+        return F.nll_loss(log_probs.view(-1, self.output_size), labels.view(-1), weight=self.class_weights)
 
 class MultiHeadAttention(nn.Module):
     """

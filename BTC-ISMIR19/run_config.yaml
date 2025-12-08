@@ -45,6 +45,12 @@ model:
   loss : 'ce'
   probs_out : False
 
+# Class weights for reweighted loss (addresses class imbalance)
+class_weights:
+  enabled: True  # Enable/disable reweighted loss
+  gamma: 0.5     # Exponent for weight calculation: (N_max / N_class)^gamma
+  w_max: 10.0    # Maximum weight cap to prevent extreme weights
+
 path:
   ckpt_path : 'model'
   result_path : '/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/RESULTS'

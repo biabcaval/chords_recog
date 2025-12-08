@@ -25,10 +25,10 @@ device = torch.device("cuda" if use_cuda else "cpu")
 
 # ==== HARDCODED PARAMETERS START ====
 # Set your checkpoint, config, audio directory, save directory, kfold, and voca here!
-CHECKPOINT_PATH = "/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/assets/exp2_btc_billboard_jaah_dj_avan_rwc_voca_curriculum/kfold_2/model_037.pth.tar"  # Path to checkpoint file (or None to use legacy model files)
+CHECKPOINT_PATH = "/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/assets/exp4_btc_jaah_dj_avan_rwc_voca_standard/kfold_2/model_041.pth.tar"  # Path to checkpoint file (or None to use legacy model files)
 CONFIG_PATH = "/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/run_config.yaml"
 AUDIO_DIR = "/home/daniel.melo/datasets/rwc/audio"  # Directory containing audio files to process
-SAVE_DIR = "/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/RESULTS"  # Directory to save .lab and .midi files
+SAVE_DIR = "/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/inferences/inferences_4trainJaahDjavan_testRwc"  # Directory to save .lab and .midi files
 KFOLD_INDEX = 2  # K-fold index for normalization file
 LARGE_VOCA = True  # Use large vocabulary (170 chords) or majmin (25 chords)
 # ==== HARDCODED PARAMETERS END ====

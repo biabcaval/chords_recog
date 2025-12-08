@@ -136,7 +136,7 @@ class bi_directional_self_attention_layers(nn.Module):
         return y, weights_list
 
 class BTC_model(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, class_weights=None):
         super(BTC_model, self).__init__()
 
         self.timestep = config['timestep']
@@ -156,7 +156,12 @@ class BTC_model(nn.Module):
                   config['relu_dropout'])
 
         self.self_attn_layers = bi_directional_self_attention_layers(*params)
-        self.output_layer = SoftmaxOutputLayer(hidden_size=config['hidden_size'], output_size=config['num_chords'], probs_out=config['probs_out'])
+        self.output_layer = SoftmaxOutputLayer(
+            hidden_size=config['hidden_size'], 
+            output_size=config['num_chords'], 
+            probs_out=config['probs_out'],
+            class_weights=class_weights
+        )
 
     def forward(self, x, labels):
         labels = labels.view(-1, self.timestep)
