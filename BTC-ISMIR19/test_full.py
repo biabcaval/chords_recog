@@ -7,8 +7,8 @@ import numpy as np
 from utils import logger
 from utils.hparams import HParams
 from utils.mir_eval_modules import large_voca_score_calculation, root_majmin_score_calculation
-from btc_model import BTC_model
-from audio_dataset import AudioDataset
+from models.btc_model import BTC_model
+from data.audio_dataset import AudioDataset
 
 logger.logging_verbosity(1)
 use_cuda = torch.cuda.is_available()
@@ -16,7 +16,7 @@ device = torch.device("cuda" if use_cuda else "cpu")
 
 # ==== HARDCODED PARAMETERS START ====
 # Set your checkpoint, config, test_dataset, kfold, model_type here!
-CHECKPOINT_PATH = "/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/assets/exp2_btc_billboard_jaah_dj_avan_rwc_voca_curriculum/kfold_2/model_037.pth.tar"  # Example path, change as needed
+CHECKPOINT_PATH = "/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/assets/exp7_btc_bill_robbie_queen_jaah_test_rwcvoca_standard/idx_7_020.pth.tar"  # Example path, change as needed
 CONFIG_PATH = "run_config.yaml"
 TEST_DATASET = "rwc"
 KFOLD_INDEX = 2
@@ -60,7 +60,7 @@ else:
 # Load checkpoint
 if os.path.isfile(CHECKPOINT_PATH):
     checkpoint = torch.load(CHECKPOINT_PATH)
-    model.load_state_dict(checkpoint['model'])
+    model.load_state_dict(checkpoint['model'], strict=False)
     logger.info(f"Loaded checkpoint: {CHECKPOINT_PATH}")
     if 'epoch' in checkpoint:
         logger.info(f"Checkpoint epoch: {checkpoint['epoch']}")
@@ -127,19 +127,21 @@ logger.info("==== Starting testing on %s dataset ====" % TEST_DATASET)
 
 if large_voca:
     score_metrics = ['root', 'thirds', 'triads', 'sevenths', 'tetrads', 'majmin', 'mirex']
-    score_list_dict, song_length_list, average_score_dict = large_voca_score_calculation(
+    score_list_dict, song_length_list, average_score_dict, wcsr_dict = large_voca_score_calculation(
         valid_dataset=test_dataset, config=config, model=model, model_type=MODEL_TYPE, 
         mean=mean, std=std, device=device
     )
     for m in score_metrics:
         logger.info('==== TEST %s score on %s: %.4f' % (m, TEST_DATASET, average_score_dict[m]))
+        logger.info('==== TEST %s WCSR on %s: %.2f%%' % (m, TEST_DATASET, wcsr_dict[m]))
 else:
     score_metrics = ['root', 'majmin']
-    score_list_dict, song_length_list, average_score_dict = root_majmin_score_calculation(
+    score_list_dict, song_length_list, average_score_dict, wcsr_dict = root_majmin_score_calculation(
         valid_dataset=test_dataset, config=config, model=model, model_type=MODEL_TYPE, 
         mean=mean, std=std, device=device
     )
     for m in score_metrics:
         logger.info('==== TEST %s score on %s: %.4f' % (m, TEST_DATASET, average_score_dict[m]))
+        logger.info('==== TEST %s WCSR on %s: %.2f%%' % (m, TEST_DATASET, wcsr_dict[m]))
 
 logger.info("==== Testing completed ====")

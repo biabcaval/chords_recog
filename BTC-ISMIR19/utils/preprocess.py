@@ -31,7 +31,7 @@ class Preprocess():
 
         # Generic dataset support (billboard, jaah, rwc)
         # These datasets follow a standard structure: annotations/ and audio/ directories
-        self.generic_datasets = ['billboard', 'jaah', 'rwc', 'dj_avan']
+        self.generic_datasets = ['billboard', 'jaah', 'rwc', 'dj_avan', 'robbiewilliams', 'queen']
         for dataset_name in self.generic_datasets:
             if dataset_name in self.dataset_names:
                 setattr(self, f'{dataset_name}_directory', self.root_path + f'{dataset_name}/')
@@ -56,13 +56,19 @@ class Preprocess():
         """
         Generic function to find audio file matching a label file.
         Matches by base filename (without extension).
+        Uses case-insensitive matching and normalizes spaces/underscores.
         """
         lab_basename = os.path.splitext(lab_filename)[0]
+        # Normalize: lowercase and replace spaces with underscores
+        lab_normalized = lab_basename.lower().replace(' ', '_')
+        
         for filename in os.listdir(audio_dir):
             audio_basename = os.path.splitext(filename)[0]
             # Check for common audio extensions
             if filename.lower().endswith(('.mp3', '.wav', '.flac', '.m4a')):
-                if audio_basename == lab_basename:
+                # Normalize audio basename the same way
+                audio_normalized = audio_basename.lower().replace(' ', '_')
+                if audio_normalized == lab_normalized:
                     return filename
         return None
 
@@ -213,8 +219,9 @@ class Preprocess():
 
                     last_sec = chord_info.iloc[-1]['end']
                     last_sec_hz = int(last_sec * mp3_config['song_hz'])
+                    skip_interval_samples = int(mp3_config['skip_interval'] * mp3_config['song_hz'])
 
-                    if audio_length + mp3_config['skip_interval'] < last_sec_hz:
+                    if audio_length + skip_interval_samples < last_sec_hz:
                         print('loaded song is too short :', song_name)
                         loop_broken = True
                         j += 1
@@ -389,8 +396,9 @@ class Preprocess():
 
                     last_sec = chord_info.iloc[-1]['end']
                     last_sec_hz = int(last_sec * mp3_config['song_hz'])
+                    skip_interval_samples = int(mp3_config['skip_interval'] * mp3_config['song_hz'])
 
-                    if audio_length + mp3_config['skip_interval'] < last_sec_hz:
+                    if audio_length + skip_interval_samples < last_sec_hz:
                         print('loaded song is too short :', song_name)
                         loop_broken = True
                         j += 1
@@ -409,6 +417,10 @@ class Preprocess():
                         curSec = current_start_second
 
                         chord_list = []
+                        root_list = []
+                        quality_list = []
+                        bass_list = []
+                        
                         # extract chord per 1/self.time_interval
                         while curSec < inst_start_sec + mp3_config['inst_len']:
                             try:
@@ -418,6 +430,9 @@ class Preprocess():
 
                                 if len(available_chords) == 1:
                                     chord = available_chords['chord_id'].iloc[0]
+                                    root = available_chords['root'].iloc[0]
+                                    quality = available_chords['quality'].iloc[0]
+                                    bass = available_chords['bass'].iloc[0]
                                 elif len(available_chords) > 1:
                                     max_starts = available_chords.apply(lambda row: max(row['start'], curSec),axis=1)
                                     available_chords['max_start'] = max_starts
@@ -425,11 +440,21 @@ class Preprocess():
                                     available_chords['min_end'] = min_ends
                                     chords_lengths = available_chords['min_end'] - available_chords['max_start']
                                     available_chords['chord_length'] = chords_lengths
-                                    chord = available_chords.loc[available_chords['chord_length'].idxmax(), 'chord_id']                                
+                                    max_idx = available_chords['chord_length'].idxmax()
+                                    chord = available_chords.loc[max_idx, 'chord_id']
+                                    root = available_chords.loc[max_idx, 'root']
+                                    quality = available_chords.loc[max_idx, 'quality']
+                                    bass = available_chords.loc[max_idx, 'bass']
                                 else:
                                     chord = 169
+                                    root = 12  # No chord
+                                    quality = 14  # No chord quality
+                                    bass = 12  # No bass
                             except Exception as e:
                                 chord = 169
+                                root = 12
+                                quality = 14
+                                bass = 12
                                 print(e)
                                 print(pid, "no chord")
                                 raise RuntimeError()
@@ -438,8 +463,17 @@ class Preprocess():
                                 if chord != 169 and chord != 168:
                                     chord += shift_factor * 14
                                     chord = chord % 168
+                                
+                                # Apply pitch shifting to root and bass (not quality)
+                                if root != 12:  # If not "no chord"
+                                    root = (root + shift_factor) % 12
+                                if bass != 12:  # If not "no bass"
+                                    bass = (bass + shift_factor) % 12
 
                                 chord_list.append(chord)
+                                root_list.append(root)
+                                quality_list.append(quality)
+                                bass_list.append(bass)
                                 curSec += self.time_interval
 
                         if len(chord_list) == self.no_of_chord_datapoints_per_sequence:
@@ -483,6 +517,9 @@ class Preprocess():
                                     result = {
                                         'feature': feature,
                                         'chord': chord_list,
+                                        'root': root_list,
+                                        'quality': quality_list,
+                                        'bass': bass_list,
                                         'etc': etc
                                     }
 

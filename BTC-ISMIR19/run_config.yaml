@@ -44,6 +44,21 @@ model:
   filter_size : 128
   loss : 'ce'
   probs_out : False
+  
+  # Structured output settings (ChordFormer approach)
+  use_structured_output : False  # Set to True to use structured output
+  num_roots : 13  # 12 pitches + no chord
+  num_qualities : 16  # 14 qualities + no chord + unknown
+  num_bass : 13  # 12 pitches + no bass
+  root_weight : 1.0  # Global weight for root loss component
+  quality_weight : 1.0  # Global weight for quality loss component
+  bass_weight : 1.0  # Global weight for bass loss component
+  
+  # Conformer-specific settings (ChordFormer architecture)
+  # These are only used when model='chordformer'
+  conv_kernel_size : 31  # Kernel size for depthwise conv in Conformer (default: 31)
+  ff_expansion_factor : 4  # Expansion factor for feed-forward layers
+  conv_expansion_factor : 2  # Expansion factor for conv module
 
 # Class weights for reweighted loss (addresses class imbalance)
 class_weights:

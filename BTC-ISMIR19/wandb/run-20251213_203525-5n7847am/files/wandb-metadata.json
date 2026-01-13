@@ -1,0 +1,62 @@
+{
+  "os":  "Linux-6.8.0-1044-gcp-x86_64-with-glibc2.35",
+  "python":  "CPython 3.10.19",
+  "startedAt":  "2025-12-13T20:35:25.272642Z",
+  "args":  [
+    "--index",
+    "8",
+    "--kfold",
+    "0",
+    "--model",
+    "btc",
+    "--dataset1",
+    "queen",
+    "--dataset2",
+    "robbiewilliams",
+    "--dataset3",
+    "billboard",
+    "--dataset4",
+    "jaah",
+    "--dataset5",
+    "rwc",
+    "--test_dataset",
+    "djavan",
+    "--voca",
+    "--early_stop"
+  ],
+  "program":  "/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/train_curriculum.py",
+  "codePath":  "BTC-ISMIR19/train_curriculum.py",
+  "codePathLocal":  "train_curriculum.py",
+  "git":  {
+    "remote":  "https://github.com/biabcaval/chords_recog.git",
+    "commit":  "6d8efe0ca48f589c164b3a11f5119ab49a402768"
+  },
+  "email":  "biabcaval@gmail.com",
+  "root":  "/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19",
+  "host":  "daniel-chords-machine",
+  "executable":  "/home/daniel.melo/miniconda3/envs/BTC_py310/bin/python",
+  "cpu_count":  8,
+  "cpu_count_logical":  16,
+  "gpu":  "Tesla T4",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "2081087713280",
+      "used":  "228575264768"
+    }
+  },
+  "memory":  {
+    "total":  "33649221632"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "Tesla T4",
+      "memoryTotal":  "16106127360",
+      "cudaCores":  2560,
+      "architecture":  "Turing",
+      "uuid":  "GPU-361d841b-b1a5-5879-9c82-0f9c5d9953ab"
+    }
+  ],
+  "cudaVersion":  "12.4",
+  "writerId":  "zmjubevmyy2of03wu949yxcpkml12l9r"
+}

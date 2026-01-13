@@ -1,0 +1,132 @@
+_wandb:
+    value:
+        cli_version: 0.22.3
+        e:
+            zmjubevmyy2of03wu949yxcpkml12l9r:
+                args:
+                    - --index
+                    - "8"
+                    - --kfold
+                    - "0"
+                    - --model
+                    - btc
+                    - --dataset1
+                    - queen
+                    - --dataset2
+                    - robbiewilliams
+                    - --dataset3
+                    - billboard
+                    - --dataset4
+                    - jaah
+                    - --dataset5
+                    - rwc
+                    - --test_dataset
+                    - djavan
+                    - --voca
+                    - --early_stop
+                codePath: BTC-ISMIR19/train_curriculum.py
+                codePathLocal: train_curriculum.py
+                cpu_count: 8
+                cpu_count_logical: 16
+                cudaVersion: "12.4"
+                disk:
+                    /:
+                        total: "2081087713280"
+                        used: "228575264768"
+                email: biabcaval@gmail.com
+                executable: /home/daniel.melo/miniconda3/envs/BTC_py310/bin/python
+                git:
+                    commit: 6d8efe0ca48f589c164b3a11f5119ab49a402768
+                    remote: https://github.com/biabcaval/chords_recog.git
+                gpu: Tesla T4
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Turing
+                      cudaCores: 2560
+                      memoryTotal: "16106127360"
+                      name: Tesla T4
+                      uuid: GPU-361d841b-b1a5-5879-9c82-0f9c5d9953ab
+                host: daniel-chords-machine
+                memory:
+                    total: "33649221632"
+                os: Linux-6.8.0-1044-gcp-x86_64-with-glibc2.35
+                program: /home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/train_curriculum.py
+                python: CPython 3.10.19
+                root: /home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19
+                startedAt: "2025-12-13T20:35:25.272642Z"
+                writerId: zmjubevmyy2of03wu949yxcpkml12l9r
+        m: []
+        python_version: 3.10.19
+        t:
+            "1":
+                - 1
+                - 2
+                - 3
+                - 5
+                - 53
+                - 105
+            "2":
+                - 1
+                - 2
+                - 3
+                - 5
+                - 53
+                - 105
+            "3":
+                - 13
+                - 15
+                - 16
+            "4": 3.10.19
+            "5": 0.22.3
+            "12": 0.22.3
+            "13": linux-x86_64
+batch_size:
+    value: 128
+class_weights_enabled:
+    value: true
+class_weights_gamma:
+    value: 0.5
+class_weights_w_max:
+    value: 10
+curriculum:
+    value: false
+curriculum_pace_epochs:
+    value: 30
+curriculum_pacing:
+    value: linear
+curriculum_start_ratio:
+    value: 0.3
+curriculum_strategy:
+    value: mixed
+dataset1:
+    value: queen
+dataset2:
+    value: robbiewilliams
+dataset3:
+    value: billboard
+dataset4:
+    value: jaah
+dataset5:
+    value: rwc
+early_stop:
+    value: true
+experiment_index:
+    value: 8
+kfold:
+    value: 0
+large_voca:
+    value: true
+learning_rate:
+    value: 0.0001
+max_epoch:
+    value: 100
+model:
+    value: btc
+num_chords:
+    value: 170
+restore_epoch:
+    value: 1000
+test_dataset:
+    value: djavan
+voca:
+    value: true

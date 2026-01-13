@@ -89,7 +89,8 @@ class Chords:
             'min11': self.interval_list('(1,b3,5,b7,9,11)'),
             '13': self.interval_list('(1,3,5,b7,13)'),
             'maj13': self.interval_list('(1,3,5,7,13)'),
-            'min13': self.interval_list('(1,b3,5,b7,13)')
+            'min13': self.interval_list('(1,b3,5,b7,13)'),
+            'pedal': self.interval_list('(1,5)'),  # Pedal tone - treated as power chord (root + fifth)
         }
 
     def chords(self, labels):
@@ -122,6 +123,9 @@ class Chords:
         return crds
 
     def label_error_modify(self, label):
+        # Handle pedal chords - keep as pedal (now supported in shorthands)
+        if ':pedal' in label:
+            return label  # pedal is now in shorthands
         if label == 'Emin/4': label = 'E:min/4'
         elif label == 'A7/3': label = 'A:7/3'
         elif label == 'Bb7/3': label = 'Bb:7/3'
@@ -465,6 +469,35 @@ class Chords:
         df['chord_id'] = df.apply(lambda row: self.convert_to_id(row['root'], row['is_major']), axis=1)
         return df
 
+    def quality_to_id(self, quality):
+        """
+        Convert quality string to quality ID for structured output.
+        
+        Returns:
+            int: Quality ID (0-14), where 14 is for 'N' (no chord) and 15 is for unknown
+        """
+        quality_map = {
+            'min': 0,
+            'maj': 1,
+            'dim': 2,
+            'aug': 3,
+            'min6': 4,
+            'maj6': 5,
+            'min7': 6,
+            'minmaj7': 7,
+            'maj7': 8,
+            '7': 9,
+            'dim7': 10,
+            'hdim7': 11,
+            'sus2': 12,
+            'sus4': 13,
+            'pedal': 1,  # Pedal/power chords -> major
+            '5': 1,      # Power chord -> major
+            '1': 1,      # Single note -> major
+            'N': 14,     # No chord
+        }
+        return quality_map.get(quality, 15)  # 15 for unknown
+    
     def convert_to_id_voca(self, root, quality):
         if root == -1:
             return 169
@@ -497,6 +530,9 @@ class Chords:
                 return root * 14 + 12
             elif quality == 'sus4':
                 return root * 14 + 13
+            elif quality == 'pedal' or quality == '5' or quality == '1':
+                # Pedal/power chords - map to major chord of same root
+                return root * 14 + 1
             else:
                 return 168
 
@@ -508,11 +544,35 @@ class Chords:
         (ref_intervals, ref_labels) = mir_eval.io.load_labeled_intervals(filename)
         ref_labels = self.lab_file_error_modify(ref_labels)
         idxs = list()
+        roots = list()
+        qualities = list()
+        basses = list()
+        
         for i in ref_labels:
             chord_root, quality, scale_degrees, bass = mir_eval.chord.split(i, reduce_extended_chords=True)
-            root, bass, ivs, is_major = self.chord(i)
+            root, bass_note, ivs, is_major = self.chord(i)
+            
+            # Convert to IDs for structured output
             idxs.append(self.convert_to_id_voca(root=root, quality=quality))
+            
+            # Store structured components
+            # Root: 0-11 for pitches, 12 for no chord
+            roots.append(root if root != -1 else 12)
+            
+            # Quality: use quality_to_id mapping
+            qualities.append(self.quality_to_id(quality))
+            
+            # Bass: 0-11 for pitches relative to root, 12 for no bass/same as root
+            # bass_note from self.chord() is the interval from root (0-11)
+            if root == -1:
+                basses.append(12)  # No chord -> no bass
+            else:
+                basses.append(bass_note)  # Bass interval from root (0-11)
+        
         df['chord_id'] = idxs
+        df['root'] = roots
+        df['quality'] = qualities
+        df['bass'] = basses
 
         df['start'] = loaded_chord['start']
         df['end'] = loaded_chord['end']
@@ -521,7 +581,10 @@ class Chords:
 
     def lab_file_error_modify(self, ref_labels):
         for i in range(len(ref_labels)):
-            if ref_labels[i][-2:] == ':4':
+            # Handle pedal chords - convert to major chord (mir_eval doesn't recognize pedal)
+            if ':pedal' in ref_labels[i]:
+                ref_labels[i] = ref_labels[i].replace(':pedal', ':maj')
+            elif ref_labels[i][-2:] == ':4':
                 ref_labels[i] = ref_labels[i].replace(':4', ':sus4')
             elif ref_labels[i][-2:] == ':6':
                 ref_labels[i] = ref_labels[i].replace(':6', ':maj6')

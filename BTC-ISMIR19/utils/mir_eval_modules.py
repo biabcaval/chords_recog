@@ -10,6 +10,69 @@ idx2chord = ['C', 'C:min', 'C#', 'C#:min', 'D', 'D:min', 'D#', 'D#:min', 'E', 'E
 root_list = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 quality_list = ['min', 'maj', 'dim', 'aug', 'min6', 'maj6', 'min7', 'minmaj7', 'maj7', '7', 'dim7', 'hdim7', 'sus2', 'sus4']
 
+
+def compute_wcsr(correct_durations, total_durations):
+    """
+    Compute Weighted Chord Symbol Recall (WCSR) across all songs.
+    
+    WCSR = (Σ zi / Σ Zi) × 100
+    
+    Args:
+        correct_durations: List of correctly predicted durations (zi) for each song
+        total_durations: List of total durations (Zi) for each song
+    
+    Returns:
+        float: WCSR score (0-100)
+    """
+    correct_durations = np.array(correct_durations)
+    total_durations = np.array(total_durations)
+    
+    sum_correct = np.sum(correct_durations)
+    sum_total = np.sum(total_durations)
+    
+    if sum_total == 0:
+        return 0.0
+    
+    wcsr = (sum_correct / sum_total) * 100
+    return wcsr
+
+
+def get_song_durations(gt_path, est_path, comparison_func):
+    """
+    Compute correctly predicted duration (zi) and total duration (Zi) for a single song.
+    
+    Args:
+        gt_path: Path to ground truth .lab file
+        est_path: Path to estimated .lab file
+        comparison_func: mir_eval comparison function (e.g., mir_eval.chord.root, mir_eval.chord.majmin)
+    
+    Returns:
+        tuple: (correct_duration, total_duration)
+    """
+    (ref_intervals, ref_labels) = mir_eval.io.load_labeled_intervals(gt_path)
+    ref_labels = lab_file_error_modify(ref_labels)
+    (est_intervals, est_labels) = mir_eval.io.load_labeled_intervals(est_path)
+    
+    est_intervals, est_labels = mir_eval.util.adjust_intervals(
+        est_intervals, est_labels, 
+        ref_intervals.min(), ref_intervals.max(), 
+        mir_eval.chord.NO_CHORD, mir_eval.chord.NO_CHORD
+    )
+    
+    (intervals, ref_labels, est_labels) = mir_eval.util.merge_labeled_intervals(
+        ref_intervals, ref_labels, est_intervals, est_labels
+    )
+    
+    durations = mir_eval.util.intervals_to_durations(intervals)
+    comparisons = comparison_func(ref_labels, est_labels)
+    
+    # zi: sum of durations where comparison is True (correct predictions)
+    correct_duration = np.sum(durations * comparisons)
+    # Zi: total duration of the song
+    total_duration = np.sum(durations)
+    
+    return correct_duration, total_duration
+
 def idx2voca_chord():
     idx2voca_chord = {}
     idx2voca_chord[169] = 'N'
@@ -55,8 +118,15 @@ class metrics():
         super(metrics, self).__init__()
         self.score_metrics = ['root', 'thirds', 'triads', 'sevenths', 'tetrads', 'majmin', 'mirex']
         self.score_list_dict = dict()
+        # Track correct and total durations for WCSR computation
+        self.correct_durations_dict = dict()
+        self.total_durations_dict = dict()
+        self.wcsr_dict = dict()
+        
         for i in self.score_metrics:
             self.score_list_dict[i] = list()
+            self.correct_durations_dict[i] = list()
+            self.total_durations_dict[i] = list()
         self.average_score = dict()
 
     def score(self, metric, gt_path, est_path):
@@ -77,6 +147,38 @@ class metrics():
         else:
             raise NotImplementedError
         return score
+    
+    def score_with_durations(self, metric, gt_path, est_path):
+        """
+        Compute score and return both score and duration info for WCSR.
+        
+        Returns:
+            tuple: (score, correct_duration, total_duration)
+        """
+        comparison_func = self._get_comparison_func(metric)
+        correct_dur, total_dur = get_song_durations(gt_path, est_path, comparison_func)
+        score = correct_dur / total_dur if total_dur > 0 else 0.0
+        return score, correct_dur, total_dur
+    
+    def _get_comparison_func(self, metric):
+        """Get the mir_eval comparison function for a given metric."""
+        func_map = {
+            'root': mir_eval.chord.root,
+            'thirds': mir_eval.chord.thirds,
+            'triads': mir_eval.chord.triads,
+            'sevenths': mir_eval.chord.sevenths,
+            'tetrads': mir_eval.chord.tetrads,
+            'majmin': mir_eval.chord.majmin,
+            'mirex': mir_eval.chord.mirex,
+        }
+        return func_map[metric]
+    
+    def compute_wcsr(self, metric):
+        """Compute WCSR for a specific metric using accumulated durations."""
+        return compute_wcsr(
+            self.correct_durations_dict[metric],
+            self.total_durations_dict[metric]
+        )
 
     def root_score(self, gt_path, est_path):
         (ref_intervals, ref_labels) = mir_eval.io.load_labeled_intervals(gt_path)
@@ -199,6 +301,8 @@ def lab_file_error_modify(ref_labels):
 
 def root_majmin_score_calculation(valid_dataset, config, mean, std, device, model, model_type, verbose=False):
     valid_song_names = valid_dataset.song_names
+    # Normalize valid song names for comparison (lowercase, replace spaces with underscores)
+    valid_song_names_normalized = {name.lower().replace(' ', '_'): name for name in valid_song_names}
     paths = valid_dataset.preprocessor.get_all_files()
 
     metrics_ = metrics()
@@ -207,7 +311,9 @@ def root_majmin_score_calculation(valid_dataset, config, mean, std, device, mode
     
     for path in paths:
         song_name, lab_file_path, mp3_file_path, _ = path
-        if not song_name in valid_song_names:
+        # Normalize song_name for comparison
+        song_name_normalized = song_name.lower().replace(' ', '_')
+        if song_name_normalized not in valid_song_names_normalized:
             continue
         try:
             n_timestep = config.model['timestep']
@@ -230,6 +336,56 @@ def root_majmin_score_calculation(valid_dataset, config, mean, std, device, mode
                         encoder_output, _ = model.self_attn_layers(feature[:, n_timestep * t:n_timestep * (t + 1), :])
                         prediction, _ = model.output_layer(encoder_output)
                         prediction = prediction.squeeze()
+                    elif model_type == 'btc_structured':
+                        # Handle structured output model for small vocabulary
+                        chunk = feature[:, n_timestep * t:n_timestep * (t + 1), :]
+                        encoder_output, _ = model.self_attn_layers(chunk)
+                        root_pred, quality_pred, bass_pred, _, _, _ = model.output_layer(encoder_output)
+                        root_pred = root_pred.squeeze()  # [n_timestep]
+                        quality_pred = quality_pred.squeeze()  # [n_timestep]
+                        
+                        # Convert to small vocabulary indices (25 classes)
+                        # idx2chord: C, C:min, C#, C#:min, ..., B, B:min, N
+                        # So for root r: major = r*2, minor = r*2+1, N = 24
+                        prediction = torch.zeros_like(root_pred)
+                        for idx in range(len(root_pred)):
+                            r, q = root_pred[idx].item(), quality_pred[idx].item()
+                            if r == 12 or q == 14:  # No chord
+                                prediction[idx] = 24
+                            elif q == 0:  # min
+                                prediction[idx] = r * 2 + 1
+                            elif q == 1:  # maj
+                                prediction[idx] = r * 2
+                            else:
+                                # Other qualities -> map to major/minor based on quality
+                                # Qualities 0,4,6,7 are minor-like; 1,3,5,8,9 are major-like
+                                if q in [0, 4, 6, 7, 10, 11]:  # min, min6, min7, minmaj7, dim7, hdim7
+                                    prediction[idx] = r * 2 + 1
+                                else:  # maj, aug, maj6, maj7, 7, sus2, sus4, dim
+                                    prediction[idx] = r * 2
+                    elif model_type == 'chordformer':
+                        # Handle ChordFormer model for small vocabulary
+                        chunk = feature[:, n_timestep * t:n_timestep * (t + 1), :]
+                        encoder_output, _ = model.conformer_encoder(chunk)
+                        root_pred, quality_pred, bass_pred, _, _, _ = model.output_layer(encoder_output)
+                        root_pred = root_pred.squeeze()  # [n_timestep]
+                        quality_pred = quality_pred.squeeze()  # [n_timestep]
+                        
+                        # Convert to small vocabulary indices (25 classes)
+                        prediction = torch.zeros_like(root_pred)
+                        for idx in range(len(root_pred)):
+                            r, q = root_pred[idx].item(), quality_pred[idx].item()
+                            if r == 12 or q == 14:  # No chord
+                                prediction[idx] = 24
+                            elif q == 0:  # min
+                                prediction[idx] = r * 2 + 1
+                            elif q == 1:  # maj
+                                prediction[idx] = r * 2
+                            else:
+                                if q in [0, 4, 6, 7, 10, 11]:  # min-like qualities
+                                    prediction[idx] = r * 2 + 1
+                                else:  # maj-like qualities
+                                    prediction[idx] = r * 2
                     elif model_type == 'cnn' or model_type =='crnn':
                         prediction, _, _, _ = model(feature[:, n_timestep * t:n_timestep * (t + 1), :], torch.randint(config.model['num_chords'], (n_timestep,)).to(device))
                     for i in range(n_timestep):
@@ -254,8 +410,15 @@ def root_majmin_score_calculation(valid_dataset, config, mean, std, device, mode
                 for line in lines:
                     f.write(line)
 
+            # Use score_with_durations to track WCSR components
             for m in root_majmin:
-                metrics_.score_list_dict[m].append(metrics_.score(metric=m, gt_path=lab_file_path, est_path=tmp_path))
+                score, correct_dur, total_dur = metrics_.score_with_durations(
+                    metric=m, gt_path=lab_file_path, est_path=tmp_path
+                )
+                metrics_.score_list_dict[m].append(score)
+                metrics_.correct_durations_dict[m].append(correct_dur)
+                metrics_.total_durations_dict[m].append(total_dur)
+            
             song_length_list.append(song_length_second)
             if verbose:
                 for m in root_majmin:
@@ -273,18 +436,26 @@ def root_majmin_score_calculation(valid_dataset, config, mean, std, device, mode
     tmp = song_length_list / np.sum(song_length_list)
     for m in root_majmin:
         metrics_.average_score[m] = np.sum(np.multiply(metrics_.score_list_dict[m], tmp))
+        # Compute WCSR for this metric
+        metrics_.wcsr_dict[m] = metrics_.compute_wcsr(m)
 
-    return metrics_.score_list_dict, song_length_list, metrics_.average_score
+    return metrics_.score_list_dict, song_length_list, metrics_.average_score, metrics_.wcsr_dict
 
 def root_majmin_score_calculation_crf(valid_dataset, config, mean, std, device, pre_model, model, model_type, verbose=False):
     valid_song_names = valid_dataset.song_names
+    # Normalize valid song names for comparison (lowercase, replace spaces with underscores)
+    valid_song_names_normalized = {name.lower().replace(' ', '_'): name for name in valid_song_names}
     paths = valid_dataset.preprocessor.get_all_files()
 
     metrics_ = metrics()
     song_length_list = list()
+    root_majmin = ['root', 'majmin']
+    
     for path in paths:
         song_name, lab_file_path, mp3_file_path, _ = path
-        if not song_name in valid_song_names:
+        # Normalize song_name for comparison
+        song_name_normalized = song_name.lower().replace(' ', '_')
+        if song_name_normalized not in valid_song_names_normalized:
             continue
         try:
             n_timestep = config.model['timestep']
@@ -330,9 +501,15 @@ def root_majmin_score_calculation_crf(valid_dataset, config, mean, std, device, 
                 for line in lines:
                     f.write(line)
 
-            root_majmin = ['root', 'majmin']
+            # Use score_with_durations to track WCSR components
             for m in root_majmin:
-                metrics_.score_list_dict[m].append(metrics_.score(metric=m, gt_path=lab_file_path, est_path=tmp_path))
+                score, correct_dur, total_dur = metrics_.score_with_durations(
+                    metric=m, gt_path=lab_file_path, est_path=tmp_path
+                )
+                metrics_.score_list_dict[m].append(score)
+                metrics_.correct_durations_dict[m].append(correct_dur)
+                metrics_.total_durations_dict[m].append(total_dur)
+            
             song_length_list.append(song_length_second)
             if verbose:
                 for m in root_majmin:
@@ -340,16 +517,21 @@ def root_majmin_score_calculation_crf(valid_dataset, config, mean, std, device, 
         except:
             print('song name %s\' lab file error' % song_name)
 
+    song_length_list = np.array(song_length_list)
     tmp = song_length_list / np.sum(song_length_list)
     for m in root_majmin:
         metrics_.average_score[m] = np.sum(np.multiply(metrics_.score_list_dict[m], tmp))
+        # Compute WCSR for this metric
+        metrics_.wcsr_dict[m] = metrics_.compute_wcsr(m)
 
-    return metrics_.score_list_dict, song_length_list, metrics_.average_score
+    return metrics_.score_list_dict, song_length_list, metrics_.average_score, metrics_.wcsr_dict
 
 
 def large_voca_score_calculation(valid_dataset, config, mean, std, device, model, model_type, verbose=False):
     idx2voca = idx2voca_chord()
     valid_song_names = valid_dataset.song_names
+    # Normalize valid song names for comparison (lowercase, replace spaces with underscores)
+    valid_song_names_normalized = {name.lower().replace(' ', '_'): name for name in valid_song_names}
     paths = valid_dataset.preprocessor.get_all_files()
 
     metrics_ = metrics()
@@ -357,7 +539,9 @@ def large_voca_score_calculation(valid_dataset, config, mean, std, device, model
     
     for path in paths:
         song_name, lab_file_path, mp3_file_path, _ = path
-        if not song_name in valid_song_names:
+        # Normalize song_name for comparison
+        song_name_normalized = song_name.lower().replace(' ', '_')
+        if song_name_normalized not in valid_song_names_normalized:
             continue
         try:
             n_timestep = config.model['timestep']
@@ -380,6 +564,42 @@ def large_voca_score_calculation(valid_dataset, config, mean, std, device, model
                         encoder_output, _ = model.self_attn_layers(feature[:, n_timestep * t:n_timestep * (t + 1), :])
                         prediction, _ = model.output_layer(encoder_output)
                         prediction = prediction.squeeze()
+                    elif model_type == 'btc_structured':
+                        # Handle structured output model - use self_attn_layers and output_layer directly
+                        chunk = feature[:, n_timestep * t:n_timestep * (t + 1), :]
+                        encoder_output, _ = model.self_attn_layers(chunk)
+                        # Get predictions from structured output layer
+                        root_pred, quality_pred, bass_pred, _, _, _ = model.output_layer(encoder_output)
+                        root_pred = root_pred.squeeze()  # [n_timestep]
+                        quality_pred = quality_pred.squeeze()  # [n_timestep]
+                        
+                        # Convert structured predictions to chord indices (vectorized)
+                        # root 12 = no chord (N), quality 14 = no chord, quality 15 = unknown (X)
+                        prediction = root_pred * 14 + quality_pred  # Base conversion
+                        # Handle no chord: root == 12 or quality == 14
+                        no_chord_mask = (root_pred == 12) | (quality_pred == 14)
+                        prediction[no_chord_mask] = 169
+                        # Handle unknown: quality == 15
+                        unknown_mask = (quality_pred == 15) & ~no_chord_mask
+                        prediction[unknown_mask] = 168
+                    elif model_type == 'chordformer':
+                        # Handle ChordFormer model - uses conformer_encoder instead of self_attn_layers
+                        chunk = feature[:, n_timestep * t:n_timestep * (t + 1), :]
+                        encoder_output, _ = model.conformer_encoder(chunk)
+                        # Get predictions from structured output layer
+                        root_pred, quality_pred, bass_pred, _, _, _ = model.output_layer(encoder_output)
+                        root_pred = root_pred.squeeze()  # [n_timestep]
+                        quality_pred = quality_pred.squeeze()  # [n_timestep]
+                        
+                        # Convert structured predictions to chord indices (vectorized)
+                        # root 12 = no chord (N), quality 14 = no chord, quality 15 = unknown (X)
+                        prediction = root_pred * 14 + quality_pred  # Base conversion
+                        # Handle no chord: root == 12 or quality == 14
+                        no_chord_mask = (root_pred == 12) | (quality_pred == 14)
+                        prediction[no_chord_mask] = 169
+                        # Handle unknown: quality == 15
+                        unknown_mask = (quality_pred == 15) & ~no_chord_mask
+                        prediction[unknown_mask] = 168
                     elif model_type == 'cnn' or model_type =='crnn':
                         prediction, _, _, _ = model(feature[:, n_timestep * t:n_timestep * (t + 1), :], torch.randint(config.model['num_chords'], (n_timestep,)).to(device))
                     for i in range(n_timestep):
@@ -404,8 +624,15 @@ def large_voca_score_calculation(valid_dataset, config, mean, std, device, model
                 for line in lines:
                     f.write(line)
 
+            # Use score_with_durations to track WCSR components
             for m in metrics_.score_metrics:
-                metrics_.score_list_dict[m].append(metrics_.score(metric=m, gt_path=lab_file_path, est_path=tmp_path))
+                score, correct_dur, total_dur = metrics_.score_with_durations(
+                    metric=m, gt_path=lab_file_path, est_path=tmp_path
+                )
+                metrics_.score_list_dict[m].append(score)
+                metrics_.correct_durations_dict[m].append(correct_dur)
+                metrics_.total_durations_dict[m].append(total_dur)
+            
             song_length_list.append(song_length_second)
             if verbose:
                 for m in metrics_.score_metrics:
@@ -416,26 +643,32 @@ def large_voca_score_calculation(valid_dataset, config, mean, std, device, model
     # Check if we have any successful songs
     if len(song_length_list) == 0:
         print("WARNING: No songs were successfully processed!")
-        # Return empty results
-        return metrics_.score_list_dict, [], metrics_.average_score
+        # Return empty results (4 values to match expected return)
+        return metrics_.score_list_dict, [], metrics_.average_score, {}
     
     song_length_list = np.array(song_length_list)
     tmp = song_length_list / np.sum(song_length_list)
     for m in metrics_.score_metrics:
         metrics_.average_score[m] = np.sum(np.multiply(metrics_.score_list_dict[m], tmp))
+        # Compute WCSR for this metric
+        metrics_.wcsr_dict[m] = metrics_.compute_wcsr(m)
 
-    return metrics_.score_list_dict, song_length_list, metrics_.average_score
+    return metrics_.score_list_dict, song_length_list, metrics_.average_score, metrics_.wcsr_dict
 
 def large_voca_score_calculation_crf(valid_dataset, config, mean, std, device, pre_model, model, model_type, verbose=False):
     idx2voca = idx2voca_chord()
     valid_song_names = valid_dataset.song_names
+    # Normalize valid song names for comparison (lowercase, replace spaces with underscores)
+    valid_song_names_normalized = {name.lower().replace(' ', '_'): name for name in valid_song_names}
     paths = valid_dataset.preprocessor.get_all_files()
 
     metrics_ = metrics()
     song_length_list = list()
     for path in paths:
         song_name, lab_file_path, mp3_file_path, _ = path
-        if not song_name in valid_song_names:
+        # Normalize song_name for comparison
+        song_name_normalized = song_name.lower().replace(' ', '_')
+        if song_name_normalized not in valid_song_names_normalized:
             continue
         try:
             n_timestep = config.model['timestep']
@@ -481,8 +714,15 @@ def large_voca_score_calculation_crf(valid_dataset, config, mean, std, device, p
                 for line in lines:
                     f.write(line)
 
+            # Use score_with_durations to track WCSR components
             for m in metrics_.score_metrics:
-                metrics_.score_list_dict[m].append(metrics_.score(metric=m, gt_path=lab_file_path, est_path=tmp_path))
+                score, correct_dur, total_dur = metrics_.score_with_durations(
+                    metric=m, gt_path=lab_file_path, est_path=tmp_path
+                )
+                metrics_.score_list_dict[m].append(score)
+                metrics_.correct_durations_dict[m].append(correct_dur)
+                metrics_.total_durations_dict[m].append(total_dur)
+            
             song_length_list.append(song_length_second)
             if verbose:
                 for m in metrics_.score_metrics:
@@ -490,8 +730,11 @@ def large_voca_score_calculation_crf(valid_dataset, config, mean, std, device, p
         except:
             print('song name %s\' lab file error' % song_name)
 
+    song_length_list = np.array(song_length_list)
     tmp = song_length_list / np.sum(song_length_list)
     for m in metrics_.score_metrics:
         metrics_.average_score[m] = np.sum(np.multiply(metrics_.score_list_dict[m], tmp))
+        # Compute WCSR for this metric
+        metrics_.wcsr_dict[m] = metrics_.compute_wcsr(m)
 
-    return metrics_.score_list_dict, song_length_list, metrics_.average_score
+    return metrics_.score_list_dict, song_length_list, metrics_.average_score, metrics_.wcsr_dict

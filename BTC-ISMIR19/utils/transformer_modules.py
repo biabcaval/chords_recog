@@ -49,6 +49,86 @@ def compute_class_weights(train_dataset, num_classes=170, gamma=0.5, w_max=10.0,
     
     return weights.to(device)
 
+
+def compute_structured_class_weights(train_dataset, num_roots=13, num_qualities=16, num_bass=13,
+                                      gamma=0.5, w_max=10.0, device=None):
+    """
+    Compute per-class weights for structured output (Root, Quality, Bass).
+    
+    This function calculates class weights inversely proportional to frequency
+    for each component separately, following the ChordFormer reweighted loss approach.
+    
+    Args:
+        train_dataset: Dataset with 'root', 'quality', 'bass' keys
+        num_roots: Number of root classes (12 pitches + no chord = 13)
+        num_qualities: Number of quality classes (14 qualities + no chord + unknown = 16)
+        num_bass: Number of bass classes (12 pitches + no bass = 13)
+        gamma: Exponent for weight calculation (lower = more smoothing)
+        w_max: Maximum weight cap to prevent extreme weights
+        device: Device to put weights on
+    
+    Returns:
+        tuple: (root_weights, quality_weights, bass_weights) - each tensor of respective shape
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    root_counts = torch.zeros(num_roots)
+    quality_counts = torch.zeros(num_qualities)
+    bass_counts = torch.zeros(num_bass)
+    
+    for i in range(len(train_dataset)):
+        data = train_dataset[i]
+        
+        # Get structured labels if available
+        if 'root' in data and 'quality' in data and 'bass' in data:
+            roots = data['root']
+            qualities = data['quality']
+            basses = data['bass']
+            
+            # Convert to tensors if needed
+            if isinstance(roots, np.ndarray):
+                roots = torch.from_numpy(roots)
+            elif not isinstance(roots, torch.Tensor):
+                roots = torch.tensor(roots)
+                
+            if isinstance(qualities, np.ndarray):
+                qualities = torch.from_numpy(qualities)
+            elif not isinstance(qualities, torch.Tensor):
+                qualities = torch.tensor(qualities)
+                
+            if isinstance(basses, np.ndarray):
+                basses = torch.from_numpy(basses)
+            elif not isinstance(basses, torch.Tensor):
+                basses = torch.tensor(basses)
+            
+            # Count occurrences
+            for r in roots.view(-1):
+                if 0 <= r < num_roots:
+                    root_counts[r] += 1
+            for q in qualities.view(-1):
+                if 0 <= q < num_qualities:
+                    quality_counts[q] += 1
+            for b in basses.view(-1):
+                if 0 <= b < num_bass:
+                    bass_counts[b] += 1
+    
+    # Check if we found structured data
+    if root_counts.sum() == 0:
+        return None, None, None
+    
+    # Avoid division by zero
+    root_counts = torch.clamp(root_counts, min=1)
+    quality_counts = torch.clamp(quality_counts, min=1)
+    bass_counts = torch.clamp(bass_counts, min=1)
+    
+    # Weight inversely proportional to frequency: (N_max / N_class)^gamma
+    root_weights = torch.clamp((root_counts.max() / root_counts) ** gamma, max=w_max)
+    quality_weights = torch.clamp((quality_counts.max() / quality_counts) ** gamma, max=w_max)
+    bass_weights = torch.clamp((bass_counts.max() / bass_counts) ** gamma, max=w_max)
+    
+    return root_weights.to(device), quality_weights.to(device), bass_weights.to(device)
+
 def _gen_bias_mask(max_length):
     """
     Generates bias values (-Inf) to mask future timesteps during attention
@@ -138,6 +218,154 @@ class SoftmaxOutputLayer(OutputLayer):
         logits = self.output_projection(hidden)
         log_probs = F.log_softmax(logits, -1)
         return F.nll_loss(log_probs.view(-1, self.output_size), labels.view(-1), weight=self.class_weights)
+
+
+class StructuredOutputLayer(nn.Module):
+    """
+    Implements structured output layer for chord recognition with separate heads for Root, Quality, and Bass.
+    This follows the ChordFormer approach of layered classification with per-class reweighting.
+    """
+    def __init__(self, hidden_size, num_roots=13, num_qualities=16, num_bass=13, 
+                 probs_out=False, root_weight=1.0, quality_weight=1.0, bass_weight=1.0,
+                 root_class_weights=None, quality_class_weights=None, bass_class_weights=None):
+        """
+        Args:
+            hidden_size: Size of hidden representation
+            num_roots: Number of root classes (12 pitches + no chord = 13)
+            num_qualities: Number of quality classes (14 qualities + no chord + unknown = 16)
+            num_bass: Number of bass classes (12 pitches + no bass = 13)
+            probs_out: If True, return logits instead of predictions
+            root_weight: Global weight for root loss component
+            quality_weight: Global weight for quality loss component
+            bass_weight: Global weight for bass loss component
+            root_class_weights: Per-class weights for root classes (tensor of shape [num_roots])
+            quality_class_weights: Per-class weights for quality classes (tensor of shape [num_qualities])
+            bass_class_weights: Per-class weights for bass classes (tensor of shape [num_bass])
+        """
+        super(StructuredOutputLayer, self).__init__()
+        
+        self.num_roots = num_roots
+        self.num_qualities = num_qualities
+        self.num_bass = num_bass
+        self.probs_out = probs_out
+        
+        # Global loss weights for each component
+        self.root_weight = root_weight
+        self.quality_weight = quality_weight
+        self.bass_weight = bass_weight
+        
+        # Register per-class weights as buffers (moves with model to GPU)
+        if root_class_weights is not None:
+            self.register_buffer('root_class_weights', root_class_weights)
+        else:
+            self.root_class_weights = None
+            
+        if quality_class_weights is not None:
+            self.register_buffer('quality_class_weights', quality_class_weights)
+        else:
+            self.quality_class_weights = None
+            
+        if bass_class_weights is not None:
+            self.register_buffer('bass_class_weights', bass_class_weights)
+        else:
+            self.bass_class_weights = None
+        
+        # Separate projection heads for each component
+        self.root_projection = nn.Linear(hidden_size, num_roots)
+        self.quality_projection = nn.Linear(hidden_size, num_qualities)
+        self.bass_projection = nn.Linear(hidden_size, num_bass)
+        
+        # Optional LSTM for temporal modeling
+        self.lstm = nn.LSTM(input_size=hidden_size, hidden_size=int(hidden_size/2), 
+                           batch_first=True, bidirectional=True)
+        self.hidden_size = hidden_size
+    
+    def forward(self, hidden):
+        """
+        Forward pass through structured output layer.
+        
+        Args:
+            hidden: Hidden representation [batch_size, seq_len, hidden_size]
+            
+        Returns:
+            If probs_out=True: (root_logits, quality_logits, bass_logits)
+            If probs_out=False: (root_pred, quality_pred, bass_pred, root_second, quality_second, bass_second)
+        """
+        # Get logits for each component
+        root_logits = self.root_projection(hidden)
+        quality_logits = self.quality_projection(hidden)
+        bass_logits = self.bass_projection(hidden)
+        
+        if self.probs_out:
+            return root_logits, quality_logits, bass_logits
+        
+        # Get predictions and second-best predictions
+        root_probs = F.softmax(root_logits, -1)
+        quality_probs = F.softmax(quality_logits, -1)
+        bass_probs = F.softmax(bass_logits, -1)
+        
+        # Get top-2 predictions for each component
+        root_topk, root_indices = torch.topk(root_probs, 2)
+        quality_topk, quality_indices = torch.topk(quality_probs, 2)
+        bass_topk, bass_indices = torch.topk(bass_probs, 2)
+        
+        root_pred = root_indices[:, :, 0]
+        root_second = root_indices[:, :, 1]
+        
+        quality_pred = quality_indices[:, :, 0]
+        quality_second = quality_indices[:, :, 1]
+        
+        bass_pred = bass_indices[:, :, 0]
+        bass_second = bass_indices[:, :, 1]
+        
+        return root_pred, quality_pred, bass_pred, root_second, quality_second, bass_second
+    
+    def loss(self, hidden, root_labels, quality_labels, bass_labels):
+        """
+        Calculate weighted sum of losses for all three components with per-class reweighting.
+        
+        Args:
+            hidden: Hidden representation [batch_size, seq_len, hidden_size]
+            root_labels: Ground truth root labels [batch_size, seq_len]
+            quality_labels: Ground truth quality labels [batch_size, seq_len]
+            bass_labels: Ground truth bass labels [batch_size, seq_len]
+            
+        Returns:
+            total_loss: Weighted sum of component losses with per-class weights
+        """
+        # Get logits for each component
+        root_logits = self.root_projection(hidden)
+        quality_logits = self.quality_projection(hidden)
+        bass_logits = self.bass_projection(hidden)
+        
+        # Calculate log probabilities
+        root_log_probs = F.log_softmax(root_logits, -1)
+        quality_log_probs = F.log_softmax(quality_logits, -1)
+        bass_log_probs = F.log_softmax(bass_logits, -1)
+        
+        # Calculate individual losses with per-class weights
+        root_loss = F.nll_loss(
+            root_log_probs.view(-1, self.num_roots), 
+            root_labels.view(-1),
+            weight=self.root_class_weights
+        )
+        quality_loss = F.nll_loss(
+            quality_log_probs.view(-1, self.num_qualities), 
+            quality_labels.view(-1),
+            weight=self.quality_class_weights
+        )
+        bass_loss = F.nll_loss(
+            bass_log_probs.view(-1, self.num_bass), 
+            bass_labels.view(-1),
+            weight=self.bass_class_weights
+        )
+        
+        # Weighted sum of losses (global component weights)
+        total_loss = (self.root_weight * root_loss + 
+                     self.quality_weight * quality_loss + 
+                     self.bass_weight * bass_loss)
+        
+        return total_loss
 
 class MultiHeadAttention(nn.Module):
     """
@@ -323,3 +551,308 @@ class PositionwiseFeedForward(nn.Module):
                 x = self.dropout(x)
 
         return x
+
+
+# ============================================================================
+# Conformer Components (ChordFormer Architecture)
+# ============================================================================
+
+class Swish(nn.Module):
+    """Swish activation function: x * sigmoid(x)"""
+    def forward(self, x):
+        return x * torch.sigmoid(x)
+
+
+class GLU(nn.Module):
+    """Gated Linear Unit"""
+    def __init__(self, dim):
+        super(GLU, self).__init__()
+        self.dim = dim
+
+    def forward(self, x):
+        outputs, gate = x.chunk(2, dim=self.dim)
+        return outputs * torch.sigmoid(gate)
+
+
+class DepthwiseConv1d(nn.Module):
+    """Depthwise 1D Convolution"""
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=False):
+        super(DepthwiseConv1d, self).__init__()
+        self.conv = nn.Conv1d(
+            in_channels, out_channels, kernel_size,
+            stride=stride, padding=padding, groups=in_channels, bias=bias
+        )
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class PointwiseConv1d(nn.Module):
+    """Pointwise 1D Convolution (1x1 conv)"""
+    def __init__(self, in_channels, out_channels, stride=1, padding=0, bias=True):
+        super(PointwiseConv1d, self).__init__()
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, padding=padding, bias=bias)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class ConformerConvModule(nn.Module):
+    """
+    Conformer Convolution Module.
+    
+    Structure:
+        LayerNorm -> Pointwise Conv -> GLU -> Depthwise Conv -> BatchNorm -> Swish -> Pointwise Conv -> Dropout
+    """
+    def __init__(self, hidden_size, kernel_size=31, expansion_factor=2, dropout=0.1):
+        super(ConformerConvModule, self).__init__()
+        
+        self.layer_norm = LayerNorm(hidden_size)
+        self.pointwise_conv1 = PointwiseConv1d(hidden_size, hidden_size * expansion_factor, bias=True)
+        self.glu = GLU(dim=1)
+        
+        # Depthwise conv with same padding
+        padding = (kernel_size - 1) // 2
+        self.depthwise_conv = DepthwiseConv1d(hidden_size, hidden_size, kernel_size, padding=padding, bias=False)
+        
+        self.batch_norm = nn.BatchNorm1d(hidden_size)
+        self.swish = Swish()
+        self.pointwise_conv2 = PointwiseConv1d(hidden_size, hidden_size, bias=True)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor [batch_size, seq_len, hidden_size]
+        Returns:
+            Output tensor [batch_size, seq_len, hidden_size]
+        """
+        # LayerNorm
+        x = self.layer_norm(x)
+        
+        # Transpose for convolutions: [batch, seq, hidden] -> [batch, hidden, seq]
+        x = x.transpose(1, 2)
+        
+        # First pointwise conv + GLU
+        x = self.pointwise_conv1(x)
+        x = self.glu(x)
+        
+        # Depthwise conv
+        x = self.depthwise_conv(x)
+        x = self.batch_norm(x)
+        x = self.swish(x)
+        
+        # Second pointwise conv
+        x = self.pointwise_conv2(x)
+        x = self.dropout(x)
+        
+        # Transpose back: [batch, hidden, seq] -> [batch, seq, hidden]
+        x = x.transpose(1, 2)
+        
+        return x
+
+
+class ConformerFeedForward(nn.Module):
+    """
+    Conformer Feed Forward Module with Swish activation.
+    
+    Structure:
+        LayerNorm -> Linear -> Swish -> Dropout -> Linear -> Dropout
+    """
+    def __init__(self, hidden_size, expansion_factor=4, dropout=0.1):
+        super(ConformerFeedForward, self).__init__()
+        
+        inner_size = hidden_size * expansion_factor
+        
+        self.layer_norm = LayerNorm(hidden_size)
+        self.linear1 = nn.Linear(hidden_size, inner_size)
+        self.swish = Swish()
+        self.dropout1 = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(inner_size, hidden_size)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = self.layer_norm(x)
+        x = self.linear1(x)
+        x = self.swish(x)
+        x = self.dropout1(x)
+        x = self.linear2(x)
+        x = self.dropout2(x)
+        return x
+
+
+class ConformerMultiHeadAttention(nn.Module):
+    """
+    Multi-Head Self-Attention for Conformer with relative positional encoding.
+    """
+    def __init__(self, hidden_size, num_heads, dropout=0.1):
+        super(ConformerMultiHeadAttention, self).__init__()
+        
+        assert hidden_size % num_heads == 0, "hidden_size must be divisible by num_heads"
+        
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = hidden_size // num_heads
+        self.scale = self.head_dim ** -0.5
+        
+        self.layer_norm = LayerNorm(hidden_size)
+        self.query = nn.Linear(hidden_size, hidden_size)
+        self.key = nn.Linear(hidden_size, hidden_size)
+        self.value = nn.Linear(hidden_size, hidden_size)
+        self.out_proj = nn.Linear(hidden_size, hidden_size)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, return_weights=False):
+        """
+        Args:
+            x: Input tensor [batch_size, seq_len, hidden_size]
+            return_weights: If True, also return attention weights
+        """
+        batch_size, seq_len, _ = x.shape
+        
+        # Layer normalization
+        x_norm = self.layer_norm(x)
+        
+        # Project to Q, K, V
+        q = self.query(x_norm).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.key(x_norm).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.value(x_norm).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # Scaled dot-product attention
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        
+        # Apply attention to values
+        attn_output = torch.matmul(attn_weights, v)
+        
+        # Reshape and project
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_size)
+        output = self.out_proj(attn_output)
+        output = self.dropout(output)
+        
+        if return_weights:
+            return output, attn_weights
+        return output
+
+
+class ConformerBlock(nn.Module):
+    """
+    Single Conformer Block.
+    
+    Structure (Macaron-style):
+        x + 0.5 * FFN(x) -> x + MHSA(x) -> x + Conv(x) -> x + 0.5 * FFN(x) -> LayerNorm
+    """
+    def __init__(self, hidden_size, num_heads, conv_kernel_size=31, 
+                 ff_expansion_factor=4, conv_expansion_factor=2, dropout=0.1, attention_map=False):
+        super(ConformerBlock, self).__init__()
+        
+        self.attention_map = attention_map
+        
+        # First half feed-forward module
+        self.ff1 = ConformerFeedForward(hidden_size, ff_expansion_factor, dropout)
+        
+        # Multi-head self-attention module
+        self.self_attn = ConformerMultiHeadAttention(hidden_size, num_heads, dropout)
+        
+        # Convolution module
+        self.conv_module = ConformerConvModule(hidden_size, conv_kernel_size, conv_expansion_factor, dropout)
+        
+        # Second half feed-forward module
+        self.ff2 = ConformerFeedForward(hidden_size, ff_expansion_factor, dropout)
+        
+        # Final layer normalization
+        self.layer_norm = LayerNorm(hidden_size)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor [batch_size, seq_len, hidden_size]
+        Returns:
+            Output tensor [batch_size, seq_len, hidden_size]
+            (Optional) Attention weights if attention_map=True
+        """
+        # First feed-forward (half-step)
+        x = x + 0.5 * self.ff1(x)
+        
+        # Multi-head self-attention
+        if self.attention_map:
+            attn_output, weights = self.self_attn(x, return_weights=True)
+        else:
+            attn_output = self.self_attn(x)
+        x = x + attn_output
+        
+        # Convolution module
+        x = x + self.conv_module(x)
+        
+        # Second feed-forward (half-step)
+        x = x + 0.5 * self.ff2(x)
+        
+        # Final layer normalization
+        x = self.layer_norm(x)
+        
+        if self.attention_map:
+            return x, weights
+        return x
+
+
+class ConformerEncoder(nn.Module):
+    """
+    Conformer Encoder: Stack of Conformer blocks with input projection and positional encoding.
+    """
+    def __init__(self, embedding_size, hidden_size, num_layers, num_heads, 
+                 conv_kernel_size=31, ff_expansion_factor=4, conv_expansion_factor=2,
+                 max_length=1000, input_dropout=0.1, layer_dropout=0.1, attention_map=False):
+        super(ConformerEncoder, self).__init__()
+        
+        self.attention_map = attention_map
+        
+        # Input projection
+        self.input_projection = nn.Linear(embedding_size, hidden_size)
+        self.input_dropout = nn.Dropout(input_dropout)
+        
+        # Positional encoding
+        self.timing_signal = _gen_timing_signal(max_length, hidden_size)
+        
+        # Stack of Conformer blocks
+        self.conformer_blocks = nn.ModuleList([
+            ConformerBlock(
+                hidden_size=hidden_size,
+                num_heads=num_heads,
+                conv_kernel_size=conv_kernel_size,
+                ff_expansion_factor=ff_expansion_factor,
+                conv_expansion_factor=conv_expansion_factor,
+                dropout=layer_dropout,
+                attention_map=attention_map
+            )
+            for _ in range(num_layers)
+        ])
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor [batch_size, seq_len, embedding_size]
+        Returns:
+            Output tensor [batch_size, seq_len, hidden_size]
+            (Optional) List of attention weights from each layer
+        """
+        weights_list = []
+        
+        # Input dropout
+        x = self.input_dropout(x)
+        
+        # Project to hidden size
+        x = self.input_projection(x)
+        
+        # Add positional encoding
+        x = x + self.timing_signal[:, :x.shape[1], :].type_as(x)
+        
+        # Pass through Conformer blocks
+        for block in self.conformer_blocks:
+            if self.attention_map:
+                x, weights = block(x)
+                weights_list.append(weights)
+            else:
+                x = block(x)
+        
+        return x, weights_list

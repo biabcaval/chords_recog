@@ -7,16 +7,16 @@ This script extends the original train.py with curriculum learning capabilities.
 import os
 from torch import optim
 from utils import logger
-from audio_dataset import AudioDataset, AudioDataLoader
+from data.audio_dataset import AudioDataset, AudioDataLoader
 from utils.tf_logger import TF_Logger
-from btc_model import *
-from baseline_models import CNN, CRNN
+from models.btc_model import *
+from models.baseline_models import CNN, CRNN
 from utils.hparams import HParams
 import argparse
 from utils.pytorch_utils import adjusting_learning_rate
 from utils.mir_eval_modules import root_majmin_score_calculation, large_voca_score_calculation
-from utils.transformer_modules import compute_class_weights
-from curriculum_learning import CurriculumLearning, CurriculumDataLoader
+from utils.transformer_modules import compute_class_weights, compute_structured_class_weights
+from data.curriculum_learning import CurriculumLearning, CurriculumDataLoader
 import warnings
 import torch
 import numpy as np
@@ -40,10 +40,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--index', type=int, help='Experiment Number', default='e')
 parser.add_argument('--kfold', type=int, help='5 fold (0,1,2,3,4)', default='e')
 parser.add_argument('--voca', action='store_true', help='large voca is True', default=False)
-parser.add_argument('--model', type=str, help='btc, cnn, crnn', default='btc')
+parser.add_argument('--model', type=str, help='btc, cnn, crnn, chordformer', default='btc')
 parser.add_argument('--dataset1', type=str, help='Dataset', default='billboard')
 parser.add_argument('--dataset2', type=str, help='Dataset', default='jaah')
 parser.add_argument('--dataset3', type=str, help='Third Dataset', default=None)
+parser.add_argument('--dataset4', type=str, help='Fourth Dataset', default=None)
+parser.add_argument('--dataset5', type=str, help='Fifth Dataset', default=None)
 parser.add_argument('--test_dataset', type=str, help='Test Dataset', default='rwc')
 parser.add_argument('--restore_epoch', type=int, default=1000)
 parser.add_argument('--early_stop', action='store_true', help='no improvement during 10 epoch -> stop', default=True)
@@ -111,6 +113,8 @@ if WANDB_AVAILABLE:
                 'dataset1': args.dataset1,
                 'dataset2': args.dataset2,
                 'dataset3': args.dataset3 if args.dataset3 else 'None',
+                'dataset4': args.dataset4 if args.dataset4 else 'None',
+                'dataset5': args.dataset5 if args.dataset5 else 'None',
                 'test_dataset': args.test_dataset,
                 'voca': args.voca,
                 'curriculum': args.curriculum,
@@ -187,6 +191,16 @@ if args.dataset3:
     train_dataset3 = AudioDataset(config, root_dir=config.path['root_path'], dataset_names=(args.dataset3,), num_workers=20, preprocessing=False, train=True, kfold=args.kfold)
     train_dataset = train_dataset.__add__(train_dataset3)
 
+# Add fourth dataset if provided
+if args.dataset4:
+    train_dataset4 = AudioDataset(config, root_dir=config.path['root_path'], dataset_names=(args.dataset4,), num_workers=20, preprocessing=False, train=True, kfold=args.kfold)
+    train_dataset = train_dataset.__add__(train_dataset4)
+
+# Add fifth dataset if provided
+if args.dataset5:
+    train_dataset5 = AudioDataset(config, root_dir=config.path['root_path'], dataset_names=(args.dataset5,), num_workers=20, preprocessing=False, train=True, kfold=args.kfold)
+    train_dataset = train_dataset.__add__(train_dataset5)
+
 # Validation datasets: billboard, jaah, and optionally dj_avan (one fold for validation)
 valid_dataset1 = AudioDataset(config, root_dir=config.path['root_path'], dataset_names=(args.dataset1,), preprocessing=False, train=False, kfold=args.kfold)
 valid_dataset2 = AudioDataset(config, root_dir=config.path['root_path'], dataset_names=(args.dataset2,), preprocessing=False, train=False, kfold=args.kfold)
@@ -196,6 +210,11 @@ valid_dataset = valid_dataset1.__add__(valid_dataset2)
 if args.dataset3:
     valid_dataset3 = AudioDataset(config, root_dir=config.path['root_path'], dataset_names=(args.dataset3,), preprocessing=False, train=False, kfold=args.kfold)
     valid_dataset = valid_dataset.__add__(valid_dataset3)
+
+# Add fourth dataset to validation if provided
+if args.dataset4:
+    valid_dataset4 = AudioDataset(config, root_dir=config.path['root_path'], dataset_names=(args.dataset4,), preprocessing=False, train=False, kfold=args.kfold)
+    valid_dataset = valid_dataset.__add__(valid_dataset4)
 
 # Test dataset: rwc (entire dataset, no k-fold split)
 test_song_names, test_paths = load_all_test_data(config, config.path['root_path'], args.test_dataset)
@@ -228,7 +247,7 @@ curriculum = CurriculumLearning(config, train_dataset, logger=logger)
 # Create data loaders
 if config.curriculum['enabled']:
     # Use curriculum dataloader for training
-    from audio_dataset import _collate_fn
+    from data.audio_dataset import _collate_fn
     train_dataloader = CurriculumDataLoader(
         dataset=train_dataset,
         curriculum=curriculum,
@@ -247,6 +266,10 @@ test_dataloader = AudioDataLoader(dataset=test_dataset, batch_size=config.experi
 
 # Compute class weights if enabled
 class_weights = None
+root_class_weights = None
+quality_class_weights = None
+bass_class_weights = None
+
 if config.class_weights.get('enabled', False):
     logger.info("==== Computing Class Weights for Reweighted Loss ====")
     class_weights = compute_class_weights(
@@ -259,6 +282,25 @@ if config.class_weights.get('enabled', False):
     logger.info(f"Class weights computed: min={class_weights.min():.4f}, max={class_weights.max():.4f}, mean={class_weights.mean():.4f}")
     # Log weight distribution
     logger.info(f"Weight statistics: std={class_weights.std():.4f}, median={class_weights.median():.4f}")
+    
+    # Compute per-component class weights for structured models (ChordFormer approach)
+    if args.model in ['btc_structured', 'chordformer']:
+        logger.info("==== Computing Per-Component Class Weights for Structured Output ====")
+        root_class_weights, quality_class_weights, bass_class_weights = compute_structured_class_weights(
+            train_dataset=train_dataset,
+            num_roots=config.model.get('num_roots', 13),
+            num_qualities=config.model.get('num_qualities', 16),
+            num_bass=config.model.get('num_bass', 13),
+            gamma=config.class_weights.get('gamma', 0.5),
+            w_max=config.class_weights.get('w_max', 10.0),
+            device=device
+        )
+        if root_class_weights is not None:
+            logger.info(f"Root weights: min={root_class_weights.min():.4f}, max={root_class_weights.max():.4f}, mean={root_class_weights.mean():.4f}")
+            logger.info(f"Quality weights: min={quality_class_weights.min():.4f}, max={quality_class_weights.max():.4f}, mean={quality_class_weights.mean():.4f}")
+            logger.info(f"Bass weights: min={bass_class_weights.min():.4f}, max={bass_class_weights.max():.4f}, mean={bass_class_weights.mean():.4f}")
+        else:
+            logger.warning("Structured labels not found in dataset. Per-component weights not computed.")
 
 # Model and Optimizer
 if args.model == 'cnn':
@@ -267,6 +309,31 @@ elif args.model == 'crnn':
     model = CRNN(config=config.model).to(device)
 elif args.model == 'btc':
     model = BTC_model(config=config.model, class_weights=class_weights).to(device)
+elif args.model == 'btc_structured':
+    from models.btc_model import BTC_model_structured
+    config.model['use_structured_output'] = True
+    model = BTC_model_structured(
+        config=config.model, 
+        class_weights=class_weights,
+        root_class_weights=root_class_weights,
+        quality_class_weights=quality_class_weights,
+        bass_class_weights=bass_class_weights
+    ).to(device)
+    logger.info("==== Using BTC model with structured output (Root, Quality, Bass) ====")
+elif args.model == 'chordformer':
+    from models.btc_model import ChordFormer_model
+    config.model['use_structured_output'] = True
+    model = ChordFormer_model(
+        config=config.model,
+        class_weights=class_weights,
+        root_class_weights=root_class_weights,
+        quality_class_weights=quality_class_weights,
+        bass_class_weights=bass_class_weights
+    ).to(device)
+    logger.info("==== Using ChordFormer model (Conformer + Structured Output) ====")
+    logger.info(f"  Conv kernel size: {config.model.get('conv_kernel_size', 31)}")
+    logger.info(f"  FF expansion factor: {config.model.get('ff_expansion_factor', 4)}")
+    logger.info(f"  Conv expansion factor: {config.model.get('conv_expansion_factor', 2)}")
 else: 
     raise NotImplementedError
 optimizer = optim.Adam(model.parameters(), lr=config.experiment['learning_rate'], weight_decay=config.experiment['weight_decay'], betas=(0.9, 0.98), eps=1e-9)
@@ -282,7 +349,7 @@ else:
     # Legacy structure
     if not os.path.exists(os.path.join(asset_path, ckpt_path)):
         os.makedirs(os.path.join(asset_path, ckpt_path))
-        os.makedirs(os.path.join(asset_path, result_path))
+        os.makedirs(os.path.join(asset_path, result_path), exist_ok=True)
 
 # Load model
 if experiment_folder and kfold_num:
@@ -322,7 +389,11 @@ else:
         temp_loader = train_dataloader
     
     for i, data in enumerate(temp_loader):
-        features, input_percentages, chords, collapsed_chords, chord_lens, boundaries = data
+        # Handle both structured and non-structured output cases
+        if config.model.get('use_structured_output', False):
+            features, input_percentages, chords, collapsed_chords, chord_lens, boundaries, roots, qualities, basses = data
+        else:
+            features, input_percentages, chords, collapsed_chords, chord_lens, boundaries = data
         features = features.to(device)
         mean += torch.mean(features).item()
         square_mean += torch.mean(features.pow(2)).item()
@@ -373,9 +444,25 @@ for epoch in range(restore_epoch, config.experiment['max_epoch']):
     total = 0.
     correct = 0.
     second_correct = 0.
+    
+    # Additional metrics for structured output
+    root_correct = 0.
+    quality_correct = 0.
+    bass_correct = 0.
+    
     for i, data in enumerate(train_dataloader):
-        features, input_percentages, chords, collapsed_chords, chord_lens, boundaries = data
-        features, chords = features.to(device), chords.to(device)
+        # Handle both structured and non-structured data
+        if len(data) == 9:  # Structured output
+            features, input_percentages, chords, collapsed_chords, chord_lens, boundaries, roots, qualities, basses = data
+            features = features.to(device)
+            roots = roots.to(device)
+            qualities = qualities.to(device)
+            basses = basses.to(device)
+            use_structured = True
+        else:  # Non-structured output
+            features, input_percentages, chords, collapsed_chords, chord_lens, boundaries = data
+            features, chords = features.to(device), chords.to(device)
+            use_structured = False
 
         features.requires_grad = True
         features = (features - mean) / std
@@ -383,12 +470,38 @@ for epoch in range(restore_epoch, config.experiment['max_epoch']):
         # forward
         features = features.squeeze(1).permute(0,2,1)
         optimizer.zero_grad()
-        prediction, total_loss, weights, second = model(features, chords)
-
-        # save accuracy and loss
-        total += chords.size(0)
-        correct += (prediction == chords).type_as(chords).sum()
-        second_correct += (second == chords).type_as(chords).sum()
+        
+        if use_structured and args.model in ['btc_structured', 'chordformer']:
+            # Structured model forward pass
+            output = model(features, root_labels=roots, quality_labels=qualities, bass_labels=basses)
+            total_loss = output['loss']
+            
+            # Calculate accuracy for each component
+            total += roots.size(0)
+            root_correct += (output['root_pred'] == roots.view(-1)).type_as(roots).sum()
+            quality_correct += (output['quality_pred'] == qualities.view(-1)).type_as(qualities).sum()
+            bass_correct += (output['bass_pred'] == basses.view(-1)).type_as(basses).sum()
+            
+            # For compatibility, compute overall correctness (all components must match)
+            correct_mask = ((output['root_pred'] == roots.view(-1)) & 
+                           (output['quality_pred'] == qualities.view(-1)) & 
+                           (output['bass_pred'] == basses.view(-1)))
+            correct += correct_mask.type_as(roots).sum()
+            
+            # Second best (at least one component matches second best)
+            second_mask = ((output['root_second'] == roots.view(-1)) | 
+                          (output['quality_second'] == qualities.view(-1)) | 
+                          (output['bass_second'] == basses.view(-1)))
+            second_correct += second_mask.type_as(roots).sum()
+        else:
+            # Original model forward pass
+            prediction, total_loss, weights, second = model(features, chords)
+            
+            # save accuracy and loss
+            total += chords.size(0)
+            correct += (prediction == chords).type_as(chords).sum()
+            second_correct += (second == chords).type_as(chords).sum()
+        
         train_loss_list.append(total_loss.item())
 
         # optimize step
@@ -399,19 +512,38 @@ for epoch in range(restore_epoch, config.experiment['max_epoch']):
 
     # logging loss and accuracy using tensorboard
     result = {'loss/tr': np.mean(train_loss_list), 'acc/tr': correct.item() / total, 'top2/tr': (correct.item()+second_correct.item()) / total}
+    
+    # Add structured metrics if using structured model
+    if args.model in ['btc_structured', 'chordformer'] and root_correct > 0:
+        result['acc/tr_root'] = root_correct.item() / total
+        result['acc/tr_quality'] = quality_correct.item() / total
+        result['acc/tr_bass'] = bass_correct.item() / total
+    
     for tag, value in result.items(): 
         tf_logger.scalar_summary(tag, value, epoch+1)
     logger.info("training loss for %d epoch: %.4f" % (epoch + 1, np.mean(train_loss_list)))
     logger.info("training accuracy for %d epoch: %.4f" % (epoch + 1, (correct.item() / total)))
     logger.info("training top2 accuracy for %d epoch: %.4f" % (epoch + 1, ((correct.item() + second_correct.item()) / total)))
     
+    if args.model in ['btc_structured', 'chordformer'] and root_correct > 0:
+        logger.info("training root accuracy for %d epoch: %.4f" % (epoch + 1, (root_correct.item() / total)))
+        logger.info("training quality accuracy for %d epoch: %.4f" % (epoch + 1, (quality_correct.item() / total)))
+        logger.info("training bass accuracy for %d epoch: %.4f" % (epoch + 1, (bass_correct.item() / total)))
+    
     # Log to wandb
     if WANDB_AVAILABLE:
-        wandb.log({
+        wandb_metrics = {
             'train/loss': np.mean(train_loss_list),
             'train/accuracy': correct.item() / total,
             'train/top2_accuracy': (correct.item()+second_correct.item()) / total,
-        }, step=epoch+1)
+        }
+        if args.model in ['btc_structured', 'chordformer'] and root_correct > 0:
+            wandb_metrics.update({
+                'train/root_accuracy': root_correct.item() / total,
+                'train/quality_accuracy': quality_correct.item() / total,
+                'train/bass_accuracy': bass_correct.item() / total,
+            })
+        wandb.log(wandb_metrics, step=epoch+1)
 
     # Validation
     with torch.no_grad():
@@ -421,40 +553,99 @@ for epoch in range(restore_epoch, config.experiment['max_epoch']):
         val_second_correct = 0.
         validation_loss = 0
         n = 0
+        
+        # Additional metrics for structured output
+        val_root_correct = 0.
+        val_quality_correct = 0.
+        val_bass_correct = 0.
+        
         for i, data in enumerate(valid_dataloader):
-            val_features, val_input_percentages, val_chords, val_collapsed_chords, val_chord_lens, val_boundaries = data
-            val_features, val_chords = val_features.to(device), val_chords.to(device)
+            # Handle both structured and non-structured data
+            if len(data) == 9:  # Structured output
+                val_features, val_input_percentages, val_chords, val_collapsed_chords, val_chord_lens, val_boundaries, val_roots, val_qualities, val_basses = data
+                val_features = val_features.to(device)
+                val_roots = val_roots.to(device)
+                val_qualities = val_qualities.to(device)
+                val_basses = val_basses.to(device)
+                use_structured = True
+            else:  # Non-structured output
+                val_features, val_input_percentages, val_chords, val_collapsed_chords, val_chord_lens, val_boundaries = data
+                val_features, val_chords = val_features.to(device), val_chords.to(device)
+                use_structured = False
 
             val_features = (val_features - mean) / std
-
             val_features = val_features.squeeze(1).permute(0, 2, 1)
-            val_prediction, val_loss, weights, val_second = model(val_features, val_chords)
-
-            val_total += val_chords.size(0)
-            val_correct += (val_prediction == val_chords).type_as(val_chords).sum()
-            val_second_correct += (val_second == val_chords).type_as(val_chords).sum()
+            
+            if use_structured and args.model in ['btc_structured', 'chordformer']:
+                # Structured model forward pass
+                output = model(val_features, root_labels=val_roots, quality_labels=val_qualities, bass_labels=val_basses)
+                val_loss = output['loss']
+                
+                # Calculate accuracy for each component
+                val_total += val_roots.size(0)
+                val_root_correct += (output['root_pred'] == val_roots.view(-1)).type_as(val_roots).sum()
+                val_quality_correct += (output['quality_pred'] == val_qualities.view(-1)).type_as(val_qualities).sum()
+                val_bass_correct += (output['bass_pred'] == val_basses.view(-1)).type_as(val_basses).sum()
+                
+                # For compatibility, compute overall correctness
+                correct_mask = ((output['root_pred'] == val_roots.view(-1)) & 
+                               (output['quality_pred'] == val_qualities.view(-1)) & 
+                               (output['bass_pred'] == val_basses.view(-1)))
+                val_correct += correct_mask.type_as(val_roots).sum()
+                
+                # Second best
+                second_mask = ((output['root_second'] == val_roots.view(-1)) | 
+                              (output['quality_second'] == val_qualities.view(-1)) | 
+                              (output['bass_second'] == val_basses.view(-1)))
+                val_second_correct += second_mask.type_as(val_roots).sum()
+            else:
+                # Original model forward pass
+                val_prediction, val_loss, weights, val_second = model(val_features, val_chords)
+                
+                val_total += val_chords.size(0)
+                val_correct += (val_prediction == val_chords).type_as(val_chords).sum()
+                val_second_correct += (val_second == val_chords).type_as(val_chords).sum()
+            
             validation_loss += val_loss.item()
-
             n += 1
 
         # logging loss and accuracy using tensorboard
         validation_loss /= n
         result = {'loss/val': validation_loss, 'acc/val': val_correct.item() / val_total, 'top2/val': (val_correct.item()+val_second_correct.item()) / val_total}
+        
+        # Add structured metrics if using structured model
+        if args.model in ['btc_structured', 'chordformer'] and val_root_correct > 0:
+            result['acc/val_root'] = val_root_correct.item() / val_total
+            result['acc/val_quality'] = val_quality_correct.item() / val_total
+            result['acc/val_bass'] = val_bass_correct.item() / val_total
+        
         for tag, value in result.items(): 
             tf_logger.scalar_summary(tag, value, epoch + 1)
         logger.info("validation loss(%d): %.4f" % (epoch + 1, validation_loss))
         logger.info("validation accuracy(%d): %.4f" % (epoch + 1, (val_correct.item() / val_total)))
         logger.info("validation top2 accuracy(%d): %.4f" % (epoch + 1, ((val_correct.item() + val_second_correct.item()) / val_total)))
         
+        if args.model in ['btc_structured', 'chordformer'] and val_root_correct > 0:
+            logger.info("validation root accuracy(%d): %.4f" % (epoch + 1, (val_root_correct.item() / val_total)))
+            logger.info("validation quality accuracy(%d): %.4f" % (epoch + 1, (val_quality_correct.item() / val_total)))
+            logger.info("validation bass accuracy(%d): %.4f" % (epoch + 1, (val_bass_correct.item() / val_total)))
+        
         # Log to wandb
         if WANDB_AVAILABLE:
-            wandb.log({
+            wandb_val_metrics = {
                 'val/loss': validation_loss,
                 'val/accuracy': val_correct.item() / val_total,
                 'val/top2_accuracy': (val_correct.item()+val_second_correct.item()) / val_total,
                 'val/best_accuracy': best_acc,
                 'train/learning_rate': optimizer.param_groups[0]['lr'],
-            }, step=epoch+1)
+            }
+            if args.model in ['btc_structured', 'chordformer'] and val_root_correct > 0:
+                wandb_val_metrics.update({
+                    'val/root_accuracy': val_root_correct.item() / val_total,
+                    'val/quality_accuracy': val_quality_correct.item() / val_total,
+                    'val/bass_accuracy': val_bass_correct.item() / val_total,
+                })
+            wandb.log(wandb_val_metrics, step=epoch+1)
 
         current_acc = val_correct.item() / val_total
 
@@ -515,20 +706,25 @@ logger.info("==== Starting automatic testing on %s dataset ====" % args.test_dat
 # Test on entire rwc dataset
 if args.voca == True:
     score_metrics = ['root', 'thirds', 'triads', 'sevenths', 'tetrads', 'majmin', 'mirex']
-    score_list_dict, song_length_list, average_score_dict = large_voca_score_calculation(valid_dataset=test_dataset, config=config, model=model, model_type=args.model, mean=mean, std=std, device=device)
+    score_list_dict, song_length_list, average_score_dict, wcsr_dict = large_voca_score_calculation(valid_dataset=test_dataset, config=config, model=model, model_type=args.model, mean=mean, std=std, device=device)
     for m in score_metrics:
         logger.info('==== TEST %s score on %s: %.4f' % (m, args.test_dataset, average_score_dict[m]))
+        logger.info('==== TEST %s WCSR on %s: %.2f%%' % (m, args.test_dataset, wcsr_dict[m]))
 else:
     score_metrics = ['root', 'majmin']
-    score_list_dict, song_length_list, average_score_dict = root_majmin_score_calculation(valid_dataset=test_dataset, config=config, model=model, model_type=args.model, mean=mean, std=std, device=device)
+    score_list_dict, song_length_list, average_score_dict, wcsr_dict = root_majmin_score_calculation(valid_dataset=test_dataset, config=config, model=model, model_type=args.model, mean=mean, std=std, device=device)
     for m in score_metrics:
         logger.info('==== TEST %s score on %s: %.4f' % (m, args.test_dataset, average_score_dict[m]))
+        logger.info('==== TEST %s WCSR on %s: %.2f%%' % (m, args.test_dataset, wcsr_dict[m]))
 
 # Log test scores to wandb
 if WANDB_AVAILABLE:
     test_metrics = {f'test/{m}': average_score_dict[m] for m in score_metrics}
+    # Add WCSR metrics
+    wcsr_metrics = {f'test/{m}_wcsr': wcsr_dict[m] for m in score_metrics}
+    test_metrics.update(wcsr_metrics)
     wandb.log(test_metrics)
-    logger.info("==== Test scores logged to wandb ====")
+    logger.info("==== Test scores and WCSR logged to wandb ====")
 
 logger.info("==== Testing completed ====")
 
