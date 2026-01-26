@@ -9,6 +9,7 @@ import math
 
 class FeatureTypes(Enum):
     cqt = 'cqt'
+    hcqt = 'hcqt'
 
 class Preprocess():
     def __init__(self, config, feature_to_use, dataset_names, root_dir):
@@ -305,6 +306,9 @@ class Preprocess():
                                         feature = librosa.cqt(song_seq, sr=sr, n_bins=feature_config['n_bins'],
                                                               bins_per_octave=feature_config['bins_per_octave'],
                                                               hop_length=feature_config['hop_length'])
+                                    elif self.feature_name == FeatureTypes.hcqt:
+                                        continue #HCQT Feature
+
                                     else:
                                         raise NotImplementedError
 
