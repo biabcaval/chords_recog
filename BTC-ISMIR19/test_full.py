@@ -9,6 +9,7 @@ from utils.hparams import HParams
 from utils.mir_eval_modules import large_voca_score_calculation, root_majmin_score_calculation
 from models.btc_model import BTC_model
 from data.audio_dataset import AudioDataset
+from utils.preprocess import Preprocess, FeatureTypes
 
 logger.logging_verbosity(1)
 use_cuda = torch.cuda.is_available()
@@ -39,8 +40,18 @@ else:
 # Load normalization
 mp3_config = config.mp3
 feature_config = config.feature
+
+feature_type_str = config.feature['type']
+if feature_type_str == 'cqt':
+    feature_to_use = FeatureTypes.cqt
+elif feature_type_str == 'hcqt':
+    feature_to_use = FeatureTypes.hcqt
+else:
+    raise ValueError(f"Unsupported feature type: {feature_type_str}")
+
+
 mp3_string = "%d_%.1f_%.1f" % (mp3_config['song_hz'], mp3_config['inst_len'], mp3_config['skip_interval'])
-feature_string = "_%s_%d_%d_%d_" % ('cqt', feature_config['n_bins'], feature_config['bins_per_octave'], feature_config['hop_length'])
+feature_string = "_%s_%d_%d_%d_" % (feature_to_use, feature_config['n_bins'], feature_config['bins_per_octave'], feature_config['hop_length'])
 z_path = os.path.join(config.path['root_path'], 'result', mp3_string + feature_string + 'mix_kfold_'+ str(KFOLD_INDEX) +'_normalization.pt')
 
 if os.path.exists(z_path):
@@ -73,7 +84,7 @@ def load_all_test_data(config, root_dir, dataset_name):
     mp3_config = config.mp3
     feature_config = config.feature
     mp3_string = "%d_%.1f_%.1f" % (mp3_config['song_hz'], mp3_config['inst_len'], mp3_config['skip_interval'])
-    feature_string = "%s_%d_%d_%d" % ('cqt', feature_config['n_bins'], feature_config['bins_per_octave'], feature_config['hop_length'])
+    feature_string = "%s_%d_%d_%d" % (feature_to_use, feature_config['n_bins'], feature_config['bins_per_octave'], feature_config['hop_length'])
     
     if feature_config['large_voca'] == True:
         dataset_path = os.path.join(root_dir, "result", dataset_name+'_voca', mp3_string, feature_string)
@@ -106,8 +117,16 @@ class TestDataset(torch.utils.data.Dataset):
     def __init__(self, paths, song_names, config, root_dir, dataset_name):
         self.paths = paths
         self.song_names = song_names
-        from utils.preprocess import Preprocess, FeatureTypes
-        self.preprocessor = Preprocess(config, FeatureTypes.cqt, (dataset_name,), root_dir)
+
+        feature_type_str = config.feature['type']
+        if feature_type_str == 'cqt':
+            feature_to_use = FeatureTypes.cqt
+        elif feature_type_str == 'hcqt':
+            feature_to_use = FeatureTypes.hcqt
+        else:
+            raise ValueError(f"Unsupported feature type: {feature_type_str}")
+
+        self.preprocessor = Preprocess(config, feature_to_use, (dataset_name,), root_dir)
     
     def __len__(self):
         return len(self.paths)

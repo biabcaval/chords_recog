@@ -6,6 +6,7 @@ from enum import Enum
 import pyrubberband as pyrb
 import torch
 import math
+import numpy as np
 
 class FeatureTypes(Enum):
     cqt = 'cqt'
@@ -307,7 +308,16 @@ class Preprocess():
                                                               bins_per_octave=feature_config['bins_per_octave'],
                                                               hop_length=feature_config['hop_length'])
                                     elif self.feature_name == FeatureTypes.hcqt:
-                                        continue #HCQT Feature
+                                        harmonics = [1, 2, 3, 4, 5, 6]
+                                        cqts_list = []
+
+                                        for h in harmonics:
+                                            harmonic = librosa.cqt(song_seq, sr=sr, n_bins=feature_config['n_bins'],
+                                                                  bins_per_octave=feature_config['bins_per_octave'],
+                                                                  hop_length=feature_config['hop_length'], fmin=librosa.note_to_hz('C1')*h)
+                                            cqts_list.append(harmonic)
+
+                                        hcqt = np.stack(cqts_list, axis=0)
 
                                     else:
                                         raise NotImplementedError

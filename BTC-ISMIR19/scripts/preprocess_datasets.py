@@ -42,6 +42,17 @@ def preprocess_datasets(config_path, root_dir, dataset_names, large_voca=True, n
         config.model['num_chords'] = 25
         print("Using majmin vocabulary (25 chords)")
     
+
+    feature_type_str = config.feature['type']
+    if feature_type_str == 'cqt':
+        feature_to_use = FeatureTypes.cqt
+    elif feature_type_str == 'hcqt':
+        feature_to_use = FeatureTypes.hcqt
+    else:
+        raise ValueError(f"Unsupported feature type: {feature_type_str}")
+    
+
+
     # Create preprocessor
     print(f"\nInitializing preprocessor...")
     print(f"Root directory: {root_dir}")
@@ -49,7 +60,7 @@ def preprocess_datasets(config_path, root_dir, dataset_names, large_voca=True, n
     
     preprocessor = Preprocess(
         config=config,
-        feature_to_use=FeatureTypes.cqt,
+        feature_to_use=feature_to_use,
         dataset_names=dataset_names,
         root_dir=root_dir
     )

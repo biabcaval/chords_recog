@@ -94,7 +94,16 @@ class TestDataset(torch.utils.data.Dataset):
     def __init__(self, paths, song_names, config, root_dir, dataset_name):
         self.paths = paths
         self.song_names = song_names
-        self.preprocessor = Preprocess(config, FeatureTypes.cqt, (dataset_name,), root_dir)
+
+        feature_type_str = config.feature['type']
+        if feature_type_str == 'cqt':
+            feature_to_use = FeatureTypes.cqt
+        elif feature_type_str == 'hcqt':
+            feature_to_use = FeatureTypes.hcqt
+        else:
+            raise ValueError(f"Unsupported feature type: {feature_type_str}")
+
+        self.preprocessor = Preprocess(config, feature_to_use, (dataset_name,), root_dir)
     
     def __len__(self):
         return len(self.paths)
