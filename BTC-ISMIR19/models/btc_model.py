@@ -141,8 +141,19 @@ class BTC_model(nn.Module):
 
         self.timestep = config['timestep']
         self.probs_out = config['probs_out']
+        self.feature_type = config.get('feature_type', 'cqt')  # Default to 'cqt'
 
-        params = (config['feature_size'],
+        if self.feature_type == 'hcqt':
+            input_channels = config.get('n_harmonics')  # Number of harmonics in HCQT
+        else:
+            input_channels = 1  # Single channel for CQT
+
+        # Add a convolutional layer for HCQT
+        self.conv1 = nn.Conv2d(input_channels, config['hidden_size'], kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+        self.relu = nn.ReLU()
+        self.pool = nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))
+
+        params = (config['hidden_size'],
                   config['hidden_size'],
                   config['num_layers'],
                   config['num_heads'],
@@ -164,7 +175,13 @@ class BTC_model(nn.Module):
         )
 
     def forward(self, x, labels):
-        labels = labels.view(-1, self.timestep)
+        if self.feature_type == 'hcqt':
+            # HCQT input: (batch_size, n_harmonics, n_bins, time_frames)
+            x = self.conv1(x)  # Apply convolution
+            x = self.relu(x)
+            x = self.pool(x)  # Downsample
+            x = x.flatten(2).transpose(1, 2)  # Reshape to (batch_size, time_frames, feature_size)
+
         # Output of Bi-directional Self-attention Layers
         self_attn_output, weights_list = self.self_attn_layers(x)
 
@@ -174,7 +191,7 @@ class BTC_model(nn.Module):
             return logits
 
         # Output layer and Soft-max
-        prediction,second = self.output_layer(self_attn_output)
+        prediction, second = self.output_layer(self_attn_output)
         prediction = prediction.view(-1)
         second = second.view(-1)
 
