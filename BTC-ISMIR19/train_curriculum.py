@@ -470,6 +470,7 @@ for epoch in range(restore_epoch, config.experiment['max_epoch']):
         if len(data) == 9:  # Structured output
             features, input_percentages, chords, collapsed_chords, chord_lens, boundaries, roots, qualities, basses = data
             features = features.to(device)
+            chords = chords.to(device)
             roots = roots.to(device)
             qualities = qualities.to(device)
             basses = basses.to(device)
