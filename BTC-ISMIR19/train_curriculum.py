@@ -387,6 +387,11 @@ if os.path.exists(z_path):
     normalization = torch.load(z_path)
     mean = normalization['mean']
     std = normalization['std']
+    # Ensure mean and std are Python floats, not tensors
+    if isinstance(mean, torch.Tensor):
+        mean = mean.item()
+    if isinstance(std, torch.Tensor):
+        std = std.item()
     logger.info("Global mean and std (k fold index %d) load complete" % args.kfold)
 else:
     mean = 0
@@ -471,7 +476,8 @@ for epoch in range(restore_epoch, config.experiment['max_epoch']):
             use_structured = True
         else:  # Non-structured output
             features, input_percentages, chords, collapsed_chords, chord_lens, boundaries = data
-            features, chords = features.to(device), chords.to(device)
+            features = features.to(device)
+            chords = chords.to(device)
             use_structured = False
 
         features.requires_grad = True
@@ -505,6 +511,8 @@ for epoch in range(restore_epoch, config.experiment['max_epoch']):
             second_correct += second_mask.type_as(roots).sum()
         else:
             # Original model forward pass
+            # Ensure chords is on the correct device before passing to model
+            assert chords.device == features.device, f"Device mismatch: features on {features.device}, chords on {chords.device}"
             prediction, total_loss, weights, second = model(features, chords)
             
             # save accuracy and loss
