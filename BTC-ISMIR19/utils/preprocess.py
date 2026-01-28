@@ -516,13 +516,34 @@ class Preprocess():
                                         feature = librosa.cqt(song_seq, sr=sr, n_bins=feature_config['n_bins'],
                                                               bins_per_octave=feature_config['bins_per_octave'],
                                                               hop_length=feature_config['hop_length'])
+                                    elif self.feature_name == FeatureTypes.hcqt:
+                                        harmonics = [1, 2, 3, 4, 5, 6]
+                                        cqts_list = []
+
+                                        for h in harmonics:
+                                            harmonic = librosa.cqt(song_seq, sr=sr, n_bins=feature_config['n_bins'],
+                                                                  bins_per_octave=feature_config['bins_per_octave'],
+                                                                  hop_length=feature_config['hop_length'], fmin=librosa.note_to_hz('C1')*h)
+                                            cqts_list.append(harmonic)
+
+                                        feature = np.stack(cqts_list, axis=0)  # shape: (n_harmonics, n_bins, time_frames)
                                     else:
                                         raise NotImplementedError
 
-                                    if feature.shape[1] > self.no_of_chord_datapoints_per_sequence:
+                                    if feature.shape[2] > self.no_of_chord_datapoints_per_sequence:
+                                        feature = feature[:, :, :self.no_of_chord_datapoints_per_sequence]
+                                    elif feature.shape[1] > self.no_of_chord_datapoints_per_sequence:
                                         feature = feature[:, :self.no_of_chord_datapoints_per_sequence]
 
-                                    if feature.shape[1] != self.no_of_chord_datapoints_per_sequence:
+                                    # Check the correct dimension based on feature type
+                                    if feature.ndim == 2:  # CQT: shape (n_bins, time_frames)
+                                        actual_datapoints = feature.shape[1]
+                                    elif feature.ndim == 3:  # HCQT: shape (n_harmonics, n_bins, time_frames)
+                                        actual_datapoints = feature.shape[2]
+                                    else:
+                                        raise ValueError(f"Unexpected feature shape: {feature.shape}")
+
+                                    if actual_datapoints != self.no_of_chord_datapoints_per_sequence:
                                         print('loaded features length is too short :', song_name)
                                         loop_broken = True
                                         j += 1
