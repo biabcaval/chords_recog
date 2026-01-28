@@ -583,6 +583,7 @@ for epoch in range(restore_epoch, config.experiment['max_epoch']):
             if len(data) == 9:  # Structured output
                 val_features, val_input_percentages, val_chords, val_collapsed_chords, val_chord_lens, val_boundaries, val_roots, val_qualities, val_basses = data
                 val_features = val_features.to(device)
+                val_chords = val_chords.to(device)
                 val_roots = val_roots.to(device)
                 val_qualities = val_qualities.to(device)
                 val_basses = val_basses.to(device)
