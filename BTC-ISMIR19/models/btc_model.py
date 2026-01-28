@@ -141,19 +141,22 @@ class BTC_model(nn.Module):
 
         self.timestep = config['timestep']
         self.probs_out = config['probs_out']
-        self.feature_type = config.get('feature_type', 'cqt')  # Default to 'cqt'
-
+        
+        # Get feature type from config (default to 'cqt')
+        self.feature_type = config.get('feature_type', 'cqt')
+        
+        # Calculate feature size based on feature type
+        # Input comes as (batch, time_frames, feature_dim) after preprocessing
         if self.feature_type == 'hcqt':
-            input_channels = config.get('n_harmonics')  # Number of harmonics in HCQT
+            # HCQT: n_harmonics * n_bins = 6 * 84 = 504
+            n_harmonics = config.get('n_harmonics', 6)
+            n_bins = config.get('n_bins', 84)  # For HCQT, typically 84
+            feature_size = n_harmonics * n_bins
         else:
-            input_channels = 1  # Single channel for CQT
+            # CQT: just n_bins = 144
+            feature_size = config.get('feature_size', 144)
 
-        # Add a convolutional layer for HCQT
-        self.conv1 = nn.Conv2d(input_channels, config['hidden_size'], kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
-        self.relu = nn.ReLU()
-        self.pool = nn.MaxPool2d(kernel_size=(2, 2), stride=(2, 2))
-
-        params = (config['hidden_size'],
+        params = (feature_size,
                   config['hidden_size'],
                   config['num_layers'],
                   config['num_heads'],
@@ -175,13 +178,10 @@ class BTC_model(nn.Module):
         )
 
     def forward(self, x, labels):
-        if self.feature_type == 'hcqt':
-            # HCQT input: (batch_size, n_harmonics, n_bins, time_frames)
-            x = self.conv1(x)  # Apply convolution
-            x = self.relu(x)
-            x = self.pool(x)  # Downsample
-            x = x.flatten(2).transpose(1, 2)  # Reshape to (batch_size, time_frames, feature_size)
-
+        # x shape: (batch_size, time_frames, feature_dim)
+        # For CQT: feature_dim = 144
+        # For HCQT: feature_dim = 6 * 84 = 504
+        
         # Output of Bi-directional Self-attention Layers
         self_attn_output, weights_list = self.self_attn_layers(x)
 
@@ -211,8 +211,22 @@ class BTC_model_structured(nn.Module):
         self.timestep = config['timestep']
         self.probs_out = config.get('probs_out', False)
         self.use_structured = config.get('use_structured_output', True)
+        
+        # Get feature type from config (default to 'cqt')
+        self.feature_type = config.get('feature_type', 'cqt')
+        
+        # Calculate feature size based on feature type
+        # Input comes as (batch, time_frames, feature_dim) after preprocessing
+        if self.feature_type == 'hcqt':
+            # HCQT: n_harmonics * n_bins
+            n_harmonics = config.get('n_harmonics', 6)
+            n_bins = config.get('n_bins', 84)  # For HCQT, typically 84
+            feature_size = n_harmonics * n_bins
+        else:
+            # CQT: just n_bins = 144
+            feature_size = config.get('feature_size', 144)
 
-        params = (config['feature_size'],
+        params = (feature_size,
                   config['hidden_size'],
                   config['num_layers'],
                   config['num_heads'],
@@ -313,12 +327,26 @@ class ChordFormer_model(nn.Module):
         self.timestep = config['timestep']
         self.probs_out = config.get('probs_out', False)
         
+        # Get feature type from config (default to 'cqt')
+        self.feature_type = config.get('feature_type', 'cqt')
+        
+        # Calculate feature size based on feature type
+        # Input comes as (batch, time_frames, feature_dim) after preprocessing
+        if self.feature_type == 'hcqt':
+            # HCQT: n_harmonics * n_bins
+            n_harmonics = config.get('n_harmonics', 6)
+            n_bins = config.get('n_bins', 84)  # For HCQT, typically 84
+            embedding_size = n_harmonics * n_bins
+        else:
+            # CQT: just n_bins = 144
+            embedding_size = config.get('feature_size', 144)
+        
         # Import Conformer encoder
         from utils.transformer_modules import ConformerEncoder, StructuredOutputLayer
         
         # Conformer Encoder
         self.conformer_encoder = ConformerEncoder(
-            embedding_size=config['feature_size'],
+            embedding_size=embedding_size,
             hidden_size=config['hidden_size'],
             num_layers=config['num_layers'],
             num_heads=config['num_heads'],
