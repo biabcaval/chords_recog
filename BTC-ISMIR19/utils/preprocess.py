@@ -308,7 +308,7 @@ class Preprocess():
                                                               bins_per_octave=feature_config['bins_per_octave'],
                                                               hop_length=feature_config['hop_length'])
                                     elif self.feature_name == FeatureTypes.hcqt:
-                                        harmonics = [1, 2, 3, 4, 5, 6]
+                                        harmonics = [1, 2, 3, 4, 5, 6] 
                                         cqts_list = []
 
                                         for h in harmonics:
@@ -317,7 +317,7 @@ class Preprocess():
                                                                   hop_length=feature_config['hop_length'], fmin=librosa.note_to_hz('C1')*h)
                                             cqts_list.append(harmonic)
 
-                                        hcqt = np.stack(cqts_list, axis=0)
+                                        feature = np.stack(cqts_list, axis=0) # shape: (n_harmonics, n_bins, time_frames)
 
                                     else:
                                         raise NotImplementedError

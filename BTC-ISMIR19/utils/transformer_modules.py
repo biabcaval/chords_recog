@@ -217,7 +217,7 @@ class SoftmaxOutputLayer(OutputLayer):
     def loss(self, hidden, labels):
         logits = self.output_projection(hidden)
         log_probs = F.log_softmax(logits, -1)
-        return F.nll_loss(log_probs.view(-1, self.output_size), labels.view(-1), weight=self.class_weights)
+        return F.nll_loss(log_probs.view(-1, self.output_size), labels.view(-1), weight=self.class_weights.to(log_probs.device ))
 
 
 class StructuredOutputLayer(nn.Module):

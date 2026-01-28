@@ -15,6 +15,16 @@ class AudioDataset(Dataset):
         self.config = config
         self.root_dir = root_dir
         self.dataset_names = dataset_names
+
+        featuretype_str = config.feature['type']
+        if featuretype_str == 'cqt':
+            featuretype = FeatureTypes.cqt
+        elif featuretype_str == 'hcqt':
+            featuretype = FeatureTypes.hcqt
+        else:
+            raise ValueError(f"Unsupported feature type: {featuretype_str}")
+
+
         self.preprocessor = Preprocess(config, featuretype, dataset_names, self.root_dir)
         self.resize = resize
         self.train = train
