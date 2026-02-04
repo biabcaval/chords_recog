@@ -319,9 +319,9 @@ class MultiTaskLoss(nn.Module):
                    Shape: (batch_size, seq_len)
         
         Returns:
-            total_loss: Weighted sum of component losses
+            total_loss: Weighted sum of component losses (tensor)
         """
-        total_loss = 0.0
+        total_loss = None
         loss_dict = {}
         
         for component in self.component_names:
@@ -346,8 +346,16 @@ class MultiTaskLoss(nn.Module):
             weight = self.component_weights.get(component, 1.0)
             weighted_loss = weight * component_loss
             
-            total_loss += weighted_loss
+            if total_loss is None:
+                total_loss = weighted_loss
+            else:
+                total_loss = total_loss + weighted_loss
+            
             loss_dict[component] = component_loss.item()
+        
+        # Return tensor (if no losses, return 0 tensor)
+        if total_loss is None:
+            total_loss = torch.tensor(0.0, requires_grad=True)
         
         return total_loss
     
