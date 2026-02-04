@@ -171,10 +171,6 @@ def train_epoch(model, loader, optimizer, device, loss_fn, log_interval=10):
         # Move data to device
         features = batch['feature'].to(device)
         
-        # DEBUG: Print shape
-        if batch_idx == 0:
-            logger.info(f"Batch shape: {features.shape}, type: {type(features)}")
-        
         # Map 'components' to 'targets' if available
         if 'components' in batch:
             targets = {k: v.to(device) for k, v in batch['components'].items()}
@@ -182,9 +178,21 @@ def train_epoch(model, loader, optimizer, device, loss_fn, log_interval=10):
             # Fallback to 'targets' key
             targets = {k: v.to(device) for k, v in batch['targets'].items()}
         
+        # DEBUG: Print info on first batch
+        if batch_idx == 0:
+            logger.info(f"Batch shape: {features.shape}, type: {type(features)}")
+            logger.info(f"Targets keys: {targets.keys() if targets else 'None'}")
+            if targets:
+                for k, v in list(targets.items())[:2]:
+                    logger.info(f"  {k}: shape={v.shape}, dtype={v.dtype}, sample={v.flatten()[:5]}")
+        
         # Forward pass
         optimizer.zero_grad()
         outputs = model(features)
+        
+        # DEBUG: Check outputs
+        if batch_idx == 0:
+            logger.info(f"Outputs keys: {outputs.keys() if isinstance(outputs, dict) else type(outputs)}")
         
         # Compute loss
         loss = loss_fn(outputs, targets)
