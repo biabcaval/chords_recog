@@ -68,19 +68,62 @@ class AudioDatasetStructured(BaseAudioDataset):
         res = dict()
         data = torch.load(instance_path, weights_only=False)
         res['feature'] = np.log(np.abs(data['feature']) + 1e-6)
-        res['chord'] = data['chord']
+        
+        # Handle both old and new data formats
+        if 'chord' in data:
+            res['chord'] = data['chord']
+        elif 'original_chords' in data:
+            res['chord'] = data['original_chords']
+        else:
+            res['chord'] = []
         
         # Decompose chords if requested
         if self.decompose and self.decomposer is not None:
-            # Convert chord indices back to labels for decomposition
-            # Assuming data['chord'] contains string labels or can be mapped
-            chord_labels = self._get_chord_labels(data['chord'])
-            
-            # Decompose and convert to indices
-            components_indices = self.decomposer.decompose_batch(chord_labels)
-            res['components'] = components_indices
+            # Check if data already has decomposed chords
+            if 'decomposed_chord' in data:
+                # Use pre-decomposed chords
+                components_indices = self._convert_decomposed_to_indices(data['decomposed_chord'])
+                res['components'] = components_indices
+            else:
+                # Convert chord indices back to labels for decomposition
+                chord_labels = self._get_chord_labels(res['chord'])
+                components_indices = self.decomposer.decompose_batch(chord_labels)
+                res['components'] = components_indices
         
         return res
+    
+    def _convert_decomposed_to_indices(self, decomposed_chords):
+        """
+        Convert pre-decomposed chords (dicts) to component indices.
+        
+        Args:
+            decomposed_chords: List of dicts with component labels
+            
+        Returns:
+            Dict mapping component names to tensors of indices
+        """
+        components_indices = {name: [] for name in COMPONENT_NAMES}
+        
+        for decomposed in decomposed_chords:
+            if isinstance(decomposed, dict):
+                for component_name in COMPONENT_NAMES:
+                    label = decomposed.get(component_name, 'N')
+                    # Convert label to index
+                    vocab = CHORD_VOCAB.get(component_name, {})
+                    idx = vocab.get(label, vocab.get('N', 0))
+                    components_indices[component_name].append(idx)
+            else:
+                # If not dict, add default indices
+                for component_name in COMPONENT_NAMES:
+                    vocab = CHORD_VOCAB.get(component_name, {})
+                    idx = vocab.get('N', 0)
+                    components_indices[component_name].append(idx)
+        
+        # Convert to tensors
+        for component_name in COMPONENT_NAMES:
+            components_indices[component_name] = torch.LongTensor(components_indices[component_name])
+        
+        return components_indices
     
     def _get_chord_labels(self, chord_data):
         """
