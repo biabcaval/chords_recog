@@ -170,7 +170,13 @@ def train_epoch(model, loader, optimizer, device, loss_fn, log_interval=10):
     for batch_idx, batch in enumerate(loader):
         # Move data to device
         features = batch['feature'].to(device)
-        targets = {k: v.to(device) for k, v in batch['targets'].items()}
+        
+        # Map 'components' to 'targets' if available
+        if 'components' in batch:
+            targets = {k: v.to(device) for k, v in batch['components'].items()}
+        else:
+            # Fallback to 'targets' key
+            targets = {k: v.to(device) for k, v in batch['targets'].items()}
         
         # Forward pass
         optimizer.zero_grad()
@@ -202,7 +208,12 @@ def validate(model, loader, device, loss_fn):
     with torch.no_grad():
         for batch in loader:
             features = batch['feature'].to(device)
-            targets = {k: v.to(device) for k, v in batch['targets'].items()}
+            
+            # Map 'components' to 'targets' if available
+            if 'components' in batch:
+                targets = {k: v.to(device) for k, v in batch['components'].items()}
+            else:
+                targets = {k: v.to(device) for k, v in batch['targets'].items()}
             
             outputs = model(features)
             loss = loss_fn(outputs, targets)
