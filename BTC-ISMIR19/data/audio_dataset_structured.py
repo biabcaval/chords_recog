@@ -80,7 +80,8 @@ class AudioDatasetStructured(BaseAudioDataset):
             pad_length = timestep - features.shape[0]
             features = np.pad(features, ((0, pad_length), (0, 0)), mode='constant')
         
-        res['feature'] = features
+        # Convert to tensor
+        res['feature'] = torch.FloatTensor(features)
         
         # Handle both old and new data formats
         if 'chord' in data:
