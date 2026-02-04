@@ -139,32 +139,40 @@ class BTC_model_decomposed(nn.Module):
     def __init__(self, config, class_weights=None):
         super().__init__()
         
-        self.timestep = config['timestep']
-        self.probs_out = config.get('probs_out', False)
-        self.use_decomposition = config.get('use_decomposition', True)
+        # Handle both dict-like and HParams-like config objects
+        if hasattr(config, 'model'):
+            # It's an HParams object
+            cfg = config.model
+        else:
+            # It's a dict
+            cfg = config
+        
+        self.timestep = cfg['timestep']
+        self.probs_out = cfg.get('probs_out', False)
+        self.use_decomposition = cfg.get('use_decomposition', True)
         
         # Feature extractor (bi-directional self-attention)
         params = (
-            config['feature_size'],
-            config['hidden_size'],
-            config['num_layers'],
-            config['num_heads'],
-            config['total_key_depth'],
-            config['total_value_depth'],
-            config['filter_size'],
-            config['timestep'],
-            config['input_dropout'],
-            config['layer_dropout'],
-            config['attention_dropout'],
-            config['relu_dropout']
+            cfg['feature_size'],
+            cfg['hidden_size'],
+            cfg['num_layers'],
+            cfg['num_heads'],
+            cfg['total_key_depth'],
+            cfg['total_value_depth'],
+            cfg['filter_size'],
+            cfg['timestep'],
+            cfg['input_dropout'],
+            cfg['layer_dropout'],
+            cfg['attention_dropout'],
+            cfg['relu_dropout']
         )
         
         self.self_attn_layers = bi_directional_self_attention_layers(*params)
         
         # Multi-head chord decomposition
         self.decomposer = MultiHeadChordDecomposer(
-            hidden_size=config['hidden_size'],
-            dropout=config.get('output_dropout', 0.0)
+            hidden_size=cfg['hidden_size'],
+            dropout=cfg.get('output_dropout', 0.0)
         )
         
         # Loss function
