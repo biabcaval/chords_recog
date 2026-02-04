@@ -168,63 +168,127 @@ def _collate_fn_structured(batch):
     """
     Collate function for structured chord decomposition data.
     
-    Combines batch samples and returns:
-    - features: (batch_size, 1, feature_size, max_len)
-    - input_percentages: (batch_size,)
-    - components: dict of tensors, each shape (batch_size*time_length,)
-    - chord_lens: (batch_size,)
-    - boundaries: (batch_size*time_length,)
+    Combines batch samples and returns a dictionary with:
+        - features: (batch_size, 1, feature_size, seq_len) - audio features
+        - input_percentages: (batch_size,) - fraction of max length used
+        - components: dict of tensors, each shape (batch_size, seq_len) - decomposed labels
+        - chord_lens: (batch_size,) - number of unique chords per sample
+        - boundaries: (batch_size, seq_len) - boundary indicators
+    
+    The labels tensor shape is (batch_size, seq_len, 8) where 8 is the number of components.
     """
     batch_size = len(batch)
-    max_len = batch[0]['feature'].shape[1]
     
+    # Get feature dimensions from first sample
+    first_feature = batch[0]['feature']
+    if len(first_feature.shape) == 2:
+        # Shape: (seq_len, feature_size) from __getitem__
+        seq_len, feature_size = first_feature.shape
+    else:
+        # Unexpected shape, try to infer
+        feature_size = first_feature.shape[-1]
+        seq_len = first_feature.shape[0]
+    
+    # Find max sequence length in batch
+    max_len = max(sample['feature'].shape[0] for sample in batch)
+    
+    # Initialize tensors
     input_percentages = torch.empty(batch_size)
     chord_lens = torch.empty(batch_size, dtype=torch.int64)
-    features = []
-    boundaries = []
+    features_list = []
+    boundaries_list = []
     
-    # Initialize component tensors
+    # Initialize component data - will be (batch_size, seq_len) for each
     components_data = {component: [] for component in COMPONENT_NAMES}
     
     for i in range(batch_size):
         sample = batch[i]
         feature = sample['feature']
-        chord = sample['chord']
         
-        # Determine boundaries
-        if isinstance(chord, np.ndarray):
-            diff = np.diff(chord, axis=0).astype(bool) if len(chord.shape) > 1 else np.diff(chord).astype(bool)
+        # Ensure feature is 2D (seq_len, feature_size)
+        if isinstance(feature, torch.Tensor):
+            feature_np = feature.numpy()
         else:
-            # Handle list case
-            chord = np.array(chord)
-            diff = np.diff(chord, axis=0).astype(bool) if len(chord.shape) > 1 else np.diff(chord).astype(bool)
+            feature_np = np.array(feature)
         
-        idx = np.insert(diff, 0, True, axis=0)
-        chord_lens[i] = np.sum(idx).item() if np.sum(idx).dim() > 0 else np.sum(idx)
+        current_len = feature_np.shape[0]
         
-        features.append(feature)
-        input_percentages[i] = feature.shape[1] / max_len
+        # Pad features if needed
+        if current_len < max_len:
+            pad_length = max_len - current_len
+            feature_np = np.pad(feature_np, ((0, pad_length), (0, 0)), mode='constant')
         
-        boundary = np.append([0], diff)
-        boundaries.extend(boundary.tolist() if isinstance(boundary, np.ndarray) else boundary)
+        features_list.append(feature_np)
+        input_percentages[i] = current_len / max_len
+        
+        # Process chord labels for boundaries
+        chord = sample.get('chord', [])
+        if isinstance(chord, (list, np.ndarray)) and len(chord) > 0:
+            chord_array = np.array(chord) if isinstance(chord, list) else chord
+            if len(chord_array) > 1:
+                # Handle multi-dimensional chord arrays
+                if len(chord_array.shape) > 1:
+                    # Take first column for boundary detection
+                    chord_flat = chord_array[:, 0] if chord_array.shape[1] > 0 else chord_array.flatten()
+                else:
+                    chord_flat = chord_array
+                diff = np.diff(chord_flat).astype(bool)
+            else:
+                diff = np.array([], dtype=bool)
+            idx = np.insert(diff, 0, True)
+            chord_lens[i] = int(np.sum(idx))
+            boundary = np.append([0], diff)
+        else:
+            chord_lens[i] = 0
+            boundary = np.zeros(current_len, dtype=np.uint8)
+        
+        # Pad boundary if needed
+        if len(boundary) < max_len:
+            boundary = np.pad(boundary, (0, max_len - len(boundary)), mode='constant')
+        elif len(boundary) > max_len:
+            boundary = boundary[:max_len]
+        
+        boundaries_list.append(boundary)
         
         # Collect component data
         if 'components' in sample:
             components = sample['components']
             for component in COMPONENT_NAMES:
-                components_data[component].extend(components[component].tolist())
+                comp_data = components[component]
+                if isinstance(comp_data, torch.Tensor):
+                    comp_array = comp_data.numpy()
+                elif isinstance(comp_data, np.ndarray):
+                    comp_array = comp_data
+                else:
+                    comp_array = np.array(comp_data)
+                
+                # Pad component data if needed
+                if len(comp_array) < max_len:
+                    comp_array = np.pad(comp_array, (0, max_len - len(comp_array)), 
+                                       mode='constant', constant_values=0)
+                elif len(comp_array) > max_len:
+                    comp_array = comp_array[:max_len]
+                
+                components_data[component].append(comp_array)
+        else:
+            # No components, fill with zeros (N class)
+            for component in COMPONENT_NAMES:
+                components_data[component].append(np.zeros(max_len, dtype=np.int64))
     
-    # Convert to tensors
-    features_tensor = torch.tensor(features, dtype=torch.float32).unsqueeze(1)
-    boundaries_tensor = torch.tensor(boundaries, dtype=torch.uint8)
+    # Stack features: (batch_size, seq_len, feature_size) -> (batch_size, 1, feature_size, seq_len)
+    features_array = np.stack(features_list, axis=0)  # (batch_size, seq_len, feature_size)
+    features_array = features_array.transpose(0, 2, 1)  # (batch_size, feature_size, seq_len)
+    features_tensor = torch.tensor(features_array, dtype=torch.float32).unsqueeze(1)
     
-    # Convert components to tensors
+    # Stack boundaries: (batch_size, seq_len)
+    boundaries_array = np.stack(boundaries_list, axis=0)
+    boundaries_tensor = torch.tensor(boundaries_array, dtype=torch.uint8)
+    
+    # Stack components: each (batch_size, seq_len)
     components_tensor = {}
     for component in COMPONENT_NAMES:
-        components_tensor[component] = torch.tensor(
-            components_data[component], 
-            dtype=torch.int64
-        )
+        comp_array = np.stack(components_data[component], axis=0)
+        components_tensor[component] = torch.tensor(comp_array, dtype=torch.int64)
     
     return {
         'features': features_tensor,

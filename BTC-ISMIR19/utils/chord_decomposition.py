@@ -163,6 +163,8 @@ class ChordDecomposer:
             'maj9' -> triad='maj', extensions include 9th
             'min7' -> triad='min', extensions include 7th
             '5' -> triad='N', misc='5'
+            '7' -> triad='maj' (implied), extensions include 7th
+            'hdim7' -> triad='dim', extensions include 7th (half-diminished)
         """
         quality_lower = quality.lower()
         
@@ -171,18 +173,40 @@ class ChordDecomposer:
             components['misc'] = '5'
             return
         
-        # Extract triad type
+        # Handle half-diminished (hdim = min7b5)
+        if quality_lower.startswith('hdim') or quality_lower == 'hdim7':
+            components['triad'] = 'dim'
+            remaining = quality_lower.replace('hdim', '', 1)
+            self._extract_extensions(remaining, components)
+            return
+        
+        # Handle power chord variations
+        if quality_lower.startswith('(1,5)') or quality_lower == 'power':
+            components['misc'] = '5'
+            return
+        
+        # Extract triad type (check longer patterns first)
         triad = None
         remaining = quality_lower
         
-        for triad_name in ['maj', 'min', 'dim', 'aug', 'sus2', 'sus4']:
+        # Order matters: check longer patterns first to avoid partial matches
+        triad_patterns = ['sus2', 'sus4', 'maj', 'min', 'dim', 'aug']
+        for triad_name in triad_patterns:
             if triad_name in quality_lower:
                 triad = triad_name
-                remaining = quality_lower.replace(triad_name, '', 1)
+                # Remove triad from remaining, being careful about position
+                idx = quality_lower.find(triad_name)
+                remaining = quality_lower[:idx] + quality_lower[idx + len(triad_name):]
                 break
         
         if triad:
             components['triad'] = triad
+        else:
+            # If no explicit triad but has extensions, assume major triad
+            # e.g., 'C:7' means C major with dominant 7th
+            if any(ext in quality_lower for ext in ['7', '9', '11', '13']):
+                components['triad'] = 'maj'
+                remaining = quality_lower
         
         # Extract extensions from remaining string
         self._extract_extensions(remaining, components)
@@ -191,23 +215,39 @@ class ChordDecomposer:
         """
         Extract extension components from remaining quality string.
         
+        The order of extraction is important: higher extensions first (13 before 11 before 9)
+        to avoid partial matches (e.g., '13' containing '1').
+        
         Examples:
             '9' -> adds 9th component
             'b7' -> adds 7th component with flat
             '13' -> adds 13th component
         """
-        # Handle 7th extension
-        if 'bb7' in remaining:
-            components['7th'] = 'bb7'
-            remaining = remaining.replace('bb7', '', 1)
-        elif 'b7' in remaining:
-            components['7th'] = 'b7'
-            remaining = remaining.replace('b7', '', 1)
-        elif '7' in remaining and '#7' not in remaining and 'b7' not in remaining:
-            components['7th'] = '7'
-            remaining = remaining.replace('7', '', 1)
+        # Handle 13th extension FIRST (to avoid '1' matching in '13')
+        if 'b13' in remaining:
+            components['13th'] = 'b13'
+            remaining = remaining.replace('b13', '', 1)
+        elif '#13' in remaining:
+            # Non-standard but handle gracefully
+            components['13th'] = '13'
+            remaining = remaining.replace('#13', '', 1)
+        elif '13' in remaining:
+            components['13th'] = '13'
+            remaining = remaining.replace('13', '', 1)
         
-        # Handle 9th extension
+        # Handle 11th extension SECOND (to avoid '1' matching in '11')
+        if '#11' in remaining:
+            components['11th'] = '#11'
+            remaining = remaining.replace('#11', '', 1)
+        elif 'b11' in remaining:
+            # b11 is enharmonic to #9 but handle as 11
+            components['11th'] = '11'
+            remaining = remaining.replace('b11', '', 1)
+        elif '11' in remaining:
+            components['11th'] = '11'
+            remaining = remaining.replace('11', '', 1)
+        
+        # Handle 9th extension THIRD
         if '#9' in remaining:
             components['9th'] = '#9'
             remaining = remaining.replace('#9', '', 1)
@@ -218,21 +258,20 @@ class ChordDecomposer:
             components['9th'] = '9'
             remaining = remaining.replace('9', '', 1)
         
-        # Handle 11th extension
-        if '#11' in remaining:
-            components['11th'] = '#11'
-            remaining = remaining.replace('#11', '', 1)
-        elif '11' in remaining:
-            components['11th'] = '11'
-            remaining = remaining.replace('11', '', 1)
-        
-        # Handle 13th extension
-        if 'b13' in remaining:
-            components['13th'] = 'b13'
-            remaining = remaining.replace('b13', '', 1)
-        elif '13' in remaining:
-            components['13th'] = '13'
-            remaining = remaining.replace('13', '', 1)
+        # Handle 7th extension LAST
+        if 'bb7' in remaining:
+            components['7th'] = 'bb7'
+            remaining = remaining.replace('bb7', '', 1)
+        elif 'maj7' in remaining:
+            # Major 7th
+            components['7th'] = '7'
+            remaining = remaining.replace('maj7', '', 1)
+        elif 'b7' in remaining:
+            components['7th'] = 'b7'
+            remaining = remaining.replace('b7', '', 1)
+        elif '7' in remaining:
+            components['7th'] = '7'
+            remaining = remaining.replace('7', '', 1)
     
     def decompose_batch(self, chord_labels: List[str]) -> Dict[str, np.ndarray]:
         """
@@ -278,9 +317,16 @@ class ChordReassembler:
     """
     Reassembles chord components back into valid chord labels.
     
-    Implements priority logic:
-    - If triad is 'N', output is 'N'
-    - Otherwise, construct chord from components respecting musical validity
+    Implements priority logic for musical validity:
+    
+    Priority Rules:
+    1. If root is 'N', output is 'N' (no chord without root)
+    2. If triad is 'N' AND misc is 'N', output is 'N' (need triad or power chord)
+    3. If misc is '5' (power chord), use that instead of triad
+    4. Extensions are only valid if there's a triad
+    5. Bass is only added if different from root
+    
+    This ensures musically valid chord reconstructions.
     """
     
     def __init__(self):
@@ -293,38 +339,92 @@ class ChordReassembler:
         Reassemble chord label from decomposed components.
         
         Args:
-            components: Dictionary with 8 component keys
+            components: Dictionary with 8 component keys:
+                - root, bass, triad, misc, 7th, 9th, 11th, 13th
             
         Returns:
-            Reconstructed chord label string
+            Reconstructed chord label string (e.g., 'C:maj7', 'D:min/F#', 'N')
         """
-        # Priority: if triad is N, entire chord is N
-        if components.get('triad', 'N') == 'N':
-            return 'N'
-        
         root = components.get('root', 'N')
+        triad = components.get('triad', 'N')
+        misc = components.get('misc', 'N')
+        bass = components.get('bass', 'N')
+        
+        # Priority 1: No root means no chord
         if root == 'N':
             return 'N'
         
-        # Build chord string
-        chord = f"{root}:{components['triad']}"
+        # Priority 2: Power chord case (misc = '5')
+        if misc == '5':
+            # Power chord: root:5 with optional bass
+            chord = f"{root}:5"
+            if bass != 'N' and bass != root:
+                chord += f"/{bass}"
+            return chord
+        
+        # Priority 3: No triad means no chord (unless power chord)
+        if triad == 'N':
+            return 'N'
+        
+        # Build chord string: root:triad
+        chord = f"{root}:{triad}"
         
         # Add extensions in order: 7th, 9th, 11th, 13th
-        for ext_name in ['7th', '9th', '11th', '13th']:
-            ext_value = components.get(ext_name, 'N')
-            if ext_value != 'N':
-                chord += ext_value
+        # Extensions are added sequentially as they appear in chord notation
+        ext_7th = components.get('7th', 'N')
+        ext_9th = components.get('9th', 'N')
+        ext_11th = components.get('11th', 'N')
+        ext_13th = components.get('13th', 'N')
         
-        # Add power chord if present
-        if components.get('misc', 'N') == '5':
-            chord += '5'
+        # Add extensions in standard notation order
+        if ext_7th != 'N':
+            chord += ext_7th
+        if ext_9th != 'N':
+            chord += ext_9th
+        if ext_11th != 'N':
+            chord += ext_11th
+        if ext_13th != 'N':
+            chord += ext_13th
         
-        # Add bass if different from root
-        bass = components.get('bass', 'N')
+        # Add bass note if different from root
         if bass != 'N' and bass != root:
             chord += f"/{bass}"
         
         return chord
+    
+    def reassemble_with_confidence(self, components: Dict[str, str], 
+                                   confidences: Dict[str, float]) -> Tuple[str, float]:
+        """
+        Reassemble chord with overall confidence score.
+        
+        Args:
+            components: Dictionary with 8 component keys
+            confidences: Dictionary with confidence scores for each component
+            
+        Returns:
+            Tuple of (chord_label, confidence_score)
+        """
+        chord = self.reassemble(components)
+        
+        if chord == 'N':
+            # For N chord, confidence is based on root or triad being N
+            conf = max(confidences.get('root', 0.0), confidences.get('triad', 0.0))
+        else:
+            # For valid chords, use minimum confidence across active components
+            active_confs = [confidences.get('root', 1.0), confidences.get('triad', 1.0)]
+            
+            # Add confidence for bass if present
+            if components.get('bass', 'N') != 'N':
+                active_confs.append(confidences.get('bass', 1.0))
+            
+            # Add confidence for active extensions
+            for ext in ['7th', '9th', '11th', '13th']:
+                if components.get(ext, 'N') != 'N':
+                    active_confs.append(confidences.get(ext, 1.0))
+            
+            conf = min(active_confs) if active_confs else 0.0
+        
+        return chord, conf
     
     def reassemble_from_indices(self, indices: Dict[str, int]) -> str:
         """
@@ -338,8 +438,14 @@ class ChordReassembler:
         """
         components = {}
         for component in COMPONENT_NAMES:
-            idx = indices[component]
-            components[component] = self.vocab[component][min(idx, len(self.vocab[component]) - 1)]
+            idx = indices.get(component, 0)
+            # Handle both int and array-like indices
+            if hasattr(idx, 'item'):
+                idx = idx.item()
+            idx = int(idx)
+            # Clamp index to valid range
+            idx = max(0, min(idx, len(self.vocab[component]) - 1))
+            components[component] = self.vocab[component][idx]
         return self.reassemble(components)
     
     def reassemble_batch(self, indices_batch: Dict[str, np.ndarray]) -> List[str]:
@@ -347,19 +453,85 @@ class ChordReassembler:
         Reassemble a batch of chord labels from component indices.
         
         Args:
-            indices_batch: Dictionary mapping component names to arrays of indices
+            indices_batch: Dictionary mapping component names to arrays of indices.
+                          Each array should have shape (batch_size,) or (batch_size, seq_len)
             
         Returns:
             List of reconstructed chord label strings
         """
-        batch_size = len(indices_batch[COMPONENT_NAMES[0]])
-        result = []
+        # Get total number of elements
+        first_component = COMPONENT_NAMES[0]
+        indices_array = indices_batch[first_component]
         
-        for i in range(batch_size):
-            indices = {component: indices_batch[component][i] 
+        if isinstance(indices_array, np.ndarray):
+            total_elements = indices_array.size
+            flat_indices = {comp: indices_batch[comp].flatten() 
+                           for comp in COMPONENT_NAMES}
+        else:
+            # Handle tensor or list
+            if hasattr(indices_array, 'numpy'):
+                indices_array = indices_array.numpy()
+            else:
+                indices_array = np.array(indices_array)
+            total_elements = indices_array.size
+            flat_indices = {}
+            for comp in COMPONENT_NAMES:
+                arr = indices_batch[comp]
+                if hasattr(arr, 'numpy'):
+                    arr = arr.numpy()
+                else:
+                    arr = np.array(arr)
+                flat_indices[comp] = arr.flatten()
+        
+        result = []
+        for i in range(total_elements):
+            indices = {component: flat_indices[component][i] 
                       for component in COMPONENT_NAMES}
             chord_label = self.reassemble_from_indices(indices)
             result.append(chord_label)
+        
+        return result
+    
+    def reassemble_batch_2d(self, indices_batch: Dict[str, np.ndarray]) -> List[List[str]]:
+        """
+        Reassemble a 2D batch of chord labels from component indices.
+        
+        Args:
+            indices_batch: Dictionary mapping component names to 2D arrays of indices.
+                          Each array should have shape (batch_size, seq_len)
+            
+        Returns:
+            List of lists: [[chord_labels for seq1], [chord_labels for seq2], ...]
+        """
+        first_component = COMPONENT_NAMES[0]
+        indices_array = indices_batch[first_component]
+        
+        if hasattr(indices_array, 'numpy'):
+            indices_array = indices_array.numpy()
+        elif not isinstance(indices_array, np.ndarray):
+            indices_array = np.array(indices_array)
+        
+        if len(indices_array.shape) == 1:
+            # 1D array, return as single list
+            return [self.reassemble_batch(indices_batch)]
+        
+        batch_size, seq_len = indices_array.shape
+        result = []
+        
+        for b in range(batch_size):
+            seq_result = []
+            for t in range(seq_len):
+                indices = {}
+                for component in COMPONENT_NAMES:
+                    arr = indices_batch[component]
+                    if hasattr(arr, 'numpy'):
+                        arr = arr.numpy()
+                    elif not isinstance(arr, np.ndarray):
+                        arr = np.array(arr)
+                    indices[component] = arr[b, t]
+                chord_label = self.reassemble_from_indices(indices)
+                seq_result.append(chord_label)
+            result.append(seq_result)
         
         return result
 

@@ -362,39 +362,78 @@ class MultiTaskLoss(nn.Module):
     @staticmethod
     def compute_class_weights(train_dataset, gamma=0.5, w_max=10.0, device=None):
         """
-        Compute class weights from training data.
+        Compute class weights from training data using the Class Re-weighting formula.
+        
+        Formula:
+            w_m^(j) = min((n_m^(j) / max(n_m'^(j)))^(-gamma), w_max)
+        
+        where:
+            - n_m^(j) is the count of class m in component j
+            - max(n_m'^(j)) is the maximum count among all classes in component j
+            - gamma is the weighting exponent (default 0.5)
+            - w_max is the maximum weight cap (default 10.0)
+        
+        This gives higher weights to rare classes to handle the long tail distribution.
         
         Args:
-            train_dataset: Training dataset with 'components' field
-            gamma: Weighting exponent
-            w_max: Maximum weight cap
-            device: Device to place tensors on
+            train_dataset: Training dataset with 'components' field. Each sample should
+                          have a 'components' dict mapping component names to index arrays.
+                          Dataset should support __len__ and __getitem__.
+            gamma: Weighting exponent (lower = more smoothing). Default: 0.5
+            w_max: Maximum weight cap to prevent extreme weights. Default: 10.0
+            device: Device to place tensors on (defaults to CPU)
         
         Returns:
             class_weights: Dict mapping component names to weight tensors
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         class_weights = {}
         
         for component in COMPONENT_NAMES:
             vocab_size = len(CHORD_VOCAB[component])
-            counts = np.zeros(vocab_size)
+            counts = np.zeros(vocab_size, dtype=np.float64)
             
-            # Count class occurrences
-            for sample in train_dataset:
+            # Count class occurrences across all samples
+            # Use __getitem__ indexing to support standard PyTorch Dataset
+            n_samples = len(train_dataset)
+            for i in range(n_samples):
+                sample = train_dataset[i]
                 if 'components' in sample:
-                    component_indices = sample['components'][component]
-                    if isinstance(component_indices, np.ndarray):
-                        for idx in component_indices:
-                            if 0 <= idx < vocab_size:
-                                counts[idx] += 1
+                    component_data = sample['components'][component]
+                    
+                    # Handle different data types
+                    if isinstance(component_data, torch.Tensor):
+                        component_indices = component_data.numpy().flatten()
+                    elif isinstance(component_data, np.ndarray):
+                        component_indices = component_data.flatten()
+                    else:
+                        component_indices = np.array(component_data).flatten()
+                    
+                    # Count each class occurrence
+                    for idx in component_indices:
+                        idx = int(idx)
+                        if 0 <= idx < vocab_size:
+                            counts[idx] += 1
             
-            # Compute weights
-            max_count = np.max(counts) + 1e-8
-            weights = np.power(counts / max_count, -gamma)
-            weights = np.minimum(weights, w_max)
+            # Get maximum count (most frequent class)
+            max_count = np.max(counts)
             
-            # Handle classes with zero count
-            weights[counts == 0] = w_max
+            if max_count == 0:
+                # No data found, use uniform weights
+                logger.warning(f"No data found for component '{component}'. Using uniform weights.")
+                weights = np.ones(vocab_size)
+            else:
+                # Apply the formula: w_m = min((n_m / max_n)^(-gamma), w_max)
+                # For classes with zero count, set weight to w_max
+                weights = np.zeros(vocab_size)
+                for m in range(vocab_size):
+                    if counts[m] == 0:
+                        weights[m] = w_max
+                    else:
+                        ratio = counts[m] / max_count
+                        weights[m] = min(np.power(ratio, -gamma), w_max)
             
             # Convert to tensor
             weights_tensor = torch.tensor(weights, dtype=torch.float32)
@@ -402,5 +441,10 @@ class MultiTaskLoss(nn.Module):
                 weights_tensor = weights_tensor.to(device)
             
             class_weights[component] = weights_tensor
+            
+            # Log statistics
+            logger.debug(f"Component '{component}': "
+                        f"counts range [{counts.min():.0f}, {counts.max():.0f}], "
+                        f"weights range [{weights.min():.3f}, {weights.max():.3f}]")
         
         return class_weights
