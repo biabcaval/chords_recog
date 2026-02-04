@@ -226,10 +226,7 @@ class TestDataset(torch.utils.data.Dataset):
         self.song_names = song_names
         # Create a preprocessor for the scoring function to use
         from utils.preprocess import Preprocess, FeatureTypes
-        # Use feature type from config instead of hardcoded 'cqt'
-        feature_type_str = config.feature.get('type', 'cqt')
-        feature_type = FeatureTypes.hcqt if feature_type_str == 'hcqt' else FeatureTypes.cqt
-        self.preprocessor = Preprocess(config, feature_type, (dataset_name,), root_dir)
+        self.preprocessor = Preprocess(config, FeatureTypes.cqt, (dataset_name,), root_dir)
     
     def __len__(self):
         return len(self.paths)
@@ -306,11 +303,6 @@ if config.class_weights.get('enabled', False):
             logger.warning("Structured labels not found in dataset. Per-component weights not computed.")
 
 # Model and Optimizer
-# Add feature type and related params to model config
-config.model['feature_type'] = config.feature['type']
-config.model['n_harmonics'] = config.feature.get('n_harmonics', 6)
-config.model['n_bins'] = config.feature.get('n_bins', 144)
-
 if args.model == 'cnn':
     model = CNN(config=config.model).to(device)
 elif args.model == 'crnn':
@@ -379,19 +371,12 @@ else:
 mp3_config = config.mp3
 feature_config = config.feature
 mp3_string = "%d_%.1f_%.1f" % (mp3_config['song_hz'], mp3_config['inst_len'], mp3_config['skip_interval'])
-# Use actual feature type from config instead of hardcoded 'cqt'
-feature_type = feature_config.get('type', 'cqt')
-feature_string = "_%s_%d_%d_%d_" % (feature_type, feature_config['n_bins'], feature_config['bins_per_octave'], feature_config['hop_length'])
+feature_string = "_%s_%d_%d_%d_" % ('cqt', feature_config['n_bins'], feature_config['bins_per_octave'], feature_config['hop_length'])
 z_path = os.path.join(config.path['root_path'], 'result', mp3_string + feature_string + 'mix_kfold_'+ str(args.kfold) +'_normalization.pt')
 if os.path.exists(z_path):
     normalization = torch.load(z_path)
     mean = normalization['mean']
     std = normalization['std']
-    # Ensure mean and std are Python floats, not tensors
-    if isinstance(mean, torch.Tensor):
-        mean = mean.item()
-    if isinstance(std, torch.Tensor):
-        std = std.item()
     logger.info("Global mean and std (k fold index %d) load complete" % args.kfold)
 else:
     mean = 0
@@ -470,15 +455,13 @@ for epoch in range(restore_epoch, config.experiment['max_epoch']):
         if len(data) == 9:  # Structured output
             features, input_percentages, chords, collapsed_chords, chord_lens, boundaries, roots, qualities, basses = data
             features = features.to(device)
-            chords = chords.to(device)
             roots = roots.to(device)
             qualities = qualities.to(device)
             basses = basses.to(device)
             use_structured = True
         else:  # Non-structured output
             features, input_percentages, chords, collapsed_chords, chord_lens, boundaries = data
-            features = features.to(device)
-            chords = chords.to(device)
+            features, chords = features.to(device), chords.to(device)
             use_structured = False
 
         features.requires_grad = True
@@ -512,8 +495,6 @@ for epoch in range(restore_epoch, config.experiment['max_epoch']):
             second_correct += second_mask.type_as(roots).sum()
         else:
             # Original model forward pass
-            # Ensure chords is on the correct device before passing to model
-            assert chords.device == features.device, f"Device mismatch: features on {features.device}, chords on {chords.device}"
             prediction, total_loss, weights, second = model(features, chords)
             
             # save accuracy and loss
@@ -583,7 +564,6 @@ for epoch in range(restore_epoch, config.experiment['max_epoch']):
             if len(data) == 9:  # Structured output
                 val_features, val_input_percentages, val_chords, val_collapsed_chords, val_chord_lens, val_boundaries, val_roots, val_qualities, val_basses = data
                 val_features = val_features.to(device)
-                val_chords = val_chords.to(device)
                 val_roots = val_roots.to(device)
                 val_qualities = val_qualities.to(device)
                 val_basses = val_basses.to(device)
