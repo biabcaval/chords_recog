@@ -4,7 +4,9 @@ mp3:
   skip_interval: 5.0
 
 feature:
+  type : 'cqt' # Options: 'cqt', 'hcqt'
   n_bins: 144
+  n_harmonics: 6  # Only used for 'hcqt' type
   bins_per_octave: 24
   hop_length: 2048
   # large_voca: False
