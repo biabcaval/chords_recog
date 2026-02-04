@@ -185,8 +185,8 @@ def main():
                        help='Path to configuration file')
     parser.add_argument('--dataset', type=str, default='dj_avan',
                        help='Dataset name (billboard, dj_avan, etc.)')
-    parser.add_argument('--data_root', type=str, default='/home/daniel.melo/datasets/result_decomposed',
-                       help='Root directory for decomposed preprocessed data')
+    parser.add_argument('--data_root', type=str, default='/home/daniel.melo/datasets',
+                       help='Root directory for preprocessed data (will look in result_decomposed subdirectory)')
     parser.add_argument('--kfold', type=int, default=4,
                        help='K-fold index for validation (0-4). Others used for training.')
     parser.add_argument('--test_kfold', type=int, default=None,

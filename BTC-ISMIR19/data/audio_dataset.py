@@ -155,7 +155,10 @@ class AudioDataset(Dataset):
         temp = {}
         used_song_names = list()
         for name in self.dataset_names:
-            dataset_path = os.path.join(self.root_dir, "result", name+'_voca', self.mp3_string, self.feature_string)
+            # Try result_decomposed first, then fall back to result
+            dataset_path = os.path.join(self.root_dir, "result_decomposed", name+'_voca', self.mp3_string, self.feature_string)
+            if not os.path.exists(dataset_path):
+                dataset_path = os.path.join(self.root_dir, "result", name+'_voca', self.mp3_string, self.feature_string)
             if not os.path.exists(dataset_path):
                 raise FileNotFoundError(
                     f"Dataset directory not found: {dataset_path}\n"
