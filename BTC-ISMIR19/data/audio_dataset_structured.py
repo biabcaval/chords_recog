@@ -70,6 +70,11 @@ class AudioDatasetStructured(BaseAudioDataset):
 
         features = np.log(np.abs(data['feature']) + 1e-6)
         
+        # Features are saved as (n_bins, timesteps), need to transpose to (timesteps, n_bins)
+        if features.shape[0] != self.config.model['timestep']:
+            # Transpose if needed
+            features = features.T  # Now (timesteps, n_bins)
+        
         # Clip/pad to expected timestep if needed
         # Expected shape: (timestep, feature_size)
         timestep = self.config.model['timestep'] if hasattr(self.config, 'model') else 108
