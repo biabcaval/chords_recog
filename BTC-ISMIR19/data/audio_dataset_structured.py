@@ -67,7 +67,20 @@ class AudioDatasetStructured(BaseAudioDataset):
         
         res = dict()
         data = torch.load(instance_path, weights_only=False)
-        res['feature'] = np.log(np.abs(data['feature']) + 1e-6)
+        features = np.log(np.abs(data['feature']) + 1e-6)
+        
+        # Clip/pad to expected timestep if needed
+        # Expected shape: (timestep, feature_size)
+        timestep = self.config.model['timestep'] if hasattr(self.config, 'model') else 108
+        if features.shape[0] > timestep:
+            # Take first timestep frames
+            features = features[:timestep, :]
+        elif features.shape[0] < timestep:
+            # Pad with zeros
+            pad_length = timestep - features.shape[0]
+            features = np.pad(features, ((0, pad_length), (0, 0)), mode='constant')
+        
+        res['feature'] = features
         
         # Handle both old and new data formats
         if 'chord' in data:
