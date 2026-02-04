@@ -179,8 +179,8 @@ class BTC_model_decomposed(nn.Module):
         self.criterion = MultiTaskLoss(
             vocab_sizes=self.decomposer.vocab_sizes,
             class_weights=class_weights,
-            gamma=config.get('class_weight_gamma', 0.5),
-            w_max=config.get('class_weight_max', 10.0)
+            gamma=cfg.get('class_weight_gamma', 0.5),
+            w_max=cfg.get('class_weight_max', 10.0)
         )
         
         # Store component names for reference
