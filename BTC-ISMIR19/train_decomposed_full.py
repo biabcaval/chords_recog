@@ -53,6 +53,9 @@ class DecomposedDataLoader:
         self.train_kfold = train_kfold
         self.test_kfold = test_kfold
         
+        # AudioDataset expects dataset_names as tuple
+        dataset_names = (dataset_name,)
+        
         # Create datasets with different kfold indices
         self.train_dataset = AudioDatasetStructured(
             config,
@@ -60,7 +63,7 @@ class DecomposedDataLoader:
             train=True,
             kfold=train_kfold,
             decompose=True,
-            dataset_name=dataset_name
+            dataset_names=dataset_names
         )
         
         self.val_dataset = AudioDatasetStructured(
@@ -69,7 +72,7 @@ class DecomposedDataLoader:
             train=False,
             kfold=train_kfold,  # Same fold as validation set
             decompose=True,
-            dataset_name=dataset_name
+            dataset_names=dataset_names
         )
         
         self.test_dataset = AudioDatasetStructured(
@@ -78,7 +81,7 @@ class DecomposedDataLoader:
             train=False,
             kfold=test_kfold,
             decompose=True,
-            dataset_name=dataset_name
+            dataset_names=dataset_names
         )
     
     def get_loaders(self, batch_size, num_workers=4):
