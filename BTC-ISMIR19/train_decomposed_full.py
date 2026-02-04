@@ -105,6 +105,18 @@ class DecomposedDataLoader:
                 logger.error(f"Contents of {check_path}:")
                 for item in os.listdir(check_path):
                     logger.error(f"  - {item}")
+                    # Check deeper
+                    deeper_path = os.path.join(check_path, item)
+                    if os.path.isdir(deeper_path):
+                        logger.error(f"    Contents of {deeper_path}:")
+                        for subitem in os.listdir(deeper_path):
+                            logger.error(f"      - {subitem}")
+                            # Check even deeper
+                            deeper_path2 = os.path.join(deeper_path, subitem)
+                            if os.path.isdir(deeper_path2):
+                                logger.error(f"        Contents of {deeper_path2}:")
+                                for subitem2 in os.listdir(deeper_path2)[:3]:
+                                    logger.error(f"          - {subitem2}")
             else:
                 logger.error(f"{check_path} does not exist!")
                 # Try result instead
