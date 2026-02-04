@@ -171,6 +171,10 @@ def train_epoch(model, loader, optimizer, device, loss_fn, log_interval=10):
         # Move data to device
         features = batch['feature'].to(device)
         
+        # DEBUG: Print shape
+        if batch_idx == 0:
+            logger.info(f"Batch shape: {features.shape}, type: {type(features)}")
+        
         # Map 'components' to 'targets' if available
         if 'components' in batch:
             targets = {k: v.to(device) for k, v in batch['components'].items()}

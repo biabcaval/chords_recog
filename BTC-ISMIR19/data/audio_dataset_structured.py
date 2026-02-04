@@ -67,6 +67,7 @@ class AudioDatasetStructured(BaseAudioDataset):
         
         res = dict()
         data = torch.load(instance_path, weights_only=False)
+
         features = np.log(np.abs(data['feature']) + 1e-6)
         
         # Clip/pad to expected timestep if needed
