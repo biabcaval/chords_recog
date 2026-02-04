@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from data.audio_dataset import AudioDataset as BaseAudioDataset
-from utils.chord_decomposition import ChordDecomposer, COMPONENT_NAMES, NUM_COMPONENTS
+from utils.chord_decomposition import ChordDecomposer, COMPONENT_NAMES, NUM_COMPONENTS, CHORD_VOCAB
 import logging
 
 logger = logging.getLogger(__name__)
