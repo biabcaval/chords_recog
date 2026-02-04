@@ -88,6 +88,30 @@ class DecomposedDataLoader:
         """Create PyTorch DataLoaders."""
         from torch.utils.data import DataLoader
         
+        # Debug: Check dataset sizes
+        logger.info(f"Train dataset size: {len(self.train_dataset)}")
+        logger.info(f"Val dataset size: {len(self.val_dataset)}")
+        logger.info(f"Test dataset size: {len(self.test_dataset)}")
+        
+        # Debug: Check if datasets are empty
+        if len(self.train_dataset) == 0:
+            logger.error("TRAIN DATASET IS EMPTY!")
+            logger.error(f"Root dir: {self.root_dir}")
+            logger.error(f"Dataset names: {self.train_dataset.dataset_names}")
+            # Try to list the directory
+            import os
+            check_path = os.path.join(self.root_dir, "result_decomposed")
+            if os.path.exists(check_path):
+                logger.error(f"Contents of {check_path}:")
+                for item in os.listdir(check_path):
+                    logger.error(f"  - {item}")
+            else:
+                logger.error(f"{check_path} does not exist!")
+                # Try result instead
+                check_path = os.path.join(self.root_dir, "result")
+                if os.path.exists(check_path):
+                    logger.error(f"Found result instead: {check_path}")
+        
         train_loader = DataLoader(
             self.train_dataset,
             batch_size=batch_size,
