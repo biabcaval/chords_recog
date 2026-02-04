@@ -286,8 +286,8 @@ def main():
     model.to(device)
     logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    # Loss function
-    loss_fn = MultiTaskLoss()
+    # Loss function (use the one from model)
+    loss_fn = model.criterion
     
     # Optimizer
     optimizer = optim.Adam(
