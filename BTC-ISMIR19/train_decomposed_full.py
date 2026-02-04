@@ -279,12 +279,8 @@ def main():
     # Create model
     logger.info("Creating model...")
     model = BTC_model_decomposed(
-        feature_size=config.model['feature_size'],
-        timestep=config.model['timestep'],
-        hidden_size=config.model['hidden_size'],
-        num_layers=config.model['num_layers'],
-        num_heads=config.model['num_heads'],
-        device=device
+        config=config,
+        class_weights=None
     )
     
     model.to(device)
