@@ -106,16 +106,14 @@ class AudioDatasetStructured(BaseAudioDataset):
         
         for decomposed in decomposed_chords:
             if isinstance(decomposed, dict):
+                # Use decomposer's to_indices method
+                indices = self.decomposer.to_indices(decomposed)
                 for component_name in COMPONENT_NAMES:
-                    label = decomposed.get(component_name, 'N')
-                    # Convert label to index using decomposer's vocabularies
-                    idx = self.decomposer.label_to_index(component_name, label)
-                    components_indices[component_name].append(idx)
+                    components_indices[component_name].append(indices.get(component_name, 0))
             else:
-                # If not dict, add default indices
+                # If not dict, add default indices (all zeros/N)
                 for component_name in COMPONENT_NAMES:
-                    idx = self.decomposer.label_to_index(component_name, 'N')
-                    components_indices[component_name].append(idx)
+                    components_indices[component_name].append(0)
         
         # Convert to tensors
         for component_name in COMPONENT_NAMES:
