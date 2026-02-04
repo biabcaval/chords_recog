@@ -157,8 +157,8 @@ class DecomposedDataLoader:
     @staticmethod
     def collate_fn(batch):
         """Collate function for decomposed data."""
-        # Simple implementation - can be enhanced
-        return torch.utils.data._default_collate(batch)
+        from torch.utils.data import default_collate
+        return default_collate(batch)
 
 
 def train_epoch(model, loader, optimizer, device, loss_fn, log_interval=10):
