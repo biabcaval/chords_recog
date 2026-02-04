@@ -66,7 +66,7 @@ class AudioDatasetStructured(BaseAudioDataset):
         instance_path = self.paths[idx]
         
         res = dict()
-        data = torch.load(instance_path)
+        data = torch.load(instance_path, weights_only=False)
         res['feature'] = np.log(np.abs(data['feature']) + 1e-6)
         res['chord'] = data['chord']
         
