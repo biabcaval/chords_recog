@@ -615,6 +615,110 @@ class ChordReassembler:
 | root=E, misc=5 | `E:5` |
 | root=N | `N` |
 
+### 8.4 Scripts de Inferência
+
+#### Inferência em Áudio Completo
+
+O script `infer_full_audio.py` processa um arquivo de áudio completo e reconhece acordes:
+
+```bash
+# Mostrar mudanças de acordes (formato agregado)
+python infer_full_audio.py \
+    --checkpoint checkpoints/model_best.pt \
+    --audio_file musica.mp3 \
+    --device cuda
+
+# Mostrar TODOS os frames (primeiros 500)
+python infer_full_audio.py \
+    --checkpoint checkpoints/model_best.pt \
+    --audio_file musica.mp3 \
+    --device cuda \
+    --show_all
+
+# Salvar resultado em arquivo .lab
+python infer_full_audio.py \
+    --checkpoint checkpoints/model_best.pt \
+    --audio_file musica.mp3 \
+    --device cuda \
+    --output resultado.lab
+```
+
+**Parâmetros:**
+
+| Parâmetro | Descrição |
+|-----------|-----------|
+| `--checkpoint` | Caminho para o modelo treinado |
+| `--audio_file` | Arquivo de áudio (mp3, wav, etc.) |
+| `--config` | Arquivo de configuração (default: run_config.yaml) |
+| `--device` | cuda ou cpu |
+| `--show_all` | Mostra todos os frames, não apenas mudanças |
+| `--max_frames` | Limite de frames a exibir (default: 500) |
+| `--output` | Salvar resultado em arquivo |
+
+**Exemplo de Output:**
+
+```
+=== Chord Changes ===
+    0.00s -     3.24s: C:maj
+    3.24s -     6.48s: G:min7
+    6.48s -    10.02s: F:maj
+   10.02s -    13.26s: C:maj7
+
+=== Chord Statistics ===
+  C:maj          :   120 frames ( 25.0%)
+  G:min7         :    95 frames ( 19.8%)
+  F:maj          :    88 frames ( 18.3%)
+  ...
+```
+
+**Formato do Arquivo .lab:**
+
+```
+0.000	3.240	C:maj
+3.240	6.480	G:min7
+6.480	10.020	F:maj
+```
+
+#### Uso Programático (Python)
+
+```python
+import torch
+from models.btc_model_decomposed import BTC_model_decomposed
+from utils.chord_decomposition import ChordReassembler, COMPONENT_NAMES
+from utils.hparams import HParams
+import librosa
+import numpy as np
+
+# Carregar modelo
+config = HParams.load('run_config.yaml')
+model = BTC_model_decomposed(config=config.model)
+checkpoint = torch.load('checkpoints/model_best.pt', map_location='cpu')
+model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+model.eval()
+
+# Carregar áudio e extrair features
+y, sr = librosa.load('musica.mp3', sr=22050)
+cqt = librosa.cqt(y, sr=sr, n_bins=144, bins_per_octave=24, hop_length=2048)
+feature = np.log(np.abs(cqt) + 1e-6)
+
+# Preparar input (primeiro chunk de 108 frames)
+chunk = feature[:, :108].T  # (108, 144)
+x = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0)  # (1, 108, 144)
+
+# Inferência
+with torch.no_grad():
+    output = model(x)
+    predictions = output[0] if isinstance(output, tuple) else model.decomposer.get_predictions(output)
+
+# Reassemblar acordes
+reassembler = ChordReassembler()
+for t in range(10):  # Primeiros 10 frames
+    indices = {comp: predictions[comp][0, t].item() for comp in COMPONENT_NAMES}
+    chord = reassembler.reassemble_from_indices(indices)
+    time_sec = t * 2048 / 22050
+    print(f"{time_sec:.2f}s: {chord}")
+```
+
 ---
 
 ## 9. Métricas de Avaliação
