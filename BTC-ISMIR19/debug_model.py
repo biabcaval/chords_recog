@@ -277,7 +277,13 @@ def test_decomposition_reassembly():
     
     for chord in test_chords:
         components = decomposer.decompose(chord)
-        indices = decomposer.decompose_to_indices(chord)
+        
+        # Convert labels to indices manually
+        indices = {}
+        for comp, label in components.items():
+            vocab = CHORD_VOCAB[comp]
+            indices[comp] = vocab.index(label) if label in vocab else 0
+        
         reassembled = reassembler.reassemble(components)
         
         # Check if reassembly is reasonable
