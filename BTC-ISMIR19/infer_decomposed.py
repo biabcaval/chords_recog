@@ -53,8 +53,9 @@ class ChordRecognitionInference:
         self.model = self.model.to(self.device)
         
         # Load checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        # Use strict=False to ignore criterion weights saved in checkpoint
+        self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         logger.info(f"Loaded checkpoint from {checkpoint_path}")
         
         # Setup inference utilities
