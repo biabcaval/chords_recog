@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 sys.path.insert(0, '.')
 
 from utils.hparams import HParams
-from data.audio_dataset_structured import AudioDatasetStructured, collate_fn_structured
+from data.audio_dataset_structured import AudioDatasetStructured, _collate_fn_structured
 from models.btc_model_decomposed import BTC_model_decomposed, MultiTaskLoss
 from utils.chord_decomposition import CHORD_VOCAB, COMPONENT_NAMES
 
@@ -83,7 +83,7 @@ def main():
         batch_size=16,
         shuffle=True,
         num_workers=0,
-        collate_fn=collate_fn_structured
+        collate_fn=_collate_fn_structured
     )
     
     val_loader = DataLoader(
@@ -91,7 +91,7 @@ def main():
         batch_size=16,
         shuffle=False,
         num_workers=0,
-        collate_fn=collate_fn_structured
+        collate_fn=_collate_fn_structured
     )
     
     # Create model
