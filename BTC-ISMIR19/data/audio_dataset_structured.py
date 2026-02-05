@@ -10,9 +10,20 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from data.audio_dataset import AudioDataset as BaseAudioDataset
 from utils.chord_decomposition import ChordDecomposer, COMPONENT_NAMES, NUM_COMPONENTS, CHORD_VOCAB
+from utils.mir_eval_modules import idx2voca_chord
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Global mapping from chord index to chord label (for 170-class vocabulary)
+_IDX2CHORD = None
+
+def get_idx2chord_mapping():
+    """Get or create the index to chord label mapping."""
+    global _IDX2CHORD
+    if _IDX2CHORD is None:
+        _IDX2CHORD = idx2voca_chord()
+    return _IDX2CHORD
 
 
 class AudioDatasetStructured(BaseAudioDataset):
@@ -108,6 +119,10 @@ class AudioDatasetStructured(BaseAudioDataset):
                 # Convert chord indices back to labels for decomposition
                 chord_labels = self._get_chord_labels(res['chord'])
                 components_indices = self.decomposer.decompose_batch(chord_labels)
+                # Convert numpy arrays to tensors
+                for component_name in COMPONENT_NAMES:
+                    if isinstance(components_indices[component_name], np.ndarray):
+                        components_indices[component_name] = torch.LongTensor(components_indices[component_name])
                 res['components'] = components_indices
         
         return res
@@ -149,18 +164,42 @@ class AudioDatasetStructured(BaseAudioDataset):
             chord_data: Either list of chord labels (strings) or indices
             
         Returns:
-            List of chord label strings
+            List of chord label strings (e.g., 'C:maj', 'D:min7', 'N')
         """
         if isinstance(chord_data, (list, np.ndarray)):
-            if len(chord_data) > 0:
-                # Check if it's already strings
-                if isinstance(chord_data[0], str):
+            if len(chord_data) == 0:
+                return chord_data
+            
+            # Get the first element to check type
+            first_elem = chord_data[0]
+            
+            # Check if it's already chord label strings (e.g., 'C:maj', 'N')
+            if isinstance(first_elem, str):
+                # Check if the string looks like a chord label vs a numeric index
+                if ':' in first_elem or first_elem in ('N', 'X'):
                     return chord_data
-                # If indices, would need mapping (implement as needed)
-                else:
-                    logger.warning("Chord data appears to be indices, not labels. "
-                                  "Returning as-is for decomposition.")
-                    return [str(c) for c in chord_data]
+                # It's a numeric string like '130' - convert to int first
+                try:
+                    chord_data = [int(c) for c in chord_data]
+                    first_elem = chord_data[0]
+                except (ValueError, TypeError):
+                    # Can't convert, return as-is
+                    return chord_data
+            
+            # If indices (int or numpy int), convert to chord labels
+            if isinstance(first_elem, (int, np.integer)):
+                idx2chord = get_idx2chord_mapping()
+                chord_labels = []
+                for idx in chord_data:
+                    idx_int = int(idx)
+                    # Handle out of range indices
+                    if idx_int in idx2chord:
+                        chord_labels.append(idx2chord[idx_int])
+                    else:
+                        # Unknown index -> 'N'
+                        chord_labels.append('N')
+                return chord_labels
+            
         return chord_data
 
 
