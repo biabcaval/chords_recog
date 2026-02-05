@@ -198,8 +198,16 @@ class ChordDecomposer:
             '5' -> triad='N', misc='5'
             'hdim7' -> triad='dim', 7th='b7' (half-diminished)
             'dim7' -> triad='dim', 7th='bb7' (diminished 7th)
+            
+        Also handles .lab file format with parenthetical extensions:
+            'maj7(9)' -> triad='maj', 7th='7', 9th='9'
+            '7(b9)' -> triad='maj', 7th='b7', 9th='b9'
+            'sus4(b7)' -> triad='sus4', 7th='b7'
         """
-        quality_lower = quality.lower()
+        # Normalize parenthetical extensions from .lab files
+        # e.g., 'maj7(9)' -> 'maj79', '7(b9)' -> '7b9'
+        quality_normalized = quality.replace('(', '').replace(')', '')
+        quality_lower = quality_normalized.lower()
         
         # Check for special cases
         if quality_lower == '5' or quality_lower == 'pedal':
@@ -288,7 +296,15 @@ class ChordDecomposer:
             'maj7' -> adds 7th='7' (major 7th)
             '6' -> adds 6th='6'
             '13' -> adds 13th component
+            
+        Also handles parenthetical extensions from .lab files:
+            '(9)' -> adds 9th component
+            '(b9)' -> adds 9th='b9'
+            '(#11)' -> adds 11th='#11'
         """
+        # Remove parentheses from extensions like (9), (b9), (#11)
+        # This normalizes .lab file format to standard format
+        remaining = remaining.replace('(', '').replace(')', '')
         # Handle 13th extension FIRST (to avoid '1' matching in '13')
         if 'b13' in remaining:
             components['13th'] = 'b13'

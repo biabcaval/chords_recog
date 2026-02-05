@@ -100,19 +100,24 @@ class AudioDatasetStructured(BaseAudioDataset):
         # Convert to tensor
         res['feature'] = torch.FloatTensor(features)
         
-        # Handle both old and new data formats
-        if 'chord' in data:
-            res['chord'] = data['chord']
+        # Handle chord labels - prefer original_chord_labels (full extensions)
+        # Priority: original_chord_labels > original_chords > chord
+        if 'original_chord_labels' in data:
+            # New format with full chord labels (includes extensions like 9, 11, 13)
+            res['chord'] = data['original_chord_labels']
+            chord_labels = data['original_chord_labels']
         elif 'original_chords' in data:
             res['chord'] = data['original_chords']
+            chord_labels = self._get_chord_labels(data['original_chords'])
+        elif 'chord' in data:
+            res['chord'] = data['chord']
+            chord_labels = self._get_chord_labels(data['chord'])
         else:
             res['chord'] = []
+            chord_labels = []
         
         # Decompose chords if requested
-        if self.decompose and self.decomposer is not None:
-            # Always re-decompose from original chord indices
-            # (Don't use pre-decomposed data as it may be incorrect)
-            chord_labels = self._get_chord_labels(res['chord'])
+        if self.decompose and self.decomposer is not None and len(chord_labels) > 0:
             components_indices = self.decomposer.decompose_batch(chord_labels)
             # Convert numpy arrays to tensors
             for component_name in COMPONENT_NAMES:
