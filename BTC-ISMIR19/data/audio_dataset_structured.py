@@ -110,20 +110,15 @@ class AudioDatasetStructured(BaseAudioDataset):
         
         # Decompose chords if requested
         if self.decompose and self.decomposer is not None:
-            # Check if data already has decomposed chords
-            if 'decomposed_chord' in data:
-                # Use pre-decomposed chords
-                components_indices = self._convert_decomposed_to_indices(data['decomposed_chord'])
-                res['components'] = components_indices
-            else:
-                # Convert chord indices back to labels for decomposition
-                chord_labels = self._get_chord_labels(res['chord'])
-                components_indices = self.decomposer.decompose_batch(chord_labels)
-                # Convert numpy arrays to tensors
-                for component_name in COMPONENT_NAMES:
-                    if isinstance(components_indices[component_name], np.ndarray):
-                        components_indices[component_name] = torch.LongTensor(components_indices[component_name])
-                res['components'] = components_indices
+            # Always re-decompose from original chord indices
+            # (Don't use pre-decomposed data as it may be incorrect)
+            chord_labels = self._get_chord_labels(res['chord'])
+            components_indices = self.decomposer.decompose_batch(chord_labels)
+            # Convert numpy arrays to tensors
+            for component_name in COMPONENT_NAMES:
+                if isinstance(components_indices[component_name], np.ndarray):
+                    components_indices[component_name] = torch.LongTensor(components_indices[component_name])
+            res['components'] = components_indices
         
         return res
     
