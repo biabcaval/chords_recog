@@ -468,22 +468,81 @@ def compute_class_weights(self, train_dataset, gamma=0.5, w_max=10.0):
 
 ## 7. Treinamento
 
-### 7.1 Configuração
+### 7.1 Comandos de Treinamento
+
+#### Treino Completo
+
+```bash
+# Treino padrão com todas as configurações do run_config.yaml
+python train_decomposed.py
+```
+
+#### Treino Rápido (para testes)
+
+```bash
+# Treino com subset pequeno (500 amostras, 3 epochs)
+python train_quick_test.py
+```
+
+#### Parâmetros do Script
+
+O script `train_decomposed.py` usa as configurações de `run_config.yaml`. Para alterar:
+
+```bash
+# Edite o arquivo de configuração
+nano run_config.yaml
+
+# Ou crie um novo arquivo de config
+python train_decomposed.py --config meu_config.yaml
+```
+
+#### Monitoramento do Treino
+
+O treino mostra progresso a cada N batches:
+
+```
+=== Epoch 1/100 ===
+Batch 58/581, Loss: 3.2145
+Batch 116/581, Loss: 2.8934
+...
+Train Loss: 2.5432
+Val Loss: 2.7891
+Saved best checkpoint to checkpoints/model_best.pt
+```
+
+#### Checkpoints
+
+Os modelos são salvos em:
+- `checkpoints/model_best.pt` - Melhor modelo (menor val loss)
+- `checkpoints/model_epoch_N.pt` - Checkpoint por época (se configurado)
+
+### 7.2 Configuração
 
 ```yaml
 # run_config.yaml
 experiment:
   data_root: /home/daniel.melo/datasets
   dataset_names: ['billboard', 'dj_avan', 'jaah', 'queen', 'robbiewilliams', 'rwc']
-
-train:
-  batch_size: 32
   learning_rate: 0.0001
-  num_epochs: 100
-  early_stopping_patience: 10
+  max_epoch: 100
+  batch_size: 128
+
+model:
+  hidden_size: 128
+  num_layers: 8
+  num_heads: 4
+  input_dropout: 0.2
+  layer_dropout: 0.2
+  attention_dropout: 0.2
+  relu_dropout: 0.2
+
+class_weights:
+  enabled: True
+  gamma: 0.5
+  w_max: 10.0
 ```
 
-### 7.2 Loop de Treinamento
+### 7.4 Loop de Treinamento (Interno)
 
 ```python
 for epoch in range(num_epochs):
@@ -513,7 +572,7 @@ for epoch in range(num_epochs):
         torch.save(model.state_dict(), 'model_best.pt')
 ```
 
-### 7.3 Evolução Esperada da Loss
+### 7.5 Evolução Esperada da Loss
 
 ```
 Epoch 1:  Train Loss: 4.5   Val Loss: 4.2
