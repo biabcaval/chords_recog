@@ -11,8 +11,8 @@ feature:
   large_voca: True
 
 experiment:
-  learning_rate : 0.0002
-  weight_decay : 0.0001
+  learning_rate : 0.0001
+  weight_decay : 0.00
   max_epoch : 100
   batch_size : 128
   save_step : 40
@@ -44,7 +44,7 @@ model:
   layer_dropout : 0.2
   attention_dropout : 0.2
   relu_dropout : 0.2
-  num_layers : 8
+  num_layers : 12
   num_heads : 4
   hidden_size : 128
   total_key_depth : 128
