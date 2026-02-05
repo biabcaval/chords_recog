@@ -105,7 +105,8 @@ def main():
     logger.info(f"Trainable parameters: {trainable_params:,}")
     
     # Create loss and optimizer
-    criterion = MultiTaskLoss()
+    vocab_sizes = {name: len(CHORD_VOCAB[name]) for name in COMPONENT_NAMES}
+    criterion = MultiTaskLoss(vocab_sizes=vocab_sizes)
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
     
     # Training loop
