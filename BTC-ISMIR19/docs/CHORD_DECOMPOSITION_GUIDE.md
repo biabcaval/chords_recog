@@ -186,7 +186,32 @@ Handles inference, decoding, and metrics computation.
 
 ## Usage Example
 
-### Basic Training Loop
+### Command-Line Training
+
+```bash
+# Basic training (auto-generated run name)
+python train_decomposed.py
+
+# Training with custom run name
+python train_decomposed.py --run_name my_experiment
+
+# Training with custom parameters
+python train_decomposed.py \
+    --run_name baseline_v1 \
+    --learning_rate 0.0001 \
+    --batch_size 64 \
+    --num_epochs 150
+
+# Quick test training (small subset)
+python train_quick_test.py
+```
+
+Checkpoints are saved to `checkpoints/<run_name>/`:
+- `model_best.pt` - Best model (lowest validation loss)
+- `model_best_info.json` - Human-readable metrics and config
+- `model_final.pt` - Final epoch model
+
+### Basic Training Loop (Python API)
 
 ```python
 import torch
@@ -197,7 +222,7 @@ from utils.decomposed_inference import DecomposedChordTrainer, ChordMetrics
 from utils.hparams import HParams
 
 # Load configuration
-config = HParams('run_config.yaml')
+config = HParams.load('run_config.yaml')
 
 # Prepare datasets
 train_dataset = AudioDatasetStructured(config, train=True, decompose=True)
@@ -234,6 +259,24 @@ inference = DecomposedChordInference(model, device='cuda')
 test_features = torch.randn(1, 1, 192, 626)  # Example feature shape
 chord_labels = inference.predict_and_decode(test_features)
 print(f"Predicted chords: {chord_labels}")
+```
+
+### Command-Line Inference
+
+```bash
+# Full audio inference with frame-by-frame output
+python infer_full_audio.py \
+    --config run_config.yaml \
+    --checkpoint checkpoints/my_experiment/model_best.pt \
+    --audio_file path/to/audio.mp3 \
+    --device cuda
+
+# Show only chord changes (aggregated)
+python infer_full_audio.py \
+    --config run_config.yaml \
+    --checkpoint checkpoints/my_experiment/model_best.pt \
+    --audio_file path/to/audio.mp3 \
+    --show_changes_only
 ```
 
 ### Working with Component Decomposition
