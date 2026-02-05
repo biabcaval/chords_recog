@@ -15,6 +15,7 @@ Este documento descreve todo o processo desde o pré-processamento do áudio at�
 7. [Treinamento](#7-treinamento)
 8. [Inferência e Reassemblagem](#8-inferência-e-reassemblagem)
 9. [Métricas de Avaliação](#9-métricas-de-avaliação)
+10. [Debug e Testes](#10-debug-e-testes)
 
 ---
 
@@ -946,6 +947,179 @@ Total frames evaluated: 150,000
 
 ---
 
+## 10. Debug e Testes
+
+### 10.1 Script de Debug (`debug_model.py`)
+
+O script `debug_model.py` fornece utilidades para testar e debugar o modelo em diferentes níveis.
+
+#### Comandos Básicos
+
+```bash
+# Rodar todos os testes
+python debug_model.py --config run_config.yaml
+
+# Com checkpoint carregado
+python debug_model.py --config run_config.yaml --checkpoint checkpoints/model_best.pt
+
+# Usar CPU se não tiver GPU
+python debug_model.py --config run_config.yaml --device cpu
+```
+
+#### Testes Disponíveis
+
+| Teste | Comando | Descrição |
+|-------|---------|-----------|
+| `decompose` | `--test decompose` | Testa decomposição e reassembly de acordes |
+| `forward` | `--test forward` | Testa forward pass com dados sintéticos |
+| `gradient` | `--test gradient` | Verifica fluxo de gradientes |
+| `distribution` | `--test distribution` | Analisa distribuição de classes no dataset |
+| `predict` | `--test predict` | Mostra predições decodificadas (requer checkpoint) |
+| `all` | `--test all` | Roda todos os testes (padrão) |
+
+```bash
+# Exemplos
+python debug_model.py --test forward
+python debug_model.py --test gradient
+python debug_model.py --test distribution --num_samples 500
+python debug_model.py --test predict --checkpoint checkpoints/model_best.pt
+```
+
+### 10.2 Teste de Forward Pass
+
+Verifica se o modelo processa corretamente dados sintéticos:
+
+```
+======================================================================
+TEST: Forward Pass with Synthetic Data
+======================================================================
+Input shape: torch.Size([2, 1, 144, 108])
+Expected: (batch=2, 1, features=144, seq_len=108)
+
+--- Predictions ---
+  root  : shape=[2, 108], unique=[0, 1, 2, 3, 4]...
+  bass  : shape=[2, 108], unique=[0, 1, 2]...
+  triad : shape=[2, 108], unique=[0, 1, 2, 3]...
+  ...
+
+--- Loss ---
+  Total Loss: 2.3456
+
+--- Component Losses ---
+  root  : 0.2134 ██
+  bass  : 0.1823 █
+  triad : 0.3521 ███
+  misc  : 0.0812 
+  7th   : 0.4234 ████
+  9th   : 0.2567 ██
+  11th  : 0.1834 █
+  13th  : 0.1531 █
+
+✓ Forward pass successful!
+```
+
+### 10.3 Teste de Gradientes
+
+Verifica se os gradientes fluem corretamente para todos os componentes:
+
+```
+======================================================================
+TEST: Gradient Flow Verification
+======================================================================
+Loss: 2.3456
+
+--- Gradient Norms by Module ---
+  self_attn_layers.input_fc            : avg=0.012345, max=0.023456 ✓
+  self_attn_layers.layers              : avg=0.008234, max=0.015678 ✓
+  decomposer.heads                     : avg=0.005678, max=0.009876 ✓
+
+--- Output Head Gradients ---
+  root  : 0.005432
+  bass  : 0.004567
+  triad : 0.006789
+  ...
+
+✓ Gradient flow verification complete!
+```
+
+### 10.4 Análise de Distribuição
+
+Analisa a distribuição de classes no dataset para identificar desbalanceamentos:
+
+```
+======================================================================
+TEST: Component Distribution Analysis
+======================================================================
+Dataset size: 17736
+Analyzing 100 samples...
+
+--- Distribution per Component ---
+
+root (vocab size: 13, total frames: 10800):
+  C     :   2345 ( 21.7%) ██████████
+  G     :   1876 ( 17.4%) ████████
+  D     :   1543 ( 14.3%) ███████
+  A     :   1234 ( 11.4%) █████
+  E     :    987 (  9.1%) ████
+  ... and 8 more classes
+
+7th (vocab size: 4, total frames: 10800):
+  N     :   8765 ( 81.2%) ████████████████████████████████████████
+  7     :   1234 ( 11.4%) █████
+  b7    :    567 (  5.2%) ██
+  bb7   :    234 (  2.2%) █
+
+✓ Distribution analysis complete!
+```
+
+### 10.5 Teste de Decomposição/Reassembly
+
+Verifica se a decomposição e reassembly de acordes funciona corretamente:
+
+```
+======================================================================
+TEST: Chord Decomposition and Reassembly
+======================================================================
+
+--- Decomposition Test ---
+
+  Input: C:maj
+    Components: {'root': 'C', 'bass': 'N', 'triad': 'maj', ...}
+    Indices: {'root': 1, 'bass': 0, 'triad': 1, ...}
+    Reassembled: C:maj ✓
+
+  Input: D:min7
+    Components: {'root': 'D', 'bass': 'N', 'triad': 'min', '7th': '7', ...}
+    Indices: {'root': 3, 'bass': 0, 'triad': 2, '7th': 1, ...}
+    Reassembled: D:min7 ✓
+
+  Input: N
+    Components: {'root': 'N', 'bass': 'N', 'triad': 'N', ...}
+    Reassembled: N ✓
+
+✓ Decomposition/reassembly test complete!
+```
+
+### 10.6 Visualização de Losses por Componente
+
+Durante o treinamento, as losses são exibidas por componente:
+
+```
+=== Epoch 7/100 ===
+Train Loss: 2.0400
+  Components: root:0.210 | bass:0.183 | tria:0.352 | misc:0.081 | 7th:0.423 | 9th:0.256 | 11th:0.183 | 13th:0.153
+Val Loss: 2.3280
+  Val Components: root:0.245 | bass:0.198 | tria:0.378 | misc:0.092 | 7th:0.456 | 9th:0.278 | 11th:0.198 | 13th:0.167
+Saved best checkpoint to checkpoints/my_run/model_best.pt
+```
+
+Isso permite identificar:
+- Quais componentes estão convergindo mais rápido
+- Quais componentes estão estagnados
+- Se há overfitting em componentes específicos
+
+---
+
 ## Anexo: Estrutura de Arquivos
 
 ```
@@ -957,9 +1131,12 @@ BTC-ISMIR19/
 │   └── btc_model_decomposed.py       # Modelo multi-head
 ├── utils/
 │   ├── chord_decomposition.py        # ChordDecomposer & Reassembler
+│   ├── decomposed_inference.py       # Trainer, Inference, Metrics
 │   ├── mir_eval_modules.py           # idx2voca_chord mapping
 │   └── evaluation_metrics.py         # Métricas de avaliação
 ├── train_decomposed.py               # Script de treinamento
+├── debug_model.py                    # Script de debug e testes
+├── infer_full_audio.py               # Inferência em áudio completo
 ├── evaluate_model.py                 # Script de avaliação
 └── run_config.yaml                   # Configurações
 ```
