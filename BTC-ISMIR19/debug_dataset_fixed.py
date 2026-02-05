@@ -34,9 +34,22 @@ def main():
     idx2chord = get_idx2chord_mapping()
     print(f"Mapping size: {len(idx2chord)} entries")
     print("Sample mappings:")
-    for idx in [0, 1, 130, 169]:
+    for idx in [0, 1, 20, 130, 169]:
         if idx in idx2chord:
             print(f"  {idx} -> '{idx2chord[idx]}'")
+    
+    # Test decomposition of a sample chord
+    from utils.chord_decomposition import ChordDecomposer
+    decomposer = ChordDecomposer()
+    
+    test_idx = 20
+    if test_idx in idx2chord:
+        test_label = idx2chord[test_idx]
+        print(f"\n--- Testing decomposition of index {test_idx} -> '{test_label}' ---")
+        decomposed = decomposer.decompose(test_label)
+        print(f"  Decomposed: {decomposed}")
+        indices = decomposer.to_indices(decomposed)
+        print(f"  Indices: {indices}")
     
     # Create dataset
     print("\n--- Loading dataset ---")
@@ -66,6 +79,27 @@ def main():
     chord_data = sample['chord']
     print(f"\nChord type: {type(chord_data)}, len: {len(chord_data) if hasattr(chord_data, '__len__') else 'N/A'}")
     print(f"First 5 chords (raw): {chord_data[:5]}")
+    
+    # Manually test conversion
+    print("\n--- Testing _get_chord_labels manually ---")
+    test_chords = chord_data[:5]
+    print(f"Input: {test_chords}")
+    
+    # Simulate what _get_chord_labels should do
+    if test_chords and isinstance(test_chords[0], str):
+        if ':' not in test_chords[0] and test_chords[0] not in ('N', 'X'):
+            try:
+                int_chords = [int(c) for c in test_chords]
+                print(f"Converted to ints: {int_chords}")
+                labels = [idx2chord.get(i, 'N') for i in int_chords]
+                print(f"Mapped to labels: {labels}")
+                
+                # Decompose these labels
+                for label in labels[:2]:
+                    dec = decomposer.decompose(label)
+                    print(f"  '{label}' -> {dec}")
+            except Exception as e:
+                print(f"Error: {e}")
     
     # Check components
     print("\n--- Checking components ---")
