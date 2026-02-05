@@ -470,11 +470,39 @@ def compute_class_weights(self, train_dataset, gamma=0.5, w_max=10.0):
 
 ### 7.1 Comandos de Treinamento
 
-#### Treino Completo
+#### Treino Básico
 
 ```bash
-# Treino padrão com todas as configurações do run_config.yaml
+# Treino padrão (gera nome automático com timestamp)
 python train_decomposed.py
+```
+
+#### Treino com Nome Personalizado
+
+```bash
+# Nomear a run de treino
+python train_decomposed.py --run_name meu_experimento
+
+# Exemplos de nomes descritivos
+python train_decomposed.py --run_name baseline_v1
+python train_decomposed.py --run_name teste_dropout_alto
+python train_decomposed.py --run_name hidden256_layers10
+```
+
+#### Treino com Parâmetros Customizados
+
+```bash
+# Alterar hiperparâmetros via linha de comando
+python train_decomposed.py \
+    --run_name experimento_lr_baixo \
+    --learning_rate 0.00005 \
+    --batch_size 64 \
+    --num_epochs 150
+
+# Usar arquivo de config diferente
+python train_decomposed.py \
+    --run_name teste_nova_config \
+    --config configs/minha_config.yaml
 ```
 
 #### Treino Rápido (para testes)
@@ -484,39 +512,121 @@ python train_decomposed.py
 python train_quick_test.py
 ```
 
-#### Parâmetros do Script
+### 7.2 Parâmetros do Script
 
-O script `train_decomposed.py` usa as configurações de `run_config.yaml`. Para alterar:
+| Parâmetro | Default | Descrição |
+|-----------|---------|-----------|
+| `--run_name` | auto (timestamp) | Nome da run (cria subpasta) |
+| `--config` | run_config.yaml | Arquivo de configuração |
+| `--device` | cuda | Dispositivo (cuda, cpu) |
+| `--output_dir` | ./checkpoints | Diretório base para saves |
+| `--num_epochs` | 100 | Número de épocas |
+| `--batch_size` | 32 | Tamanho do batch |
+| `--learning_rate` | 0.001 | Taxa de aprendizado |
+| `--weight_decay` | 1e-5 | Regularização L2 |
+| `--gamma` | 0.5 | Expoente do class weighting |
+| `--w_max` | 10.0 | Peso máximo por classe |
+| `--log_interval` | 10 | Intervalo de log (batches) |
+| `--val_interval` | 1 | Intervalo de validação (epochs) |
+| `--resume` | None | Checkpoint para continuar treino |
 
-```bash
-# Edite o arquivo de configuração
-nano run_config.yaml
+### 7.3 Estrutura de Checkpoints
 
-# Ou crie um novo arquivo de config
-python train_decomposed.py --config meu_config.yaml
+Os checkpoints são organizados por run:
+
+```
+checkpoints/
+├── meu_experimento/
+│   ├── model_best.pt           # Melhor modelo
+│   ├── model_best_info.json    # Metadados legíveis
+│   ├── model_epoch_010.pt      # Checkpoint época 10
+│   ├── model_epoch_020.pt      # Checkpoint época 20
+│   ├── model_final.pt          # Modelo final
+│   └── training_history.json   # Histórico de loss
+├── baseline_v1/
+│   └── ...
+└── run_20260205_143052/        # Nome automático
+    └── ...
 ```
 
-#### Monitoramento do Treino
+### 7.4 Conteúdo do Checkpoint
 
-O treino mostra progresso a cada N batches:
+Cada checkpoint `.pt` contém:
+
+```python
+{
+    'epoch': 15,                    # Época atual
+    'total_epochs': 100,            # Total de épocas
+    'model_state_dict': {...},      # Pesos do modelo
+    'optimizer_state_dict': {...},  # Estado do otimizador
+    'scheduler_state_dict': {...},  # Estado do scheduler
+    
+    'metrics': {
+        'train_loss': 1.2345,
+        'val_loss': 1.4567,
+        'component_losses': {
+            'root': 0.15,
+            'triad': 0.18,
+            ...
+        }
+    },
+    
+    'training_config': {
+        'run_name': 'meu_experimento',
+        'learning_rate': 0.001,
+        'batch_size': 32,
+        'model_config': {
+            'hidden_size': 128,
+            'num_layers': 8,
+            ...
+        },
+        'datasets': ['billboard', 'dj_avan', ...],
+        'train_samples': 17736,
+        'val_samples': 5076,
+    },
+    
+    'saved_at': '2026-02-05T14:30:23'
+}
+```
+
+### 7.5 Monitoramento do Treino
+
+O treino mostra progresso em tempo real:
 
 ```
+Run name: meu_experimento
+Output directory: checkpoints/meu_experimento
+
 === Epoch 1/100 ===
 Batch 58/581, Loss: 3.2145
 Batch 116/581, Loss: 2.8934
 ...
 Train Loss: 2.5432
 Val Loss: 2.7891
-Saved best checkpoint to checkpoints/model_best.pt
+Saved best checkpoint to checkpoints/meu_experimento/model_best.pt
+Saved checkpoint info to checkpoints/meu_experimento/model_best_info.json
 ```
 
-#### Checkpoints
+### 7.6 Carregar Checkpoint
 
-Os modelos são salvos em:
-- `checkpoints/model_best.pt` - Melhor modelo (menor val loss)
-- `checkpoints/model_epoch_N.pt` - Checkpoint por época (se configurado)
+```python
+import torch
 
-### 7.2 Configuração
+# Carregar checkpoint
+checkpoint = torch.load('checkpoints/meu_experimento/model_best.pt')
+
+# Ver informações
+print(f"Run: {checkpoint['training_config']['run_name']}")
+print(f"Epoch: {checkpoint['epoch']}")
+print(f"Val Loss: {checkpoint['metrics']['val_loss']:.4f}")
+print(f"Learning Rate: {checkpoint['training_config']['learning_rate']}")
+print(f"Hidden Size: {checkpoint['training_config']['model_config']['hidden_size']}")
+
+# Carregar modelo
+model.load_state_dict(checkpoint['model_state_dict'])
+```
+
+### 7.7 Configuração (run_config.yaml)
 
 ```yaml
 # run_config.yaml
@@ -542,7 +652,7 @@ class_weights:
   w_max: 10.0
 ```
 
-### 7.4 Loop de Treinamento (Interno)
+### 7.8 Loop de Treinamento (Interno)
 
 ```python
 for epoch in range(num_epochs):
@@ -572,7 +682,7 @@ for epoch in range(num_epochs):
         torch.save(model.state_dict(), 'model_best.pt')
 ```
 
-### 7.5 Evolução Esperada da Loss
+### 7.9 Evolução Esperada da Loss
 
 ```
 Epoch 1:  Train Loss: 4.5   Val Loss: 4.2
