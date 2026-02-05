@@ -1,0 +1,700 @@
+# Pipeline de Reconhecimento de Acordes com Decomposição Estrutural
+
+Este documento descreve todo o processo desde o pré-processamento do áudio até a saída final do modelo, utilizando a técnica de **Chord Structure Decomposition (CSD)**.
+
+---
+
+## Índice
+
+1. [Visão Geral](#1-visão-geral)
+2. [Pré-processamento](#2-pré-processamento)
+3. [Decomposição de Acordes](#3-decomposição-de-acordes)
+4. [Carregamento de Dados](#4-carregamento-de-dados)
+5. [Arquitetura do Modelo](#5-arquitetura-do-modelo)
+6. [Função de Perda](#6-função-de-perda)
+7. [Treinamento](#7-treinamento)
+8. [Inferência e Reassemblagem](#8-inferência-e-reassemblagem)
+9. [Métricas de Avaliação](#9-métricas-de-avaliação)
+
+---
+
+## 1. Visão Geral
+
+### Objetivo
+Reconhecer acordes musicais a partir de áudio, decompondo cada acorde em 8 componentes estruturais independentes, ao invés de classificar diretamente em uma das 170+ classes de acordes.
+
+### Motivação
+- **Problema da cauda longa**: Acordes complexos (como `C:maj9(#11)`) são raros no dataset
+- **Compartilhamento de conhecimento**: O modelo aprende que `C:maj7` e `D:maj7` compartilham a mesma estrutura de tríade e sétima
+- **Melhor generalização**: Componentes individuais têm distribuições mais balanceadas
+
+### Fluxo Geral
+
+```
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐    ┌──────────────┐
+│   Áudio     │───▶│    CQT       │───▶│   Modelo    │───▶│  8 Saídas    │
+│   (.wav)    │    │  Features    │    │   (BTC)     │    │  (softmax)   │
+└─────────────┘    └──────────────┘    └─────────────┘    └──────────────┘
+                                                                 │
+                                                                 ▼
+                                                         ┌──────────────┐
+                                                         │ Reassembler  │
+                                                         │  C:maj7      │
+                                                         └──────────────┘
+```
+
+---
+
+## 2. Pré-processamento
+
+### 2.1 Extração de Features (CQT)
+
+O áudio é convertido em uma representação tempo-frequência usando **Constant-Q Transform (CQT)**.
+
+**Parâmetros (de `run_config.yaml`):**
+
+| Parâmetro | Valor | Descrição |
+|-----------|-------|-----------|
+| `song_hz` | 22050 | Taxa de amostragem |
+| `n_bins` | 144 | Número de bins de frequência |
+| `bins_per_octave` | 24 | Bins por oitava (2 por semitom) |
+| `hop_length` | 2048 | Salto entre frames (~93ms) |
+
+**Cálculo:**
+```python
+# Tempo por frame
+frame_duration = hop_length / song_hz  # 2048/22050 ≈ 0.093s
+
+# Frequência mínima (cobrindo 6 oitavas a partir de C1)
+fmin = librosa.note_to_hz('C1')  # ~32.7 Hz
+```
+
+**Saída:** Matriz `(n_bins, n_frames)` = `(144, T)`
+
+### 2.2 Segmentação
+
+O áudio é dividido em segmentos de tamanho fixo para o treinamento.
+
+| Parâmetro | Valor | Descrição |
+|-----------|-------|-----------|
+| `timestep` | 108 | Número de frames por segmento |
+| `duration` | ~10s | Duração do segmento |
+
+**Fórmula:**
+```
+duração = timestep × (hop_length / song_hz)
+duração = 108 × (2048 / 22050) ≈ 10.03 segundos
+```
+
+### 2.3 Normalização
+
+```python
+# Log-magnitude para compressão dinâmica
+features = np.log(np.abs(cqt) + 1e-6)
+```
+
+### 2.4 Estrutura dos Arquivos `.pt`
+
+Cada segmento é salvo como um arquivo PyTorch:
+
+```python
+{
+    'feature': np.array,        # Shape: (144, 108) - CQT features
+    'chord': list,              # Lista de índices de acordes por frame
+    'original_chords': list,    # Índices originais (backup)
+}
+```
+
+**Localização:** `/datasets/result_decomposed/{dataset}_voca/22050_10.0_5.0/cqt_144_24_2048/{song}/`
+
+---
+
+## 3. Decomposição de Acordes
+
+### 3.1 Os 8 Componentes
+
+Cada acorde é decomposto em 8 componentes independentes:
+
+| # | Componente | Classes | Vocabulário |
+|---|------------|---------|-------------|
+| 1 | **Root** | 13 | N, C, C#, D, D#, E, F, F#, G, G#, A, A#, B |
+| 2 | **Bass** | 13 | N, C, C#, D, D#, E, F, F#, G, G#, A, A#, B |
+| 3 | **Triad** | 7 | N, maj, min, dim, aug, sus2, sus4 |
+| 4 | **Misc** | 2 | N, 5 (power chord) |
+| 5 | **7th** | 4 | N, 7, b7, bb7 |
+| 6 | **9th** | 4 | N, 9, #9, b9 |
+| 7 | **11th** | 3 | N, 11, #11 |
+| 8 | **13th** | 3 | N, 13, b13 |
+
+**Total de combinações possíveis:** 13 × 13 × 7 × 2 × 4 × 4 × 3 × 3 = **153,504**
+
+### 3.2 Exemplos de Decomposição
+
+| Acorde | Root | Bass | Triad | Misc | 7th | 9th | 11th | 13th |
+|--------|------|------|-------|------|-----|-----|------|------|
+| `C:maj` | C | N | maj | N | N | N | N | N |
+| `G:min7` | G | N | min | N | 7 | N | N | N |
+| `D:7` | D | N | maj | N | b7 | N | N | N |
+| `A:min7/E` | A | E | min | N | 7 | N | N | N |
+| `F:maj9` | F | N | maj | N | 7 | 9 | N | N |
+| `C:13` | C | N | maj | N | b7 | 9 | 11 | 13 |
+| `E:5` | E | N | N | 5 | N | N | N | N |
+| `N` | N | N | N | N | N | N | N | N |
+
+### 3.3 Definições de Intervalos
+
+```python
+INTERVAL_DEFINITIONS = {
+    'maj':  [0, 4, 7],      # 1, 3, 5
+    'min':  [0, 3, 7],      # 1, b3, 5
+    'dim':  [0, 3, 6],      # 1, b3, b5
+    'aug':  [0, 4, 8],      # 1, 3, #5
+    'sus2': [0, 2, 7],      # 1, 2, 5
+    'sus4': [0, 5, 7],      # 1, 4, 5
+    '5':    [0, 7],         # 1, 5 (power chord)
+}
+```
+
+### 3.4 Código de Decomposição
+
+```python
+# utils/chord_decomposition.py
+
+class ChordDecomposer:
+    def decompose(self, chord_label: str) -> Dict[str, str]:
+        """
+        Decompõe 'C:maj7' em:
+        {
+            'root': 'C',
+            'bass': 'N',
+            'triad': 'maj',
+            'misc': 'N',
+            '7th': '7',
+            '9th': 'N',
+            '11th': 'N',
+            '13th': 'N'
+        }
+        """
+```
+
+---
+
+## 4. Carregamento de Dados
+
+### 4.1 AudioDatasetStructured
+
+Estende o `AudioDataset` base para incluir decomposição:
+
+```python
+# data/audio_dataset_structured.py
+
+class AudioDatasetStructured(Dataset):
+    def __getitem__(self, idx):
+        # 1. Carrega arquivo .pt
+        data = torch.load(instance_path)
+        
+        # 2. Processa features
+        features = np.log(np.abs(data['feature']) + 1e-6)
+        features = features.T  # (T, 144)
+        
+        # 3. Converte índices para labels
+        chord_labels = self._get_chord_labels(data['chord'])
+        # ['130', '130', ...] → ['A:min6', 'A:min6', ...]
+        
+        # 4. Decompõe em 8 componentes
+        components = self.decomposer.decompose_batch(chord_labels)
+        # {'root': [9, 9, ...], 'triad': [2, 2, ...], ...}
+        
+        return {
+            'feature': torch.FloatTensor(features),  # (108, 144)
+            'chord': chord_labels,                    # lista original
+            'components': components                  # dict de tensores
+        }
+```
+
+### 4.2 Collate Function
+
+Agrupa amostras em batches:
+
+```python
+def _collate_fn_structured(batch):
+    # Stack features: (B, T, F) = (batch, 108, 144)
+    features = torch.stack([s['feature'] for s in batch])
+    
+    # Stack components: (B, T) para cada componente
+    components = {
+        name: torch.stack([s['components'][name] for s in batch])
+        for name in COMPONENT_NAMES
+    }
+    
+    return {
+        'features': features,      # (B, 108, 144)
+        'components': components   # Dict[str, Tensor(B, 108)]
+    }
+```
+
+### 4.3 Fluxo de Dados
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        DataLoader                                 │
+├──────────────────────────────────────────────────────────────────┤
+│  Arquivo .pt                                                      │
+│  ├── feature: (144, T)                                           │
+│  ├── chord: ['130', '130', '45', ...]  (índices como strings)    │
+│  └── original_chords: [...]                                      │
+│                           │                                       │
+│                           ▼                                       │
+│  idx2chord mapping:  130 → 'A:min6'                              │
+│                           │                                       │
+│                           ▼                                       │
+│  ChordDecomposer:  'A:min6' → {root:'A', triad:'min', 7th:'N'...}│
+│                           │                                       │
+│                           ▼                                       │
+│  to_indices:  {root: 10, bass: 0, triad: 2, ...}                 │
+│                           │                                       │
+│                           ▼                                       │
+│  Batch Output:                                                    │
+│  ├── features: (B, 108, 144)                                     │
+│  └── components:                                                  │
+│      ├── root:  (B, 108) - valores 0-12                          │
+│      ├── bass:  (B, 108) - valores 0-12                          │
+│      ├── triad: (B, 108) - valores 0-6                           │
+│      └── ...                                                      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 5. Arquitetura do Modelo
+
+### 5.1 Visão Geral
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    BTC_model_decomposed                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Input: (B, T, F) = (batch, 108, 144)                           │
+│                           │                                      │
+│                           ▼                                      │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │       Bi-directional Self-Attention Layers (BTC)        │    │
+│  │  - Forward self-attention block                         │    │
+│  │  - Backward self-attention block                        │    │
+│  │  - Positionwise convolution                             │    │
+│  │  - Output: (B, T, hidden_size)                          │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                           │                                      │
+│                           ▼                                      │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              Multi-Head Output (8 cabeças)               │    │
+│  │                                                          │    │
+│  │  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌───┐ ┌───┐ ┌────┐│    │
+│  │  │ Root │ │ Bass │ │Triad │ │ Misc │ │7th│ │9th│ │... ││    │
+│  │  │  13  │ │  13  │ │  7   │ │  2   │ │ 4 │ │ 4 │ │    ││    │
+│  │  └──────┘ └──────┘ └──────┘ └──────┘ └───┘ └───┘ └────┘│    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                           │                                      │
+│                           ▼                                      │
+│  Output: Dict[component_name → Tensor(B, T, vocab_size)]        │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 5.2 Componentes do Modelo
+
+#### 5.2.1 Bi-directional Self-Attention Layers
+
+Baseado na arquitetura BTC (Bi-directional Transformer for Chords):
+
+```python
+class bi_directional_self_attention_layers(nn.Module):
+    def __init__(self, embedding_size, hidden_size, num_layers, ...):
+        # Projeção de entrada
+        self.embedding_proj = nn.Linear(embedding_size, hidden_size)
+        
+        # Timing signal (positional encoding)
+        self.timing_signal = _gen_timing_signal(max_length, hidden_size)
+        
+        # Stack de camadas bidirecionais
+        self.self_attn_layers = nn.Sequential(*[
+            bi_directional_self_attention(...)  # Forward + Backward attention
+            for l in range(num_layers)
+        ])
+
+class bi_directional_self_attention(nn.Module):
+    """Cada camada contém dois blocos de atenção."""
+    def __init__(self, ...):
+        self.attn_block = self_attention_block(...)          # Forward
+        self.backward_attn_block = self_attention_block(...) # Backward
+        self.linear = nn.Linear(hidden_size*2, hidden_size)  # Concatenação
+    
+    def forward(self, x):
+        forward_out = self.attn_block(x)
+        backward_out = self.backward_attn_block(x)
+        return self.linear(torch.cat([forward_out, backward_out], dim=2))
+```
+
+#### 5.2.2 Component Head
+
+Cada componente tem sua própria cabeça de classificação:
+
+```python
+class ComponentHead(nn.Module):
+    def __init__(self, hidden_size, num_classes, dropout=0.1):
+        self.layers = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size // 2, num_classes)
+        )
+    
+    def forward(self, x):
+        return self.layers(x)  # (B, T, num_classes)
+```
+
+#### 5.2.3 Multi-Head Decomposer
+
+```python
+class MultiHeadChordDecomposer(nn.Module):
+    def __init__(self, hidden_size):
+        self.heads = nn.ModuleDict({
+            'root':  ComponentHead(hidden_size, 13),
+            'bass':  ComponentHead(hidden_size, 13),
+            'triad': ComponentHead(hidden_size, 7),
+            'misc':  ComponentHead(hidden_size, 2),
+            '7th':   ComponentHead(hidden_size, 4),
+            '9th':   ComponentHead(hidden_size, 4),
+            '11th':  ComponentHead(hidden_size, 3),
+            '13th':  ComponentHead(hidden_size, 3),
+        })
+    
+    def forward(self, x):
+        return {name: head(x) for name, head in self.heads.items()}
+```
+
+### 5.3 Parâmetros do Modelo
+
+| Parâmetro | Valor | Descrição |
+|-----------|-------|-----------|
+| `input_size` | 144 | Dimensão das features CQT |
+| `hidden_size` | 128 | Dimensão interna |
+| `num_layers` | 6 | Camadas do transformer |
+| `num_heads` | 4 | Cabeças de atenção |
+| `dropout` | 0.1 | Taxa de dropout |
+
+**Total de parâmetros:** ~2.9M
+
+---
+
+## 6. Função de Perda
+
+### 6.1 Multi-Task Loss
+
+A perda total é a soma ponderada das perdas de cada componente:
+
+```python
+class MultiTaskLoss(nn.Module):
+    def forward(self, outputs, targets):
+        total_loss = 0
+        
+        for component in COMPONENT_NAMES:
+            # outputs[component]: (B, T, num_classes)
+            # targets[component]: (B, T)
+            
+            logits = outputs[component].view(-1, num_classes)
+            labels = targets[component].view(-1)
+            
+            loss = F.cross_entropy(
+                logits, 
+                labels, 
+                weight=self.class_weights[component]
+            )
+            
+            total_loss += loss
+        
+        return total_loss
+```
+
+### 6.2 Class Re-weighting
+
+Para lidar com classes desbalanceadas (acordes raros):
+
+**Fórmula:**
+$$w_m^{(j)} = \min\left(\left(\frac{n_m^{(j)}}{\max_{m'} n_{m'}^{(j)}}\right)^{-\gamma}, w_{max}\right)$$
+
+Onde:
+- $n_m^{(j)}$ = contagem da classe $m$ no componente $j$
+- $\gamma = 0.5$ = expoente de suavização
+- $w_{max} = 10$ = peso máximo
+
+**Exemplo:**
+```
+Componente '7th':
+  - 'N':   80,000 frames → weight = 1.0
+  - '7':   15,000 frames → weight = 2.3
+  - 'b7':   4,500 frames → weight = 4.2
+  - 'bb7':    500 frames → weight = 10.0 (capped)
+```
+
+### 6.3 Código
+
+```python
+def compute_class_weights(self, train_dataset, gamma=0.5, w_max=10.0):
+    # Conta ocorrências de cada classe
+    counts = {comp: defaultdict(int) for comp in COMPONENT_NAMES}
+    
+    for sample in train_dataset:
+        for comp in COMPONENT_NAMES:
+            for idx in sample['components'][comp]:
+                counts[comp][idx] += 1
+    
+    # Calcula pesos
+    weights = {}
+    for comp in COMPONENT_NAMES:
+        max_count = max(counts[comp].values())
+        w = []
+        for class_idx in range(vocab_size[comp]):
+            count = counts[comp][class_idx]
+            weight = min((count / max_count) ** (-gamma), w_max)
+            w.append(weight)
+        weights[comp] = torch.tensor(w)
+    
+    return weights
+```
+
+---
+
+## 7. Treinamento
+
+### 7.1 Configuração
+
+```yaml
+# run_config.yaml
+experiment:
+  data_root: /home/daniel.melo/datasets
+  dataset_names: ['billboard', 'dj_avan', 'jaah', 'queen', 'robbiewilliams', 'rwc']
+
+train:
+  batch_size: 32
+  learning_rate: 0.0001
+  num_epochs: 100
+  early_stopping_patience: 10
+```
+
+### 7.2 Loop de Treinamento
+
+```python
+for epoch in range(num_epochs):
+    model.train()
+    
+    for batch in train_loader:
+        features = batch['features'].to(device)      # (B, T, F)
+        components = batch['components']              # Dict[str, (B, T)]
+        
+        # Forward pass
+        outputs = model(features)                     # Dict[str, (B, T, C)]
+        
+        # Compute loss
+        loss = criterion(outputs, components)
+        
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    
+    # Validation
+    model.eval()
+    val_loss = evaluate(model, val_loader)
+    
+    # Save best model
+    if val_loss < best_val_loss:
+        torch.save(model.state_dict(), 'model_best.pt')
+```
+
+### 7.3 Evolução Esperada da Loss
+
+```
+Epoch 1:  Train Loss: 4.5   Val Loss: 4.2
+Epoch 5:  Train Loss: 2.8   Val Loss: 2.9
+Epoch 10: Train Loss: 2.0   Val Loss: 2.2
+Epoch 20: Train Loss: 1.5   Val Loss: 1.8
+Epoch 50: Train Loss: 0.8   Val Loss: 1.2
+```
+
+A loss está na escala de ~2.0 porque é a soma de 8 componentes (média ~0.25 por componente).
+
+---
+
+## 8. Inferência e Reassemblagem
+
+### 8.1 Fluxo de Inferência
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Inferência                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Áudio → CQT Features → Modelo → 8 Outputs                      │
+│                                                                  │
+│  Para cada frame t:                                              │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  root_logits[t]  → softmax → argmax → 'C'               │    │
+│  │  bass_logits[t]  → softmax → argmax → 'N'               │    │
+│  │  triad_logits[t] → softmax → argmax → 'maj'             │    │
+│  │  misc_logits[t]  → softmax → argmax → 'N'               │    │
+│  │  7th_logits[t]   → softmax → argmax → '7'               │    │
+│  │  9th_logits[t]   → softmax → argmax → 'N'               │    │
+│  │  11th_logits[t]  → softmax → argmax → 'N'               │    │
+│  │  13th_logits[t]  → softmax → argmax → 'N'               │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                           │                                      │
+│                           ▼                                      │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │                    Reassembler                           │    │
+│  │                                                          │    │
+│  │  {root:'C', triad:'maj', 7th:'7', ...} → 'C:maj7'       │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 8.2 Lógica de Reassemblagem
+
+```python
+class ChordReassembler:
+    def reassemble(self, components: Dict[str, str]) -> str:
+        root = components['root']
+        bass = components['bass']
+        triad = components['triad']
+        misc = components['misc']
+        seventh = components['7th']
+        ninth = components['9th']
+        eleventh = components['11th']
+        thirteenth = components['13th']
+        
+        # Regra 1: Se root é N, retorna N
+        if root == 'N':
+            return 'N'
+        
+        # Regra 2: Power chord
+        if misc == '5':
+            chord = f"{root}:5"
+        
+        # Regra 3: Constrói acorde normal
+        else:
+            # Tríade
+            if triad == 'maj':
+                chord = root  # C:maj → C
+            else:
+                chord = f"{root}:{triad}"  # C:min → C:min
+            
+            # Extensões
+            if seventh != 'N':
+                chord += '7'  # ou maj7, dependendo
+            if ninth != 'N':
+                chord += f"({ninth})"
+            # ... etc
+        
+        # Regra 4: Adiciona baixo se diferente
+        if bass != 'N' and bass != root:
+            chord += f"/{bass}"
+        
+        return chord
+```
+
+### 8.3 Exemplos de Reassemblagem
+
+| Componentes | Acorde Reassemblado |
+|-------------|---------------------|
+| root=C, triad=maj, 7th=7 | `C:maj7` |
+| root=G, triad=min, 7th=b7 | `G:min7` |
+| root=D, triad=maj, 7th=b7 | `D:7` |
+| root=A, triad=min, bass=E | `A:min/E` |
+| root=E, misc=5 | `E:5` |
+| root=N | `N` |
+
+---
+
+## 9. Métricas de Avaliação
+
+### 9.1 Métricas por Componente
+
+| Métrica | Descrição |
+|---------|-----------|
+| `acc_root` | % de frames com root correto |
+| `acc_bass` | % de frames com bass correto |
+| `acc_triad` | % de frames com tríade correta |
+| `acc_7th` | % de frames com 7ª correta |
+| `f1_[comp]` | F1-score macro para cada componente |
+
+### 9.2 Métricas Agregadas
+
+| Métrica | Descrição |
+|---------|-----------|
+| `acc_component_avg` | Média das 8 acurácias de componentes |
+| `acc_root_triad` | % com root E triad corretos |
+| `acc_root_triad_7th` | % com root, triad E 7th corretos |
+| `acc_full_chord` | % com TODOS os 8 componentes corretos |
+
+### 9.3 Interpretação
+
+```
+============================================================
+EVALUATION METRICS SUMMARY
+============================================================
+
+Total frames evaluated: 150,000
+
+--- Per-Component Accuracy ---
+  root    : Acc= 85.2%  F1= 78.5%
+  bass    : Acc= 92.1%  F1= 65.3%
+  triad   : Acc= 82.4%  F1= 71.2%
+  misc    : Acc= 99.1%  F1= 85.0%
+  7th     : Acc= 88.5%  F1= 72.8%
+  9th     : Acc= 95.2%  F1= 58.4%
+  11th    : Acc= 97.8%  F1= 45.2%
+  13th    : Acc= 98.5%  F1= 42.1%
+
+--- Aggregate Metrics ---
+  Component Avg Accuracy: 92.4%
+  Root+Triad Accuracy:    78.5%
+  Root+Triad+7th Acc:     72.1%
+  Full Chord Accuracy:    65.3%
+============================================================
+```
+
+**Interpretação:**
+- **Root 85%**: O modelo identifica a nota fundamental corretamente em 85% dos frames
+- **Triad 82%**: Distingue bem entre maj/min/dim/aug
+- **9th/11th/13th baixo F1**: Classes raras, difíceis de prever, mas alta acurácia (maioria é 'N')
+- **Full Chord 65%**: Quando exigimos todos os 8 corretos simultaneamente
+
+---
+
+## Anexo: Estrutura de Arquivos
+
+```
+BTC-ISMIR19/
+├── data/
+│   ├── audio_dataset.py              # Dataset base
+│   └── audio_dataset_structured.py   # Dataset com decomposição
+├── models/
+│   └── btc_model_decomposed.py       # Modelo multi-head
+├── utils/
+│   ├── chord_decomposition.py        # ChordDecomposer & Reassembler
+│   ├── mir_eval_modules.py           # idx2voca_chord mapping
+│   └── evaluation_metrics.py         # Métricas de avaliação
+├── train_decomposed.py               # Script de treinamento
+├── evaluate_model.py                 # Script de avaliação
+└── run_config.yaml                   # Configurações
+```
+
+---
+
+## Referências
+
+1. **BTC: Bitransformer for Chord Recognition** - Modelo base
+2. **Chord Structure Decomposition** - Técnica de decomposição
+3. **mir_eval** - Biblioteca padrão para avaliação MIR

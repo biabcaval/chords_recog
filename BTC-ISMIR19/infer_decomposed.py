@@ -46,10 +46,10 @@ class ChordRecognitionInference:
         self.device = torch.device(device)
         
         # Load configuration
-        self.config = HParams(config_path)
+        self.config = HParams.load(config_path)
         
         # Initialize model
-        self.model = BTC_model_decomposed(self.config)
+        self.model = BTC_model_decomposed(config=self.config.model)
         self.model = self.model.to(self.device)
         
         # Load checkpoint
