@@ -2,7 +2,7 @@
 """
 Chord Structure Decomposition module.
 
-This module implements the decomposition of chord symbols into 8 independent components
+This module implements the decomposition of chord symbols into 9 independent components
 following the Chord Structure Decomposition technique.
 
 Components:
@@ -10,10 +10,11 @@ Components:
 2. Bass: 13 classes (same as Root)
 3. Triad: 7 classes (N, maj, min, dim, aug, sus2, sus4)
 4. Misc (Power Chord): 2 classes (N, 5)
-5. 7th: 4 classes (N, 7, b7, bb7)
-6. 9th: 4 classes (N, 9, #9, b9)
-7. 11th: 3 classes (N, 11, #11)
-8. 13th: 3 classes (N, 13, b13)
+5. 6th: 2 classes (N, 6) - for min6, maj6 chords
+6. 7th: 4 classes (N, 7, b7, bb7) - 7=maj7, b7=dom/min7, bb7=dim7
+7. 9th: 4 classes (N, 9, #9, b9)
+8. 11th: 3 classes (N, 11, #11)
+9. 13th: 3 classes (N, 13, b13)
 """
 
 import numpy as np
@@ -26,14 +27,15 @@ CHORD_VOCAB = {
     'bass': ['N', 'C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'],
     'triad': ['N', 'maj', 'min', 'dim', 'aug', 'sus2', 'sus4'],
     'misc': ['N', '5'],  # Power chord
-    '7th': ['N', '7', 'b7', 'bb7'],
+    '6th': ['N', '6'],   # 6th extension (for min6, maj6)
+    '7th': ['N', '7', 'b7', 'bb7'],  # 7=maj7, b7=dominant/min7, bb7=dim7
     '9th': ['N', '9', '#9', 'b9'],
     '11th': ['N', '11', '#11'],
     '13th': ['N', '13', 'b13']
 }
 
 # Component order (consistent with the vocab above)
-COMPONENT_NAMES = ['root', 'bass', 'triad', 'misc', '7th', '9th', '11th', '13th']
+COMPONENT_NAMES = ['root', 'bass', 'triad', 'misc', '6th', '7th', '9th', '11th', '13th']
 NUM_COMPONENTS = len(COMPONENT_NAMES)
 
 # Reverse mappings for easy lookup
@@ -95,7 +97,7 @@ class ChordDecomposer:
     
     def decompose(self, chord_label: str) -> Dict[str, str]:
         """
-        Decompose a chord label into 8 components.
+        Decompose a chord label into 9 components.
         
         Args:
             chord_label: Chord label string (e.g., 'C:maj9', 'D:min7/F#')
@@ -187,10 +189,15 @@ class ChordDecomposer:
         
         Examples:
             'maj9' -> triad='maj', extensions include 9th
-            'min7' -> triad='min', extensions include 7th
+            'min7' -> triad='min', 7th='b7' (minor 7th interval)
+            'maj7' -> triad='maj', 7th='7' (major 7th interval)
+            '7' -> triad='maj', 7th='b7' (dominant 7th)
+            'min6' -> triad='min', 6th='6'
+            'maj6' -> triad='maj', 6th='6'
+            'minmaj7' -> triad='min', 7th='7' (minor with major 7th)
             '5' -> triad='N', misc='5'
-            '7' -> triad='maj' (implied), extensions include 7th
-            'hdim7' -> triad='dim', extensions include 7th (half-diminished)
+            'hdim7' -> triad='dim', 7th='b7' (half-diminished)
+            'dim7' -> triad='dim', 7th='bb7' (diminished 7th)
         """
         quality_lower = quality.lower()
         
@@ -199,10 +206,27 @@ class ChordDecomposer:
             components['misc'] = '5'
             return
         
-        # Handle half-diminished (hdim = min7b5)
+        # Handle half-diminished (hdim = dim triad + minor 7th)
         if quality_lower.startswith('hdim') or quality_lower == 'hdim7':
             components['triad'] = 'dim'
-            remaining = quality_lower.replace('hdim', '', 1)
+            components['7th'] = 'b7'  # half-dim has minor 7th
+            remaining = quality_lower.replace('hdim', '', 1).replace('7', '', 1)
+            self._extract_extensions(remaining, components)
+            return
+        
+        # Handle minmaj7 (minor triad + major 7th) - BEFORE general min/maj parsing
+        if 'minmaj7' in quality_lower or 'minmaj' in quality_lower:
+            components['triad'] = 'min'
+            components['7th'] = '7'  # major 7th
+            remaining = quality_lower.replace('minmaj7', '').replace('minmaj', '')
+            self._extract_extensions(remaining, components)
+            return
+        
+        # Handle dim7 specially (diminished triad + diminished 7th)
+        if quality_lower == 'dim7' or quality_lower.startswith('dim7'):
+            components['triad'] = 'dim'
+            components['7th'] = 'bb7'  # diminished 7th
+            remaining = quality_lower.replace('dim7', '')
             self._extract_extensions(remaining, components)
             return
         
@@ -230,7 +254,7 @@ class ChordDecomposer:
         else:
             # If no explicit triad but has extensions, assume major triad
             # e.g., 'C:7' means C major with dominant 7th
-            if any(ext in quality_lower for ext in ['7', '9', '11', '13']):
+            if any(ext in quality_lower for ext in ['6', '7', '9', '11', '13']):
                 components['triad'] = 'maj'
                 remaining = quality_lower
         
@@ -244,9 +268,16 @@ class ChordDecomposer:
         The order of extraction is important: higher extensions first (13 before 11 before 9)
         to avoid partial matches (e.g., '13' containing '1').
         
+        7th mapping:
+            'maj7' -> '7' (major 7th interval)
+            '7' alone -> 'b7' (dominant/minor 7th interval)
+            'bb7' -> 'bb7' (diminished 7th interval)
+        
         Examples:
             '9' -> adds 9th component
-            'b7' -> adds 7th component with flat
+            '7' -> adds 7th='b7' (dominant 7th)
+            'maj7' -> adds 7th='7' (major 7th)
+            '6' -> adds 6th='6'
             '13' -> adds 13th component
         """
         # Handle 13th extension FIRST (to avoid '1' matching in '13')
@@ -284,20 +315,25 @@ class ChordDecomposer:
             components['9th'] = '9'
             remaining = remaining.replace('9', '', 1)
         
-        # Handle 7th extension LAST
-        if 'bb7' in remaining:
-            components['7th'] = 'bb7'
-            remaining = remaining.replace('bb7', '', 1)
-        elif 'maj7' in remaining:
-            # Major 7th
-            components['7th'] = '7'
-            remaining = remaining.replace('maj7', '', 1)
-        elif 'b7' in remaining:
-            components['7th'] = 'b7'
-            remaining = remaining.replace('b7', '', 1)
-        elif '7' in remaining:
-            components['7th'] = '7'
-            remaining = remaining.replace('7', '', 1)
+        # Handle 7th extension (only if not already set by special cases)
+        if components.get('7th', 'N') == 'N':
+            if 'bb7' in remaining:
+                components['7th'] = 'bb7'  # diminished 7th
+                remaining = remaining.replace('bb7', '', 1)
+            elif 'maj7' in remaining:
+                components['7th'] = '7'  # major 7th
+                remaining = remaining.replace('maj7', '', 1)
+            elif 'b7' in remaining:
+                components['7th'] = 'b7'  # minor 7th
+                remaining = remaining.replace('b7', '', 1)
+            elif '7' in remaining:
+                components['7th'] = 'b7'  # dominant 7th = minor 7th interval
+                remaining = remaining.replace('7', '', 1)
+        
+        # Handle 6th extension
+        if '6' in remaining:
+            components['6th'] = '6'
+            remaining = remaining.replace('6', '', 1)
     
     def decompose_batch(self, chord_labels: List[str]) -> Dict[str, np.ndarray]:
         """

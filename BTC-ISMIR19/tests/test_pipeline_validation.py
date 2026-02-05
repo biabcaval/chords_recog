@@ -36,13 +36,13 @@ class TestVocabularyDefinitions(unittest.TestCase):
     """Test 1: Validate vocabulary definitions match specification."""
     
     def test_component_count(self):
-        """Verify we have exactly 8 components."""
-        self.assertEqual(NUM_COMPONENTS, 8)
-        self.assertEqual(len(COMPONENT_NAMES), 8)
+        """Verify we have exactly 9 components."""
+        self.assertEqual(NUM_COMPONENTS, 9)
+        self.assertEqual(len(COMPONENT_NAMES), 9)
     
     def test_component_names(self):
         """Verify component names are correct."""
-        expected = ['root', 'bass', 'triad', 'misc', '7th', '9th', '11th', '13th']
+        expected = ['root', 'bass', 'triad', 'misc', '6th', '7th', '9th', '11th', '13th']
         self.assertEqual(COMPONENT_NAMES, expected)
     
     def test_root_vocab(self):
@@ -69,6 +69,12 @@ class TestVocabularyDefinitions(unittest.TestCase):
         self.assertEqual(CHORD_VOCAB['misc'], expected)
         self.assertEqual(len(CHORD_VOCAB['misc']), 2)
     
+    def test_6th_vocab(self):
+        """6th: 2 classes (N, 6)."""
+        expected = ['N', '6']
+        self.assertEqual(CHORD_VOCAB['6th'], expected)
+        self.assertEqual(len(CHORD_VOCAB['6th']), 2)
+    
     def test_7th_vocab(self):
         """7th: 4 classes (N, 7, b7, bb7)."""
         expected = ['N', '7', 'b7', 'bb7']
@@ -94,10 +100,10 @@ class TestVocabularyDefinitions(unittest.TestCase):
         self.assertEqual(len(CHORD_VOCAB['13th']), 3)
     
     def test_total_classes(self):
-        """Total should be 49 classes (vs 170 for monolithic)."""
+        """Total should be 51 classes (vs 170 for monolithic)."""
         vocab_sizes = get_vocab_sizes()
         total = sum(vocab_sizes.values())
-        self.assertEqual(total, 49)
+        self.assertEqual(total, 51)  # 13+13+7+2+2+4+4+3+3 = 51
     
     def test_reverse_mapping(self):
         """Verify reverse mapping is correct."""
