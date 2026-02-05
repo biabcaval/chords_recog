@@ -42,10 +42,10 @@ def main():
     print("\n--- Loading dataset ---")
     dataset = AudioDatasetStructured(
         config=config,
-        data_root=data_root,
+        root_dir=data_root,
         dataset_names=dataset_names,
         kfold=0,
-        mode='train',
+        train=True,
         decompose=True
     )
     
