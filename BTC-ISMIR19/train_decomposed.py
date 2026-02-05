@@ -41,7 +41,9 @@ def main():
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                        help='Device to train on (cuda, cpu, etc.)')
     parser.add_argument('--output_dir', type=str, default='./checkpoints',
-                       help='Directory to save checkpoints')
+                       help='Base directory to save checkpoints')
+    parser.add_argument('--run_name', type=str, default=None,
+                       help='Name for this training run (creates subdirectory)')
     parser.add_argument('--resume', type=str, default=None,
                        help='Path to checkpoint to resume from')
     parser.add_argument('--num_epochs', type=int, default=100,
@@ -67,9 +69,18 @@ def main():
     device = torch.device(args.device)
     logger.info(f"Using device: {device}")
     
-    # Setup output directory
-    output_dir = Path(args.output_dir)
+    # Setup run name and output directory
+    if args.run_name:
+        run_name = args.run_name
+    else:
+        # Generate default name with timestamp
+        run_name = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    
+    output_dir = Path(args.output_dir) / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
+    
+    logger.info(f"Run name: {run_name}")
+    logger.info(f"Output directory: {output_dir}")
     
     # Load configuration
     logger.info(f"Loading configuration from {args.config}")
@@ -171,6 +182,35 @@ def main():
         'val_metrics': []
     }
     
+    # Store training config for checkpoints
+    training_config = {
+        'run_name': run_name,
+        'learning_rate': args.learning_rate,
+        'weight_decay': args.weight_decay,
+        'batch_size': args.batch_size,
+        'num_epochs': args.num_epochs,
+        'gamma': args.gamma,
+        'w_max': args.w_max,
+        'model_config': {
+            'hidden_size': config.model.get('hidden_size', 128),
+            'num_layers': config.model.get('num_layers', 8),
+            'num_heads': config.model.get('num_heads', 4),
+            'feature_size': config.model.get('feature_size', 144),
+            'timestep': config.model.get('timestep', 108),
+            'input_dropout': config.model.get('input_dropout', 0.2),
+            'layer_dropout': config.model.get('layer_dropout', 0.2),
+            'attention_dropout': config.model.get('attention_dropout', 0.2),
+        },
+        'datasets': dataset_names,
+        'data_root': data_root,
+        'train_samples': len(train_dataset),
+        'val_samples': len(val_dataset),
+        'total_params': total_params,
+        'trainable_params': trainable_params,
+        'start_time': datetime.now().isoformat(),
+        'output_dir': str(output_dir),
+    }
+    
     for epoch in range(args.num_epochs):
         logger.info(f"\n=== Epoch {epoch + 1}/{args.num_epochs} ===")
         
@@ -191,15 +231,47 @@ def main():
                 best_val_loss = val_loss
                 best_epoch = epoch + 1
                 
-                checkpoint_path = output_dir / f"model_best.pt"
-                torch.save({
+                # Create descriptive checkpoint with all info
+                checkpoint_data = {
+                    # Epoch info
                     'epoch': epoch + 1,
+                    'total_epochs': args.num_epochs,
+                    
+                    # Model state
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
-                    'val_loss': val_loss,
-                }, checkpoint_path)
+                    
+                    # Metrics at save time
+                    'metrics': {
+                        'train_loss': train_loss,
+                        'val_loss': val_loss,
+                        'component_losses': {k: v for k, v in component_losses.items()} if component_losses else {},
+                    },
+                    
+                    # Training configuration
+                    'training_config': training_config,
+                    
+                    # Timestamp
+                    'saved_at': datetime.now().isoformat(),
+                }
+                
+                checkpoint_path = output_dir / f"model_best.pt"
+                torch.save(checkpoint_data, checkpoint_path)
                 logger.info(f"Saved best checkpoint to {checkpoint_path}")
+                
+                # Also save a human-readable summary
+                summary_path = output_dir / f"model_best_info.json"
+                summary = {
+                    'epoch': epoch + 1,
+                    'train_loss': train_loss,
+                    'val_loss': val_loss,
+                    'saved_at': datetime.now().isoformat(),
+                    'training_config': training_config,
+                }
+                with open(summary_path, 'w') as f:
+                    json.dump(summary, f, indent=2)
+                logger.info(f"Saved checkpoint info to {summary_path}")
         
         # Update learning rate
         scheduler.step()
@@ -209,17 +281,33 @@ def main():
             checkpoint_path = output_dir / f"model_epoch_{epoch + 1:03d}.pt"
             torch.save({
                 'epoch': epoch + 1,
+                'total_epochs': args.num_epochs,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
+                'metrics': {
+                    'train_loss': train_loss,
+                    'val_loss': val_loss if 'val_loss' in dir() else None,
+                },
+                'training_config': training_config,
+                'saved_at': datetime.now().isoformat(),
             }, checkpoint_path)
             logger.info(f"Saved checkpoint to {checkpoint_path}")
     
     # Save final model
+    training_config['end_time'] = datetime.now().isoformat()
     final_path = output_dir / "model_final.pt"
     torch.save({
         'epoch': args.num_epochs,
         'model_state_dict': model.state_dict(),
+        'metrics': {
+            'final_train_loss': training_history['train_loss'][-1] if training_history['train_loss'] else None,
+            'final_val_loss': training_history['val_loss'][-1] if training_history['val_loss'] else None,
+            'best_val_loss': best_val_loss,
+            'best_epoch': best_epoch,
+        },
+        'training_config': training_config,
+        'saved_at': datetime.now().isoformat(),
     }, final_path)
     logger.info(f"Saved final model to {final_path}")
     
