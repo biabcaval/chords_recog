@@ -232,7 +232,14 @@ def _collate_fn_structured(batch):
                     chord_flat = chord_array[:, 0] if chord_array.shape[1] > 0 else chord_array.flatten()
                 else:
                     chord_flat = chord_array
-                diff = np.diff(chord_flat).astype(bool)
+                
+                # Handle string chord labels (can't use np.diff on strings)
+                if chord_flat.dtype.kind in ['U', 'S', 'O']:  # Unicode, byte string, or object
+                    # Compare adjacent elements for strings
+                    diff = np.array([chord_flat[j] != chord_flat[j-1] for j in range(1, len(chord_flat))], dtype=bool)
+                else:
+                    # Numeric labels - use standard diff
+                    diff = np.diff(chord_flat).astype(bool)
             else:
                 diff = np.array([], dtype=bool)
             idx = np.insert(diff, 0, True)
