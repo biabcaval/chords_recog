@@ -56,8 +56,20 @@ class DecomposedChordInference:
                 probabilities = self.model.predict_probabilities(x)
                 return probabilities
             else:
-                logits = self.model(x)  # This returns logits when probs_out=True
-                predictions = self.model.decomposer.get_predictions(logits)
+                # model(x) returns different things based on probs_out setting:
+                # - If probs_out=True: returns logits dict
+                # - If probs_out=False: returns (predictions, loss, weights_list) tuple
+                output = self.model(x)
+                
+                if isinstance(output, dict):
+                    # probs_out=True: got logits, need to get predictions
+                    predictions = self.model.decomposer.get_predictions(output)
+                elif isinstance(output, tuple):
+                    # probs_out=False: got (predictions, loss, weights_list)
+                    predictions = output[0]
+                else:
+                    raise ValueError(f"Unexpected model output type: {type(output)}")
+                
                 return predictions
     
     def decode_predictions(self, predictions: Dict[str, torch.Tensor], 
