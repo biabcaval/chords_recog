@@ -2,22 +2,23 @@
 
 ## Overview
 
-This implementation refactors the chord recognition system to support **Chord Structure Decomposition**, where each chord is decomposed into 8 independent components instead of predicting a single monolithic chord label.
+This implementation refactors the chord recognition system to support **Chord Structure Decomposition**, where each chord is decomposed into **9 independent components** instead of predicting a single monolithic chord label.
 
 ### Architecture Components
 
-#### 1. **Chord Vocabulary (8 Components)**
+#### 1. **Chord Vocabulary (9 Components)**
 
 - **Root**: 13 classes (N, C, C#, D, D#, E, F, F#, G, G#, A, A#, B)
 - **Bass**: 13 classes (same as root, for slash chords)
 - **Triad**: 7 classes (N, maj, min, dim, aug, sus2, sus4)
 - **Misc/Power Chord**: 2 classes (N, 5)
+- **6th Extension**: 2 classes (N, 6)
 - **7th Extension**: 4 classes (N, 7, b7, bb7)
 - **9th Extension**: 4 classes (N, 9, #9, b9)
 - **11th Extension**: 3 classes (N, 11, #11)
 - **13th Extension**: 3 classes (N, 13, b13)
 
-**Total classes**: 13 + 13 + 7 + 2 + 4 + 4 + 3 + 3 = **49** (vs. ~170 for monolithic approach)
+**Total classes**: 13 + 13 + 7 + 2 + 2 + 4 + 4 + 3 + 3 = **51** (vs. ~170 for monolithic approach)
 
 ---
 
@@ -29,12 +30,18 @@ Handles the decomposition and reassembly of chord labels.
 
 **Key Classes:**
 
-- `ChordDecomposer`: Decomposes chord strings (e.g., `C:maj9`) into 8 components
+- `ChordDecomposer`: Decomposes chord strings (e.g., `C:maj9`) into 9 components
   ```python
   decomposer = ChordDecomposer()
   components = decomposer.decompose('C:maj9')
   # Output: {'root': 'C', 'bass': 'N', 'triad': 'maj', 'misc': 'N',
-  #          '7th': 'N', '9th': '9', '11th': 'N', '13th': 'N'}
+  #          '6th': 'N', '7th': '7', '9th': '9', '11th': 'N', '13th': 'N'}
+  
+  # Also handles parenthetical extensions from .lab files:
+  components = decomposer.decompose('C:maj7(9)')  # Same result as above
+  components = decomposer.decompose('B:7(b9)')
+  # Output: {'root': 'B', 'bass': 'N', 'triad': 'maj', 'misc': 'N',
+  #          '6th': 'N', '7th': 'b7', '9th': 'b9', '11th': 'N', '13th': 'N'}
   ```
 
 - `ChordReassembler`: Reconstructs chord strings from component predictions
@@ -62,10 +69,20 @@ Extends the base `AudioDataset` to support chord decomposition during data loadi
   dataset = AudioDatasetStructured(config, root_dir='/data', train=True, decompose=True)
   sample = dataset[0]
   # sample['components'] = {
-  #     'root': array of indices,
-  #     'bass': array of indices,
-  #     ...
+  #     'root': tensor of indices,    # 13 classes
+  #     'bass': tensor of indices,    # 13 classes
+  #     'triad': tensor of indices,   # 7 classes
+  #     'misc': tensor of indices,    # 2 classes
+  #     '6th': tensor of indices,     # 2 classes
+  #     '7th': tensor of indices,     # 4 classes
+  #     '9th': tensor of indices,     # 4 classes
+  #     '11th': tensor of indices,    # 3 classes
+  #     '13th': tensor of indices,    # 3 classes
   # }
+  
+  # Priority: original_chord_labels > original_chords > chord
+  # If 'original_chord_labels' exists (added by add_original_labels.py),
+  # it uses full chord labels with extensions like 'C:maj7(9)'
   ```
 
 - `AudioDataLoaderStructured`: Custom DataLoader with `_collate_fn_structured`
@@ -87,7 +104,7 @@ train_loader = AudioDataLoaderStructured(
 
 ### 3. **Model Architecture** (`models/btc_model_decomposed.py`)
 
-Refactored BTC model with 8 parallel output heads.
+Refactored BTC model with 9 parallel output heads.
 
 **Key Classes:**
 
@@ -95,7 +112,7 @@ Refactored BTC model with 8 parallel output heads.
   - Input: (batch_size, seq_len, hidden_size)
   - Output: (batch_size, seq_len, vocab_size)
 
-- `MultiHeadChordDecomposer`: Container for all 8 component heads
+- `MultiHeadChordDecomposer`: Container for all 9 component heads
   ```python
   decomposer = MultiHeadChordDecomposer(hidden_size=256)
   logits = decomposer(encoder_output)

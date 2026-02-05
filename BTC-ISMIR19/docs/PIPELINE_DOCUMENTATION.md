@@ -22,7 +22,7 @@ Este documento descreve todo o processo desde o pré-processamento do áudio at�
 ## 1. Visão Geral
 
 ### Objetivo
-Reconhecer acordes musicais a partir de áudio, decompondo cada acorde em 8 componentes estruturais independentes, ao invés de classificar diretamente em uma das 170+ classes de acordes.
+Reconhecer acordes musicais a partir de áudio, decompondo cada acorde em **9 componentes** estruturais independentes, ao invés de classificar diretamente em uma das 170+ classes de acordes.
 
 ### Motivação
 - **Problema da cauda longa**: Acordes complexos (como `C:maj9(#11)`) são raros no dataset
@@ -33,7 +33,7 @@ Reconhecer acordes musicais a partir de áudio, decompondo cada acorde em 8 comp
 
 ```
 ┌─────────────┐    ┌──────────────┐    ┌─────────────┐    ┌──────────────┐
-│   Áudio     │───▶│    CQT       │───▶│   Modelo    │───▶│  8 Saídas    │
+│   Áudio     │───▶│    CQT       │───▶│   Modelo    │───▶│  9 Saídas    │
 │   (.wav)    │    │  Features    │    │   (BTC)     │    │  (softmax)   │
 └─────────────┘    └──────────────┘    └─────────────┘    └──────────────┘
                                                                  │
@@ -100,21 +100,53 @@ Cada segmento é salvo como um arquivo PyTorch:
 
 ```python
 {
-    'feature': np.array,        # Shape: (144, 108) - CQT features
-    'chord': list,              # Lista de índices de acordes por frame
-    'original_chords': list,    # Índices originais (backup)
+    'feature': np.array,              # Shape: (144, 108) - CQT features
+    'chord': list,                    # Lista de índices de acordes por frame
+    'original_chords': list,          # Índices originais (backup)
+    'original_chord_labels': list,    # Labels originais com extensões (ex: 'C:maj7(9)')
 }
 ```
 
+> **Nota**: O campo `original_chord_labels` contém os labels originais dos arquivos `.lab` 
+> com extensões completas (ex: `C:maj7(9)`, `B:7(b9)`). Este campo é adicionado pelo script
+> `scripts/add_original_labels.py` e permite capturar extensões 9th, 11th, 13th que são
+> simplificadas no vocabulário padrão de 170 classes.
+
 **Localização:** `/datasets/result_decomposed/{dataset}_voca/22050_10.0_5.0/cqt_144_24_2048/{song}/`
+
+### 2.5 Adicionando Labels Originais aos Arquivos .pt
+
+O pré-processamento original simplifica as anotações de acordes, perdendo extensões como `(9)`, `(b9)`, `(#11)`. Para recuperar essas extensões:
+
+```bash
+# Dry-run (apenas mostra o que seria feito)
+python scripts/add_original_labels.py --data_root /path/to/datasets --dry_run
+
+# Executar (adiciona o campo original_chord_labels aos .pt)
+python scripts/add_original_labels.py --data_root /path/to/datasets
+```
+
+**O que o script faz:**
+1. Encontra todos os arquivos `.pt` no diretório de dados
+2. Para cada arquivo, localiza o arquivo `.lab` correspondente
+3. Para cada frame do segmento, extrai o label do acorde original baseado no timestamp
+4. Adiciona o campo `original_chord_labels` ao arquivo `.pt`
+
+**Exemplo de mapeamento:**
+```
+Arquivo .lab:                    Arquivo .pt (após script):
+0.000  2.901 C:maj7(9)    →     original_chord_labels: ['C:maj7(9)', 'C:maj7(9)', ...]
+2.902  4.271 F#:hdim7     →     (um label por frame de 93ms)
+4.272  5.920 B:7(b9)
+```
 
 ---
 
 ## 3. Decomposição de Acordes
 
-### 3.1 Os 8 Componentes
+### 3.1 Os 9 Componentes
 
-Cada acorde é decomposto em 8 componentes independentes:
+Cada acorde é decomposto em **9 componentes** independentes:
 
 | # | Componente | Classes | Vocabulário |
 |---|------------|---------|-------------|
@@ -122,25 +154,31 @@ Cada acorde é decomposto em 8 componentes independentes:
 | 2 | **Bass** | 13 | N, C, C#, D, D#, E, F, F#, G, G#, A, A#, B |
 | 3 | **Triad** | 7 | N, maj, min, dim, aug, sus2, sus4 |
 | 4 | **Misc** | 2 | N, 5 (power chord) |
-| 5 | **7th** | 4 | N, 7, b7, bb7 |
-| 6 | **9th** | 4 | N, 9, #9, b9 |
-| 7 | **11th** | 3 | N, 11, #11 |
-| 8 | **13th** | 3 | N, 13, b13 |
+| 5 | **6th** | 2 | N, 6 |
+| 6 | **7th** | 4 | N, 7, b7, bb7 |
+| 7 | **9th** | 4 | N, 9, #9, b9 |
+| 8 | **11th** | 3 | N, 11, #11 |
+| 9 | **13th** | 3 | N, 13, b13 |
 
-**Total de combinações possíveis:** 13 × 13 × 7 × 2 × 4 × 4 × 3 × 3 = **153,504**
+**Total de classes:** 13 + 13 + 7 + 2 + 2 + 4 + 4 + 3 + 3 = **51**
+
+**Total de combinações possíveis:** 13 × 13 × 7 × 2 × 2 × 4 × 4 × 3 × 3 = **307,008**
 
 ### 3.2 Exemplos de Decomposição
 
-| Acorde | Root | Bass | Triad | Misc | 7th | 9th | 11th | 13th |
-|--------|------|------|-------|------|-----|-----|------|------|
-| `C:maj` | C | N | maj | N | N | N | N | N |
-| `G:min7` | G | N | min | N | 7 | N | N | N |
-| `D:7` | D | N | maj | N | b7 | N | N | N |
-| `A:min7/E` | A | E | min | N | 7 | N | N | N |
-| `F:maj9` | F | N | maj | N | 7 | 9 | N | N |
-| `C:13` | C | N | maj | N | b7 | 9 | 11 | 13 |
-| `E:5` | E | N | N | 5 | N | N | N | N |
-| `N` | N | N | N | N | N | N | N | N |
+| Acorde | Root | Bass | Triad | Misc | 6th | 7th | 9th | 11th | 13th |
+|--------|------|------|-------|------|-----|-----|-----|------|------|
+| `C:maj` | C | N | maj | N | N | N | N | N | N |
+| `G:min7` | G | N | min | N | N | b7 | N | N | N |
+| `D:7` | D | N | maj | N | N | b7 | N | N | N |
+| `A:min7/E` | A | E | min | N | N | b7 | N | N | N |
+| `F:maj7` | F | N | maj | N | N | 7 | N | N | N |
+| `C:maj7(9)` | C | N | maj | N | N | 7 | 9 | N | N |
+| `B:7(b9)` | B | N | maj | N | N | b7 | b9 | N | N |
+| `A:min6` | A | N | min | N | 6 | N | N | N | N |
+| `C:13` | C | N | maj | N | N | b7 | 9 | 11 | 13 |
+| `E:5` | E | N | N | 5 | N | N | N | N | N |
+| `N` | N | N | N | N | N | N | N | N | N |
 
 ### 3.3 Definições de Intervalos
 
@@ -170,11 +208,16 @@ class ChordDecomposer:
             'bass': 'N',
             'triad': 'maj',
             'misc': 'N',
+            '6th': 'N',
             '7th': '7',
             '9th': 'N',
             '11th': 'N',
             '13th': 'N'
         }
+        
+        Também suporta extensões parentéticas dos arquivos .lab:
+        'C:maj7(9)' -> 7th='7', 9th='9'
+        'B:7(b9)'   -> 7th='b7', 9th='b9'
         """
 ```
 
@@ -202,7 +245,7 @@ class AudioDatasetStructured(Dataset):
         chord_labels = self._get_chord_labels(data['chord'])
         # ['130', '130', ...] → ['A:min6', 'A:min6', ...]
         
-        # 4. Decompõe em 8 componentes
+        # 4. Decompõe em 9 componentes
         components = self.decomposer.decompose_batch(chord_labels)
         # {'root': [9, 9, ...], 'triad': [2, 2, ...], ...}
         
@@ -289,7 +332,7 @@ def _collate_fn_structured(batch):
 │                           │                                      │
 │                           ▼                                      │
 │  ┌─────────────────────────────────────────────────────────┐    │
-│  │              Multi-Head Output (8 cabeças)               │    │
+│  │              Multi-Head Output (9 cabeças)               │    │
 │  │                                                          │    │
 │  │  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌───┐ ┌───┐ ┌────┐│    │
 │  │  │ Root │ │ Bass │ │Triad │ │ Misc │ │7th│ │9th│ │... ││    │
@@ -693,7 +736,7 @@ Epoch 20: Train Loss: 1.5   Val Loss: 1.8
 Epoch 50: Train Loss: 0.8   Val Loss: 1.2
 ```
 
-A loss está na escala de ~2.0 porque é a soma de 8 componentes (média ~0.25 por componente).
+A loss está na escala de ~2.0 porque é a soma de 9 componentes (média ~0.22 por componente).
 
 ---
 
@@ -907,10 +950,10 @@ for t in range(10):  # Primeiros 10 frames
 
 | Métrica | Descrição |
 |---------|-----------|
-| `acc_component_avg` | Média das 8 acurácias de componentes |
+| `acc_component_avg` | Média das 9 acurácias de componentes |
 | `acc_root_triad` | % com root E triad corretos |
 | `acc_root_triad_7th` | % com root, triad E 7th corretos |
-| `acc_full_chord` | % com TODOS os 8 componentes corretos |
+| `acc_full_chord` | % com TODOS os 9 componentes corretos |
 
 ### 9.3 Interpretação
 
@@ -1126,14 +1169,17 @@ Isso permite identificar:
 BTC-ISMIR19/
 ├── data/
 │   ├── audio_dataset.py              # Dataset base
-│   └── audio_dataset_structured.py   # Dataset com decomposição
+│   └── audio_dataset_structured.py   # Dataset com decomposição (9 componentes)
 ├── models/
-│   └── btc_model_decomposed.py       # Modelo multi-head
+│   └── btc_model_decomposed.py       # Modelo multi-head (9 cabeças)
 ├── utils/
 │   ├── chord_decomposition.py        # ChordDecomposer & Reassembler
 │   ├── decomposed_inference.py       # Trainer, Inference, Metrics
 │   ├── mir_eval_modules.py           # idx2voca_chord mapping
 │   └── evaluation_metrics.py         # Métricas de avaliação
+├── scripts/
+│   ├── add_original_labels.py        # Adiciona labels originais aos .pt
+│   └── preprocess_with_extensions.py # Análise de extensões em .lab
 ├── train_decomposed.py               # Script de treinamento
 ├── debug_model.py                    # Script de debug e testes
 ├── infer_full_audio.py               # Inferência em áudio completo
