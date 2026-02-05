@@ -204,6 +204,7 @@ class BTC_model_decomposed(nn.Module):
                 predictions: Dict of predicted class indices
                 loss: Scalar loss value (None if labels not provided)
                 weights_list: Attention weights (from self_attn_layers)
+                component_losses: Dict of per-component loss values (None if labels not provided)
         """
         # Handle different input shapes
         if x.dim() == 4:
@@ -227,10 +228,11 @@ class BTC_model_decomposed(nn.Module):
         
         # Calculate loss if labels provided
         loss = None
+        component_losses = None
         if labels is not None:
-            loss = self.criterion(logits, labels)
+            loss, component_losses = self.criterion(logits, labels)
         
-        return predictions, loss, weights_list
+        return predictions, loss, weights_list, component_losses
     
     def predict_probabilities(self, x):
         """
@@ -320,6 +322,7 @@ class MultiTaskLoss(nn.Module):
         
         Returns:
             total_loss: Weighted sum of component losses (tensor)
+            loss_dict: Dict mapping component names to individual loss values (floats)
         """
         total_loss = None
         loss_dict = {}
@@ -357,7 +360,7 @@ class MultiTaskLoss(nn.Module):
         if total_loss is None:
             total_loss = torch.tensor(0.0, requires_grad=True)
         
-        return total_loss
+        return total_loss, loss_dict
     
     @staticmethod
     def compute_class_weights(train_dataset, gamma=0.5, w_max=10.0, device=None):

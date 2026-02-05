@@ -186,11 +186,11 @@ class DecomposedChordTrainer:
         
         Returns:
             avg_loss: Average loss over the epoch
-            metrics: Dict with per-component losses
+            component_losses: Dict with average per-component losses
         """
         self.model.train()
         total_loss = 0.0
-        component_losses = {component: 0.0 for component in COMPONENT_NAMES}
+        component_losses_sum = {component: 0.0 for component in COMPONENT_NAMES}
         num_batches = 0
         
         for batch_idx, batch in enumerate(train_loader):
@@ -207,8 +207,8 @@ class DecomposedChordTrainer:
             for component in COMPONENT_NAMES:
                 labels[component] = components[component].reshape(batch_size, seq_len)
             
-            # Forward pass
-            predictions, loss, _ = self.model(features, labels=labels)
+            # Forward pass (now returns 4 values)
+            predictions, loss, _, batch_component_losses = self.model(features, labels=labels)
             
             # Backward pass
             optimizer.zero_grad()
@@ -221,12 +221,21 @@ class DecomposedChordTrainer:
             total_loss += loss.item()
             num_batches += 1
             
+            # Aggregate component losses
+            if batch_component_losses:
+                for comp, val in batch_component_losses.items():
+                    component_losses_sum[comp] += val
+            
             if self.verbose and (batch_idx + 1) % max(1, len(train_loader) // 10) == 0:
                 print(f"Batch {batch_idx + 1}/{len(train_loader)}, Loss: {loss.item():.4f}")
         
         avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
         
-        return avg_loss, component_losses
+        # Calculate average component losses
+        component_losses_avg = {comp: val / num_batches if num_batches > 0 else 0.0 
+                                for comp, val in component_losses_sum.items()}
+        
+        return avg_loss, component_losses_avg
     
     def validate(self, val_loader):
         """
@@ -236,10 +245,11 @@ class DecomposedChordTrainer:
             val_loader: DataLoader with validation batches
         
         Returns:
-            metrics: Dict with validation metrics
+            metrics: Dict with validation metrics including per-component losses
         """
         self.model.eval()
         total_loss = 0.0
+        component_losses_sum = {component: 0.0 for component in COMPONENT_NAMES}
         num_batches = 0
         
         with torch.no_grad():
@@ -255,14 +265,27 @@ class DecomposedChordTrainer:
                 for component in COMPONENT_NAMES:
                     labels[component] = components[component].reshape(batch_size, seq_len)
                 
-                predictions, loss, _ = self.model(features, labels=labels)
+                # Forward pass (now returns 4 values)
+                predictions, loss, _, batch_component_losses = self.model(features, labels=labels)
                 
                 total_loss += loss.item()
                 num_batches += 1
+                
+                # Aggregate component losses
+                if batch_component_losses:
+                    for comp, val in batch_component_losses.items():
+                        component_losses_sum[comp] += val
         
         avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
         
-        return {'val_loss': avg_loss}
+        # Calculate average component losses
+        component_losses_avg = {comp: val / num_batches if num_batches > 0 else 0.0 
+                                for comp, val in component_losses_sum.items()}
+        
+        return {
+            'val_loss': avg_loss,
+            'component_losses': component_losses_avg
+        }
 
 
 class ChordMetrics:

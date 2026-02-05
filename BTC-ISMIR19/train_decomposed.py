@@ -217,13 +217,25 @@ def main():
         # Train
         train_loss, component_losses = trainer.train_epoch(train_loader, optimizer)
         logger.info(f"Train Loss: {train_loss:.4f}")
+        
+        # Log component losses
+        if component_losses:
+            comp_str = " | ".join([f"{k[:4]}:{v:.3f}" for k, v in component_losses.items()])
+            logger.info(f"  Components: {comp_str}")
+        
         training_history['train_loss'].append(train_loss)
         
         # Validate
         if (epoch + 1) % args.val_interval == 0:
             val_metrics = trainer.validate(val_loader)
             val_loss = val_metrics['val_loss']
+            val_component_losses = val_metrics.get('component_losses', {})
             logger.info(f"Val Loss: {val_loss:.4f}")
+            
+            # Log validation component losses
+            if val_component_losses:
+                comp_str = " | ".join([f"{k[:4]}:{v:.3f}" for k, v in val_component_losses.items()])
+                logger.info(f"  Val Components: {comp_str}")
             training_history['val_loss'].append(val_loss)
             
             # Save best checkpoint
@@ -246,7 +258,8 @@ def main():
                     'metrics': {
                         'train_loss': train_loss,
                         'val_loss': val_loss,
-                        'component_losses': {k: v for k, v in component_losses.items()} if component_losses else {},
+                        'train_component_losses': {k: v for k, v in component_losses.items()} if component_losses else {},
+                        'val_component_losses': {k: v for k, v in val_component_losses.items()} if val_component_losses else {},
                     },
                     
                     # Training configuration
