@@ -230,6 +230,15 @@ class ChordDecomposer:
             self._extract_extensions(remaining, components)
             return
         
+        # Handle maj7 specially (major triad + major 7th)
+        # Must check BEFORE general 'maj' extraction to avoid maj7 -> maj + 7(b7)
+        if 'maj7' in quality_lower:
+            components['triad'] = 'maj'
+            components['7th'] = '7'  # major 7th
+            remaining = quality_lower.replace('maj7', '')
+            self._extract_extensions(remaining, components)
+            return
+        
         # Handle power chord variations
         if quality_lower.startswith('(1,5)') or quality_lower == 'power':
             components['misc'] = '5'
