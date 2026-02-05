@@ -77,16 +77,26 @@ def main():
     
     # Prepare datasets
     logger.info("Preparing datasets...")
+    
+    # Get data root and dataset names from config
+    data_root = config.experiment.get('data_root', config.path.get('root_path', '/data/music/chord_recognition'))
+    dataset_names = config.experiment.get('dataset_names', ['billboard'])
+    
+    logger.info(f"Data root: {data_root}")
+    logger.info(f"Datasets: {dataset_names}")
+    
     train_dataset = AudioDatasetStructured(
         config,
-        root_dir=config.experiment.get('data_root', '/data/music/chord_recognition'),
+        root_dir=data_root,
+        dataset_names=tuple(dataset_names),
         train=True,
         decompose=True
     )
     
     val_dataset = AudioDatasetStructured(
         config,
-        root_dir=config.experiment.get('data_root', '/data/music/chord_recognition'),
+        root_dir=data_root,
+        dataset_names=tuple(dataset_names),
         train=False,
         decompose=True
     )

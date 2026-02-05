@@ -17,6 +17,14 @@ experiment:
   batch_size : 128
   save_step : 40
   data_ratio : 0.8
+  data_root : '/home/daniel.melo/datasets'
+  dataset_names:
+    - billboard
+    - dj_avan
+    - jaah
+    - queen
+    - robbiewilliams
+    - rwc
 
 curriculum:
   enabled: False  # Enable/disable curriculum learning
@@ -68,6 +76,6 @@ class_weights:
 
 path:
   ckpt_path : 'model'
-  result_path : '/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/RESULTS'
-  asset_path : '/home/daniel.melo/BTC_ORIGINAL/BTC-ISMIR19/assets'
+  result_path : '/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/results'
+  asset_path : '/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/assets'
   root_path : '/home/daniel.melo/datasets'
