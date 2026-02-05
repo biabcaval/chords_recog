@@ -71,10 +71,27 @@ class ChordDecomposer:
         #           '7th': 'N', '9th': '9', '11th': 'N', '13th': 'N'}
     """
     
+    # Mapping from flats to sharps (enharmonic equivalents)
+    FLAT_TO_SHARP = {
+        'Cb': 'B',
+        'Db': 'C#',
+        'Eb': 'D#',
+        'Fb': 'E',
+        'Gb': 'F#',
+        'Ab': 'G#',
+        'Bb': 'A#',
+    }
+    
     def __init__(self):
         self.pitch_classes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
         self.vocab = CHORD_VOCAB
         self.vocab_idx = CHORD_VOCAB_IDX
+    
+    def _normalize_pitch(self, pitch: str) -> str:
+        """Convert flat notes to sharp equivalents."""
+        if pitch in self.FLAT_TO_SHARP:
+            return self.FLAT_TO_SHARP[pitch]
+        return pitch
     
     def decompose(self, chord_label: str) -> Dict[str, str]:
         """
@@ -106,6 +123,9 @@ class ChordDecomposer:
             # Decompose quality and extensions
             if quality:
                 self._decompose_quality(quality, components)
+            elif root is not None:
+                # No explicit quality means major triad (e.g., 'C' or 'F/A')
+                components['triad'] = 'maj'
         
         except Exception as e:
             print(f"Error decomposing chord '{chord_label}': {e}")
@@ -146,6 +166,12 @@ class ChordDecomposer:
             root = label[:colon_idx]
             quality = label[colon_idx + 1:slash_idx]
             bass = label[slash_idx + 1:]
+        
+        # Normalize flats to sharps
+        if root:
+            root = self._normalize_pitch(root)
+        if bass:
+            bass = self._normalize_pitch(bass)
         
         # Validate root and bass are valid pitch classes
         if root and root not in self.pitch_classes:
