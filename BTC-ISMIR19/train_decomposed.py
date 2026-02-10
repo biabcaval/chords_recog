@@ -4,10 +4,11 @@
 Training script for chord recognition with structure decomposition.
 
 This script demonstrates how to train the decomposed chord recognition model
-with the 8-component architecture.
+with the 9-component architecture.
 
 Usage:
     python train_decomposed.py --config run_config.yaml --device cuda:0
+    python train_decomposed.py --backbone chordformer --run_name chordformer_decomp
 """
 
 import argparse
@@ -19,7 +20,11 @@ from pathlib import Path
 import json
 from datetime import datetime
 
-from models.btc_model_decomposed import BTC_model_decomposed, MultiTaskLoss
+from models.btc_model_decomposed import (
+    BTC_model_decomposed,
+    ChordFormer_model_decomposed,
+    MultiTaskLoss,
+)
 from data.audio_dataset_structured import AudioDatasetStructured, AudioDataLoaderStructured
 from utils.decomposed_inference import DecomposedChordTrainer, DecomposedChordInference, ChordMetrics
 from utils.hparams import HParams
@@ -62,6 +67,9 @@ def main():
                        help='Logging interval (batches)')
     parser.add_argument('--val_interval', type=int, default=1,
                        help='Validation interval (epochs)')
+    parser.add_argument('--backbone', type=str, default='btc',
+                       choices=['btc', 'chordformer'],
+                       help='Backbone encoder for decomposed model')
     
     args = parser.parse_args()
     
@@ -146,8 +154,12 @@ def main():
     
     # Initialize model
     logger.info("Initializing model...")
-    model = BTC_model_decomposed(config, class_weights=class_weights)
+    if args.backbone == 'chordformer':
+        model = ChordFormer_model_decomposed(config, class_weights=class_weights)
+    else:
+        model = BTC_model_decomposed(config, class_weights=class_weights)
     model = model.to(device)
+    logger.info(f"Selected backbone: {args.backbone}")
     
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
@@ -191,6 +203,7 @@ def main():
         'num_epochs': args.num_epochs,
         'gamma': args.gamma,
         'w_max': args.w_max,
+        'backbone': args.backbone,
         'model_config': {
             'hidden_size': config.model.get('hidden_size', 128),
             'num_layers': config.model.get('num_layers', 8),
@@ -200,6 +213,9 @@ def main():
             'input_dropout': config.model.get('input_dropout', 0.2),
             'layer_dropout': config.model.get('layer_dropout', 0.2),
             'attention_dropout': config.model.get('attention_dropout', 0.2),
+            'conv_kernel_size': config.model.get('conv_kernel_size', 31),
+            'ff_expansion_factor': config.model.get('ff_expansion_factor', 4),
+            'conv_expansion_factor': config.model.get('conv_expansion_factor', 2),
         },
         'datasets': dataset_names,
         'data_root': data_root,

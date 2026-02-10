@@ -127,7 +127,15 @@ Refactored BTC model with 9 parallel output heads.
 - `BTC_model_decomposed`: Full model with feature extractor + multi-head decomposer
   ```python
   model = BTC_model_decomposed(config, class_weights=class_weights)
-  predictions, loss, weights = model(features, labels=labels_dict)
+  predictions, loss, weights, component_losses = model(features, labels=labels_dict)
+  ```
+
+- `ChordFormer_model_decomposed`: Conformer backbone + the same 9-head decomposer API
+  ```python
+  from models.btc_model_decomposed import ChordFormer_model_decomposed
+
+  model = ChordFormer_model_decomposed(config, class_weights=class_weights)
+  predictions, loss, weights, component_losses = model(features, labels=labels_dict)
   ```
 
 - `MultiTaskLoss`: Multi-task loss with class re-weighting
@@ -212,6 +220,9 @@ python train_decomposed.py
 # Training with custom run name
 python train_decomposed.py --run_name my_experiment
 
+# Choose backbone (btc or chordformer)
+python train_decomposed.py --backbone chordformer --run_name chordformer_decomp_v1
+
 # Training with custom parameters
 python train_decomposed.py \
     --run_name baseline_v1 \
@@ -219,8 +230,8 @@ python train_decomposed.py \
     --batch_size 64 \
     --num_epochs 150
 
-# Quick test training (small subset)
-python train_quick_test.py
+# Quick validation suite
+python quick_test_decomposed.py
 ```
 
 Checkpoints are saved to `checkpoints/<run_name>/`:

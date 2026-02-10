@@ -2,7 +2,7 @@
 """
 Extended AudioDataset with Chord Structure Decomposition support.
 
-This module provides enhanced dataset loading with 8-component chord decomposition.
+This module provides enhanced dataset loading with 9-component chord decomposition.
 """
 
 import numpy as np
@@ -28,7 +28,7 @@ def get_idx2chord_mapping():
 
 class AudioDatasetStructured(BaseAudioDataset):
     """
-    Extended AudioDataset that decomposes chords into 8 independent components.
+    Extended AudioDataset that decomposes chords into 9 independent components.
     
     This class extends the base AudioDataset to support Chord Structure Decomposition,
     where each chord is decomposed into:
@@ -36,10 +36,11 @@ class AudioDatasetStructured(BaseAudioDataset):
     2. Bass: 13 classes
     3. Triad: 7 classes
     4. Misc (Power Chord): 2 classes
-    5. 7th: 4 classes
-    6. 9th: 4 classes
-    7. 11th: 3 classes
-    8. 13th: 3 classes
+    5. 6th: 2 classes
+    6. 7th: 4 classes
+    7. 9th: 4 classes
+    8. 11th: 3 classes
+    9. 13th: 3 classes
     
     Example:
         dataset = AudioDatasetStructured(config, root_dir='/data', train=True)
@@ -47,7 +48,7 @@ class AudioDatasetStructured(BaseAudioDataset):
         # sample contains:
         # - 'feature': audio features
         # - 'chord': original chord labels (for compatibility)
-        # - 'components': dict with 8 component arrays
+        # - 'components': dict with 9 component arrays
     """
     
     def __init__(self, *args, decompose=True, **kwargs):
@@ -214,7 +215,8 @@ def _collate_fn_structured(batch):
         - chord_lens: (batch_size,) - number of unique chords per sample
         - boundaries: (batch_size, seq_len) - boundary indicators
     
-    The labels tensor shape is (batch_size, seq_len, 8) where 8 is the number of components.
+    The labels are represented as a dict of 9 tensors (one per component),
+    each with shape (batch_size, seq_len).
     """
     batch_size = len(batch)
     
@@ -365,6 +367,7 @@ def get_component_vocab_sizes():
         'bass': 13,    # N, C, C#, ..., B
         'triad': 7,    # N, maj, min, dim, aug, sus2, sus4
         'misc': 2,     # N, 5
+        '6th': 2,      # N, 6
         '7th': 4,      # N, 7, b7, bb7
         '9th': 4,      # N, 9, #9, b9
         '11th': 3,     # N, 11, #11

@@ -11,7 +11,7 @@ import torch.nn as nn
 import numpy as np
 from utils.transformer_modules import (
     bi_directional_self_attention_layers,
-    LayerNorm,
+    ConformerEncoder,
 )
 from utils.chord_decomposition import COMPONENT_NAMES, CHORD_VOCAB
 
@@ -255,6 +255,125 @@ class BTC_model_decomposed(nn.Module):
         
         self_attn_output, _ = self.self_attn_layers(x)
         logits = self.decomposer(self_attn_output)
+        probabilities = self.decomposer.get_probabilities(logits)
+        return probabilities
+
+
+class ChordFormer_model_decomposed(nn.Module):
+    """
+    ChordFormer model with chord structure decomposition.
+
+    Uses a Conformer encoder and predicts decomposed chord components in parallel
+    through MultiHeadChordDecomposer.
+
+    Args:
+        config: Configuration dictionary with model hyperparameters
+        class_weights: Optional dict mapping component names to class weight tensors
+    """
+
+    def __init__(self, config, class_weights=None):
+        super().__init__()
+
+        # Handle both dict-like and HParams-like config objects
+        if hasattr(config, 'model'):
+            cfg = config.model
+        else:
+            cfg = config
+
+        self.timestep = cfg['timestep']
+        self.probs_out = cfg.get('probs_out', False)
+        self.use_decomposition = cfg.get('use_decomposition', True)
+
+        # Conformer encoder (ChordFormer backbone)
+        self.conformer_encoder = ConformerEncoder(
+            embedding_size=cfg['feature_size'],
+            hidden_size=cfg['hidden_size'],
+            num_layers=cfg['num_layers'],
+            num_heads=cfg['num_heads'],
+            conv_kernel_size=cfg.get('conv_kernel_size', 31),
+            ff_expansion_factor=cfg.get('ff_expansion_factor', 4),
+            conv_expansion_factor=cfg.get('conv_expansion_factor', 2),
+            max_length=cfg['timestep'],
+            input_dropout=cfg.get('input_dropout', 0.2),
+            layer_dropout=cfg.get('layer_dropout', 0.2),
+            attention_map=True,
+        )
+
+        # Multi-head chord decomposition
+        self.decomposer = MultiHeadChordDecomposer(
+            hidden_size=cfg['hidden_size'],
+            dropout=cfg.get('output_dropout', 0.0)
+        )
+
+        # Loss function
+        self.criterion = MultiTaskLoss(
+            vocab_sizes=self.decomposer.vocab_sizes,
+            class_weights=class_weights,
+            gamma=cfg.get('class_weight_gamma', 0.5),
+            w_max=cfg.get('class_weight_max', 10.0)
+        )
+
+        self.component_names = COMPONENT_NAMES
+
+    def _prepare_input(self, x):
+        """Normalize model input shape to (batch_size, seq_len, feature_size)."""
+        if x.dim() == 4:
+            x = x.squeeze(1)
+            x = x.permute(0, 2, 1)
+        return x
+
+    def forward(self, x, labels=None):
+        """
+        Forward pass through Conformer + decomposed output heads.
+
+        Args:
+            x: Input features. Can be:
+               - (batch_size, seq_len, feature_size): Standard 3D format
+               - (batch_size, 1, feature_size, seq_len): Image-like 4D format
+            labels: Optional dict mapping component names to target indices
+
+        Returns:
+            If probs_out=True:
+                logits: Dict of logit tensors for each component
+            If probs_out=False:
+                predictions: Dict of predicted class indices
+                loss: Scalar loss value (None if labels not provided)
+                weights_list: Attention weights from Conformer blocks
+                component_losses: Dict of per-component loss values (None if labels not provided)
+        """
+        x = self._prepare_input(x)
+
+        # Feature extraction with Conformer encoder
+        encoder_output, weights_list = self.conformer_encoder(x)
+
+        # Get logits from all decomposition heads
+        logits = self.decomposer(encoder_output)
+
+        if self.probs_out:
+            return logits
+
+        predictions = self.decomposer.get_predictions(logits)
+
+        loss = None
+        component_losses = None
+        if labels is not None:
+            loss, component_losses = self.criterion(logits, labels)
+
+        return predictions, loss, weights_list, component_losses
+
+    def predict_probabilities(self, x):
+        """
+        Get probability distributions for all components.
+
+        Args:
+            x: Input features in 3D or 4D format
+
+        Returns:
+            probabilities: Dict mapping component names to probability tensors
+        """
+        x = self._prepare_input(x)
+        encoder_output, _ = self.conformer_encoder(x)
+        logits = self.decomposer(encoder_output)
         probabilities = self.decomposer.get_probabilities(logits)
         return probabilities
 

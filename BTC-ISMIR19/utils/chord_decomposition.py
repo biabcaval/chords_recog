@@ -426,8 +426,8 @@ class ChordReassembler:
         Reassemble chord label from decomposed components.
         
         Args:
-            components: Dictionary with 8 component keys:
-                - root, bass, triad, misc, 7th, 9th, 11th, 13th
+            components: Dictionary with 9 component keys:
+                - root, bass, triad, misc, 6th, 7th, 9th, 11th, 13th
             
         Returns:
             Reconstructed chord label string (e.g., 'C:maj7', 'D:min/F#', 'N')
@@ -485,7 +485,7 @@ class ChordReassembler:
         Reassemble chord with overall confidence score.
         
         Args:
-            components: Dictionary with 8 component keys
+            components: Dictionary with 9 component keys
             confidences: Dictionary with confidence scores for each component
             
         Returns:

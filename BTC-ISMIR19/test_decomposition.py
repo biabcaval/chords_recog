@@ -127,8 +127,8 @@ class TestVocabulary(unittest.TestCase):
         vocab_sizes = get_vocab_sizes()
         total = sum(vocab_sizes.values())
         
-        # 49 total classes vs. ~170 for monolithic
-        self.assertEqual(total, 49)
+        # 51 total classes vs. ~170 for monolithic
+        self.assertEqual(total, 51)
 
 
 class TestModelArchitecture(unittest.TestCase):

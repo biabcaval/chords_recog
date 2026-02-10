@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 # encoding: utf-8
 """
-Preprocess datasets for chord recognition with decomposed structure (8 components).
+Preprocess datasets for chord recognition with decomposed structure (9 components).
 
 This script preprocesses audio datasets and converts chord labels to the
-8-component decomposed format (root, bass, triad, misc, 7th, 9th, 11th, 13th).
+9-component decomposed format (root, bass, triad, misc, 6th, 7th, 9th, 11th, 13th).
 """
 
 import os
@@ -27,7 +27,7 @@ from utils.chord_decomposition import ChordDecomposer
 
 def decompose_preprocessed_data(data_dir, output_dir, force=False):
     """
-    Convert preprocessed data from 170-chord to 8-component decomposed format.
+    Convert preprocessed data from 170-chord to 9-component decomposed format.
     
     Args:
         data_dir: Directory with preprocessed .pt files
@@ -251,7 +251,7 @@ def preprocess_datasets_decomposed(config_path, root_dir, dataset_names,
     
     # Step 2: Convert to decomposed format
     print("\n" + "="*70)
-    print("STEP 2: Converting to Decomposed Format (8 components)")
+    print("STEP 2: Converting to Decomposed Format (9 components)")
     print("="*70)
     
     for dataset_name, intermediate_dir in intermediate_dirs:

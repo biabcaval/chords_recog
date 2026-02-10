@@ -355,13 +355,13 @@ class TestModelArchitecture(unittest.TestCase):
                            f"Head for {component} has wrong shape")
     
     def test_multi_head_decomposer(self):
-        """MultiHeadChordDecomposer should output dict with 8 components."""
+        """MultiHeadChordDecomposer should output dict with all components."""
         decomposer = MultiHeadChordDecomposer(self.hidden_size)
         
         x = torch.randn(self.batch_size, self.seq_len, self.hidden_size)
         logits = decomposer(x)
         
-        self.assertEqual(len(logits), 8)
+        self.assertEqual(len(logits), len(COMPONENT_NAMES))
         for component in COMPONENT_NAMES:
             self.assertIn(component, logits)
             vocab_size = len(CHORD_VOCAB[component])
@@ -424,16 +424,17 @@ class TestModelArchitecture(unittest.TestCase):
         x = torch.randn(self.batch_size, self.seq_len, self.feature_size)
         
         with torch.no_grad():
-            predictions, loss, weights = model(x, labels=None)
+            predictions, loss, weights, component_losses = model(x, labels=None)
         
-        # Predictions should be dict with 8 components
-        self.assertEqual(len(predictions), 8)
+        # Predictions should be dict with all components
+        self.assertEqual(len(predictions), len(COMPONENT_NAMES))
         for component in COMPONENT_NAMES:
             self.assertIn(component, predictions)
             self.assertEqual(predictions[component].shape, (self.batch_size, self.seq_len))
         
         # Loss should be None when no labels
         self.assertIsNone(loss)
+        self.assertIsNone(component_losses)
 
 
 class TestMultiTaskLoss(unittest.TestCase):

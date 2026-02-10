@@ -547,13 +547,18 @@ python train_decomposed.py \
 python train_decomposed.py \
     --run_name teste_nova_config \
     --config configs/minha_config.yaml
+
+# Escolher backbone (btc ou chordformer)
+python train_decomposed.py \
+    --run_name chordformer_decomp_v1 \
+    --backbone chordformer
 ```
 
 #### Treino Rápido (para testes)
 
 ```bash
-# Treino com subset pequeno (500 amostras, 3 epochs)
-python train_quick_test.py
+# Smoke test do pipeline (imports, forward, treino e inferência)
+python quick_test_decomposed.py
 ```
 
 ### 7.2 Parâmetros do Script
@@ -570,6 +575,7 @@ python train_quick_test.py
 | `--weight_decay` | 1e-5 | Regularização L2 |
 | `--gamma` | 0.5 | Expoente do class weighting |
 | `--w_max` | 10.0 | Peso máximo por classe |
+| `--backbone` | btc | Backbone do modelo (`btc` ou `chordformer`) |
 | `--log_interval` | 10 | Intervalo de log (batches) |
 | `--val_interval` | 1 | Intervalo de validação (epochs) |
 | `--resume` | None | Checkpoint para continuar treino |

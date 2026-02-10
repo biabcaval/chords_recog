@@ -331,7 +331,7 @@ class ChordMetrics:
     def chord_accuracy(self, predictions: Dict[str, np.ndarray],
                       targets: Dict[str, np.ndarray]) -> float:
         """
-        Compute overall chord accuracy (all 8 components must match).
+        Compute overall chord accuracy (all components must match).
         
         Args:
             predictions: Dict mapping components to predicted indices

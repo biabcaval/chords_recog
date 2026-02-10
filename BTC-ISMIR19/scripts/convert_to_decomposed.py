@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 # encoding: utf-8
 """
-Convert preprocessed data from 170-chord vocabulary to 8-component decomposed format.
+Convert preprocessed data from 170-chord vocabulary to 9-component decomposed format.
 
 Takes existing .pt files with large vocabulary chords and converts them to 
-the new decomposed format (8 components, 49 total classes).
+the new decomposed format (9 components, 51 total classes).
 """
 
 import os
