@@ -17,9 +17,12 @@ mir_eval >= 0.7
 # Utilities
 tqdm >= 4.65.0
 scipy >= 1.10.0
+sortedcontainers >= 2.4.0
 
 # Logging & monitoring
 wandb >= 0.15.0
+tensorflow >= 2.10.0
+pillow >= 10.0.0
 
 # Optional (MIDI support)
 pretty_midi >= 0.2.10
