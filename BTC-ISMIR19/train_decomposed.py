@@ -63,6 +63,10 @@ def main():
                        help='Class weighting gamma parameter')
     parser.add_argument('--w_max', type=float, default=10.0,
                        help='Class weighting maximum cap')
+    parser.add_argument('--use_class_weights', action='store_true',
+                       help='Force enable class reweighting')
+    parser.add_argument('--no_class_weights', action='store_true',
+                       help='Force disable class reweighting')
     parser.add_argument('--log_interval', type=int, default=10,
                        help='Logging interval (batches)')
     parser.add_argument('--val_interval', type=int, default=1,
@@ -72,6 +76,9 @@ def main():
                        help='Backbone encoder for decomposed model')
     
     args = parser.parse_args()
+    
+    if args.use_class_weights and args.no_class_weights:
+        parser.error("Use only one of --use_class_weights or --no_class_weights")
     
     # Setup device
     device = torch.device(args.device)
@@ -138,19 +145,31 @@ def main():
         num_workers=4
     )
     
-    # Compute class weights
-    logger.info("Computing class weights...")
-    class_weights = MultiTaskLoss.compute_class_weights(
-        train_dataset,
-        gamma=args.gamma,
-        w_max=args.w_max,
-        device=device
-    )
+    # Resolve class weighting mode (CLI override > config file)
+    config_class_weights_enabled = config.class_weights.get('enabled', True) if hasattr(config, 'class_weights') else True
+    if args.use_class_weights:
+        class_weights_enabled = True
+    elif args.no_class_weights:
+        class_weights_enabled = False
+    else:
+        class_weights_enabled = config_class_weights_enabled
     
-    # Log class weights
-    logger.info("Class weights computed:")
-    for component, weights in class_weights.items():
-        logger.info(f"  {component}: min={weights.min():.3f}, max={weights.max():.3f}, mean={weights.mean():.3f}")
+    class_weights = None
+    if class_weights_enabled:
+        logger.info("Computing class weights...")
+        class_weights = MultiTaskLoss.compute_class_weights(
+            train_dataset,
+            gamma=args.gamma,
+            w_max=args.w_max,
+            device=device
+        )
+        
+        # Log class weights
+        logger.info("Class weights computed:")
+        for component, weights in class_weights.items():
+            logger.info(f"  {component}: min={weights.min():.3f}, max={weights.max():.3f}, mean={weights.mean():.3f}")
+    else:
+        logger.info("Class reweighting disabled (using unweighted CrossEntropy for all components)")
     
     # Initialize model
     logger.info("Initializing model...")
@@ -203,6 +222,7 @@ def main():
         'num_epochs': args.num_epochs,
         'gamma': args.gamma,
         'w_max': args.w_max,
+        'class_weights_enabled': class_weights_enabled,
         'backbone': args.backbone,
         'model_config': {
             'hidden_size': config.model.get('hidden_size', 128),
