@@ -514,17 +514,18 @@ def compute_class_weights(self, train_dataset, gamma=0.5, w_max=10.0):
 
 ### 7.1 Comandos de Treinamento
 
+
 #### Treino Básico
 
 ```bash
-# Treino padrão (gera nome automático com timestamp)
+# Treino decomposed com backbone BTC (padrão), nome automático da run
 python train_decomposed.py
 ```
 
 #### Treino com Nome Personalizado
 
 ```bash
-# Nomear a run de treino
+# Mesmo treino, mas com nome explícito para rastrear experimento
 python train_decomposed.py --run_name meu_experimento
 
 # Exemplos de nomes descritivos
@@ -548,7 +549,7 @@ python train_decomposed.py \
     --run_name teste_nova_config \
     --config configs/minha_config.yaml
 
-# Escolher backbone (btc ou chordformer)
+# Treinar decomposed com backbone ChordFormer (Conformer encoder)
 python train_decomposed.py \
     --run_name chordformer_decomp_v1 \
     --backbone chordformer
@@ -557,7 +558,8 @@ python train_decomposed.py \
 #### Treino Rápido (para testes)
 
 ```bash
-# Smoke test do pipeline (imports, forward, treino e inferência)
+# Validação rápida do pipeline (NAO treina dataset real)
+# Executa checks de import, forward, loss, inferência e um passo sintético de treino
 python quick_test_decomposed.py
 ```
 

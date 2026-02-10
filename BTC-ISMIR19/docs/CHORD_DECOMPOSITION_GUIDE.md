@@ -213,24 +213,28 @@ Handles inference, decoding, and metrics computation.
 
 ### Command-Line Training
 
+**Backbone choice (`--backbone`)**
+- `btc`: mantém o encoder BTC original (self-attention bidirecional), bom como baseline e para comparação direta com trabalhos anteriores.
+- `chordformer`: usa encoder Conformer (atenção + convolução), normalmente melhor para capturar padrões locais e dependências de longo alcance em áudio.
+
 ```bash
-# Basic training (auto-generated run name)
+# Train decomposed model with BTC backbone (default)
 python train_decomposed.py
 
-# Training with custom run name
+# Same training, but with a custom experiment name
 python train_decomposed.py --run_name my_experiment
 
-# Choose backbone (btc or chordformer)
+# Train decomposed model with ChordFormer backbone (Conformer encoder)
 python train_decomposed.py --backbone chordformer --run_name chordformer_decomp_v1
 
-# Training with custom parameters
+# Train with custom hyperparameters
 python train_decomposed.py \
     --run_name baseline_v1 \
     --learning_rate 0.0001 \
     --batch_size 64 \
     --num_epochs 150
 
-# Quick validation suite
+# Validation only (NOT training): smoke test for imports/forward/loss/inference
 python quick_test_decomposed.py
 ```
 
