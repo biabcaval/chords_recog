@@ -9,6 +9,9 @@ requiring full training, making it easy to catch errors quickly.
 Usage:
     python quick_test_decomposed.py
     python quick_test_decomposed.py --verbose
+    python quick_test_decomposed.py --backbone btc
+    python quick_test_decomposed.py --backbone chordformer
+    python quick_test_decomposed.py --backbone both
 """
 
 import sys
@@ -25,8 +28,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 class QuickValidator:
     """Fast validation of model architecture and pipeline."""
     
-    def __init__(self, verbose=False, device=None):
+    def __init__(self, verbose=False, device=None, backbone='both'):
         self.verbose = verbose
+        self.backbone = backbone
         
         # Handle device selection with fallback to CPU if CUDA unavailable
         if device is None:
@@ -41,6 +45,20 @@ class QuickValidator:
         
         if verbose:
             print(f"Using device: {self.device}")
+            print(f"Backbone mode: {self.backbone}")
+
+    def _selected_backbones(self):
+        """Return list of backbones to test based on CLI selection."""
+        if self.backbone == 'both':
+            return ['btc', 'chordformer']
+        return [self.backbone]
+
+    def _build_model(self, backbone, config):
+        """Build decomposed model for selected backbone."""
+        from models.btc_model_decomposed import BTC_model_decomposed, ChordFormer_model_decomposed
+        if backbone == 'chordformer':
+            return ChordFormer_model_decomposed(config)
+        return BTC_model_decomposed(config)
     
     def log(self, msg):
         """Conditional logging."""
@@ -188,17 +206,13 @@ class QuickValidator:
             return False
     
     def test_full_model(self):
-        """Test full BTC_model_decomposed."""
+        """Test full decomposed model forward/backward pass."""
         print("\n" + "="*60)
         print("TEST 4: Full Model Forward Pass")
         print("="*60)
         
         try:
-            from models.btc_model_decomposed import (
-                BTC_model_decomposed,
-                ChordFormer_model_decomposed,
-                MultiTaskLoss,
-            )
+            from models.btc_model_decomposed import MultiTaskLoss
             from utils.chord_decomposition import COMPONENT_NAMES, get_vocab_sizes
             
             # Minimal config
@@ -219,35 +233,11 @@ class QuickValidator:
                 'use_decomposition': True,
             }
             
-            print(f"  Creating model with hidden_size={config['hidden_size']}")
-            model = BTC_model_decomposed(config)
-            model = model.to(self.device)
-            model.eval()
-            
-            # Count parameters
-            total_params = sum(p.numel() for p in model.parameters())
-            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            print(f"    [OK] Model created: {total_params:,} total params, {trainable_params:,} trainable")
-            
-            # Test forward pass
-            print("  Testing forward pass...")
             batch_size = 2
             seq_len = 50
-            
             features = torch.randn(batch_size, 1, config['feature_size'], seq_len, 
                                   device=self.device)
-            
-            with torch.no_grad():
-                predictions, loss, weights, component_losses = model(features)
-            
-            assert predictions is not None, "Predictions should not be None"
-            assert loss is None, "Loss should be None when no labels provided"
-            assert component_losses is None, "Component losses should be None when no labels provided"
-            print(f"    [OK] Forward pass successful")
-            print(f"    [OK] Predictions structure: Dict with {len(predictions)} components")
-            
-            # Test with labels
-            print("  Testing with labels...")
+
             vocab_sizes = get_vocab_sizes()
             labels = {
                 component: torch.randint(0, vocab_sizes[component],
@@ -255,45 +245,47 @@ class QuickValidator:
                                         device=self.device)
                 for component in COMPONENT_NAMES
             }
-            
-            model.train()
-            predictions, loss, weights, component_losses = model(features, labels=labels)
-            
-            assert loss is not None, "Loss should not be None with labels"
-            assert loss.item() > 0, "Loss should be positive"
-            assert isinstance(component_losses, dict), "Component losses should be a dict"
-            print(f"    [OK] Loss computed: {loss.item():.4f}")
-            
-            # Test backward pass
-            print("  Testing backward pass...")
-            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            optimizer.zero_grad()
-            loss.backward()
-            
-            # Check gradients
-            has_grads = sum(1 for p in model.parameters() if p.grad is not None)
-            print(f"    [OK] Backward pass successful: {has_grads} parameters with gradients")
-            
-            optimizer.step()
-            print(f"    [OK] Optimizer step successful")
 
-            # Test ChordFormer decomposed backbone
-            print("  Testing ChordFormer_model_decomposed...")
-            chordformer_config = dict(config)
-            chordformer_config.update({
-                'conv_kernel_size': 15,
-                'ff_expansion_factor': 2,
-                'conv_expansion_factor': 2,
-            })
-            chordformer = ChordFormer_model_decomposed(chordformer_config).to(self.device)
-            chordformer.eval()
+            for backbone in self._selected_backbones():
+                print(f"  Testing backbone: {backbone}")
+                model = self._build_model(backbone, config).to(self.device)
+                model.eval()
 
-            with torch.no_grad():
-                cf_predictions, cf_loss, cf_weights, cf_component_losses = chordformer(features)
-            assert cf_predictions is not None, "ChordFormer predictions should not be None"
-            assert cf_loss is None, "ChordFormer loss should be None without labels"
-            assert cf_component_losses is None, "ChordFormer component losses should be None without labels"
-            print(f"    [OK] ChordFormer forward pass successful")
+                # Count parameters
+                total_params = sum(p.numel() for p in model.parameters())
+                trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                print(f"    [OK] Model created: {total_params:,} total params, {trainable_params:,} trainable")
+
+                # Test forward pass
+                with torch.no_grad():
+                    predictions, loss, weights, component_losses = model(features)
+
+                assert predictions is not None, f"{backbone}: predictions should not be None"
+                assert loss is None, f"{backbone}: loss should be None when no labels provided"
+                assert component_losses is None, f"{backbone}: component losses should be None when no labels"
+                print(f"    [OK] Forward pass successful")
+                print(f"    [OK] Predictions structure: Dict with {len(predictions)} components")
+
+                # Test with labels
+                model.train()
+                predictions, loss, weights, component_losses = model(features, labels=labels)
+
+                assert loss is not None, f"{backbone}: loss should not be None with labels"
+                assert loss.item() > 0, f"{backbone}: loss should be positive"
+                assert isinstance(component_losses, dict), f"{backbone}: component losses should be dict"
+                print(f"    [OK] Loss computed: {loss.item():.4f}")
+
+                # Test backward pass
+                optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+                optimizer.zero_grad()
+                loss.backward()
+
+                # Check gradients
+                has_grads = sum(1 for p in model.parameters() if p.grad is not None)
+                print(f"    [OK] Backward pass successful: {has_grads} parameters with gradients")
+
+                optimizer.step()
+                print(f"    [OK] Optimizer step successful")
             
             self.results['full_model'] = True
             return True
@@ -312,7 +304,6 @@ class QuickValidator:
         print("="*60)
         
         try:
-            from models.btc_model_decomposed import BTC_model_decomposed
             from utils.decomposed_inference import (
                 DecomposedChordInference, ChordMetrics
             )
@@ -335,37 +326,38 @@ class QuickValidator:
                 'probs_out': True,
             }
             
-            model = BTC_model_decomposed(config)
-            model = model.to(self.device)
-            
-            # Test DecomposedChordInference
-            print("  Testing DecomposedChordInference...")
-            inference = DecomposedChordInference(model, device=self.device)
-            
-            # Test prediction
             features = torch.randn(1, 1, config['feature_size'], 50, device=self.device)
-            predictions = inference.predict_batch(features, return_probabilities=False)
-            
-            assert predictions is not None, "Predictions should not be None"
-            assert len(predictions) == len(COMPONENT_NAMES), "Wrong number of predictions"
-            print(f"    [OK] Inference successful: {len(predictions)} components")
-            
-            # Test decoding
-            print("  Testing chord decoding...")
-            chord_labels = inference.decode_predictions(predictions)
-            assert isinstance(chord_labels, list), "Should return list"
-            assert len(chord_labels) > 0, "Should have predictions"
-            print(f"    [OK] Chord decoding successful: {len(chord_labels)} chords")
-            print(f"      Example: {chord_labels[0]}")
-            
-            # Test probabilities
-            print("  Testing probability computation...")
-            probabilities = inference.predict_batch(features, return_probabilities=True)
-            assert len(probabilities) == len(COMPONENT_NAMES), "Wrong number of probabilities"
-            
-            confidences = inference.get_confidence_scores(probabilities)
-            assert len(confidences) > 0, "Should have confidence scores"
-            print(f"    [OK] Confidence scores: min={confidences.min():.3f}, max={confidences.max():.3f}")
+
+            for backbone in self._selected_backbones():
+                model = self._build_model(backbone, config).to(self.device)
+                
+                # Test DecomposedChordInference
+                print(f"  Testing DecomposedChordInference ({backbone})...")
+                inference = DecomposedChordInference(model, device=self.device)
+                
+                # Test prediction
+                predictions = inference.predict_batch(features, return_probabilities=False)
+                
+                assert predictions is not None, f"{backbone}: predictions should not be None"
+                assert len(predictions) == len(COMPONENT_NAMES), f"{backbone}: wrong number of predictions"
+                print(f"    [OK] Inference successful: {len(predictions)} components")
+                
+                # Test decoding
+                print("  Testing chord decoding...")
+                chord_labels = inference.decode_predictions(predictions)
+                assert isinstance(chord_labels, list), f"{backbone}: should return list"
+                assert len(chord_labels) > 0, f"{backbone}: should have predictions"
+                print(f"    [OK] Chord decoding successful: {len(chord_labels)} chords")
+                print(f"      Example: {chord_labels[0]}")
+                
+                # Test probabilities
+                print("  Testing probability computation...")
+                probabilities = inference.predict_batch(features, return_probabilities=True)
+                assert len(probabilities) == len(COMPONENT_NAMES), f"{backbone}: wrong number of probabilities"
+                
+                confidences = inference.get_confidence_scores(probabilities)
+                assert len(confidences) > 0, f"{backbone}: should have confidence scores"
+                print(f"    [OK] Confidence scores: min={confidences.min():.3f}, max={confidences.max():.3f}")
             
             # Test ChordMetrics
             print("  Testing ChordMetrics...")
@@ -448,7 +440,7 @@ class QuickValidator:
         
         try:
             import torch.optim as optim
-            from models.btc_model_decomposed import BTC_model_decomposed, MultiTaskLoss
+            from models.btc_model_decomposed import MultiTaskLoss
             from utils.decomposed_inference import DecomposedChordTrainer
             from utils.chord_decomposition import COMPONENT_NAMES, get_vocab_sizes
             
@@ -469,11 +461,6 @@ class QuickValidator:
                 'probs_out': False,
             }
             
-            model = BTC_model_decomposed(config)
-            model = model.to(self.device)
-            
-            optimizer = optim.Adam(model.parameters(), lr=1e-3)
-            
             print("  Preparing dummy batch...")
             batch_size = 2
             seq_len = 50
@@ -489,31 +476,34 @@ class QuickValidator:
                 for component in COMPONENT_NAMES
             }
             
-            print("  Running training step...")
-            model.train()
-            
-            predictions, loss, _, component_losses = model(features, labels=labels)
-            
-            print(f"    [OK] Forward pass: loss={loss.item():.4f}")
-            assert isinstance(component_losses, dict), "Component losses should be a dict"
-            
-            # Backward
-            optimizer.zero_grad()
-            loss.backward()
-            
-            print(f"    [OK] Backward pass complete")
-            
-            # Optimizer step
-            optimizer.step()
-            
-            print(f"    [OK] Optimizer step complete")
-            
-            # Run another step to verify convergence
-            predictions2, loss2, _, _ = model(features, labels=labels)
-            print(f"    [OK] Second forward pass: loss={loss2.item():.4f}")
-            
-            if loss2.item() != loss.item():
-                print(f"    [OK] Loss changed (good): {loss.item():.4f}  ->  {loss2.item():.4f}")
+            for backbone in self._selected_backbones():
+                model = self._build_model(backbone, config).to(self.device)
+                optimizer = optim.Adam(model.parameters(), lr=1e-3)
+                print(f"  Running training step ({backbone})...")
+                model.train()
+                
+                predictions, loss, _, component_losses = model(features, labels=labels)
+                
+                print(f"    [OK] Forward pass: loss={loss.item():.4f}")
+                assert isinstance(component_losses, dict), f"{backbone}: component losses should be a dict"
+                
+                # Backward
+                optimizer.zero_grad()
+                loss.backward()
+                
+                print(f"    [OK] Backward pass complete")
+                
+                # Optimizer step
+                optimizer.step()
+                
+                print(f"    [OK] Optimizer step complete")
+                
+                # Run another step to verify convergence
+                predictions2, loss2, _, _ = model(features, labels=labels)
+                print(f"    [OK] Second forward pass: loss={loss2.item():.4f}")
+                
+                if loss2.item() != loss.item():
+                    print(f"    [OK] Loss changed (good): {loss.item():.4f}  ->  {loss2.item():.4f}")
             
             self.results['training_step'] = True
             return True
@@ -584,10 +574,13 @@ def main():
                        help='Verbose output')
     parser.add_argument('--device', type=str, default=None,
                        help='Device to use (cuda, cpu, etc.)')
+    parser.add_argument('--backbone', type=str, default='both',
+                       choices=['btc', 'chordformer', 'both'],
+                       help='Backbone(s) to validate: btc, chordformer, or both')
     
     args = parser.parse_args()
     
-    validator = QuickValidator(verbose=args.verbose, device=args.device)
+    validator = QuickValidator(verbose=args.verbose, device=args.device, backbone=args.backbone)
     return validator.run_all()
 
 

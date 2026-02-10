@@ -234,7 +234,13 @@ python train_decomposed.py \
     --batch_size 64 \
     --num_epochs 150
 
-# Validation only (NOT training): smoke test for imports/forward/loss/inference
+# Validation only (NOT training): smoke test for BTC backbone
+python quick_test_decomposed.py --backbone btc
+
+# Validation only (NOT training): smoke test for ChordFormer backbone
+python quick_test_decomposed.py --backbone chordformer
+
+# Validation only (NOT training): run both backbones
 python quick_test_decomposed.py
 ```
 

@@ -558,9 +558,14 @@ python train_decomposed.py \
 #### Treino Rápido (para testes)
 
 ```bash
-# Validação rápida do pipeline (NAO treina dataset real)
-# Executa checks de import, forward, loss, inferência e um passo sintético de treino
-python quick_test_decomposed.py
+# Validação rápida do pipeline (NAO treina dataset real) - BTC
+python quick_test_decomposed.py --backbone btc
+
+# Validação rápida do pipeline (NAO treina dataset real) - ChordFormer
+python quick_test_decomposed.py --backbone chordformer
+
+# Executa ambos os backbones na mesma rodada
+python quick_test_decomposed.py --backbone both
 ```
 
 ### 7.2 Parâmetros do Script
