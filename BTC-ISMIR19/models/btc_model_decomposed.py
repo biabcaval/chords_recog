@@ -136,7 +136,7 @@ class BTC_model_decomposed(nn.Module):
         class_weights: Optional dict mapping component names to class weight tensors
     """
     
-    def __init__(self, config, class_weights=None):
+    def __init__(self, config, class_weights=None, component_weights=None):
         super().__init__()
         
         # Handle both dict-like and HParams-like config objects
@@ -180,7 +180,8 @@ class BTC_model_decomposed(nn.Module):
             vocab_sizes=self.decomposer.vocab_sizes,
             class_weights=class_weights,
             gamma=cfg.get('class_weight_gamma', 0.5),
-            w_max=cfg.get('class_weight_max', 10.0)
+            w_max=cfg.get('class_weight_max', 10.0),
+            component_weights=component_weights
         )
         
         # Store component names for reference
@@ -271,7 +272,7 @@ class ChordFormer_model_decomposed(nn.Module):
         class_weights: Optional dict mapping component names to class weight tensors
     """
 
-    def __init__(self, config, class_weights=None):
+    def __init__(self, config, class_weights=None, component_weights=None):
         super().__init__()
 
         # Handle both dict-like and HParams-like config objects
@@ -310,7 +311,8 @@ class ChordFormer_model_decomposed(nn.Module):
             vocab_sizes=self.decomposer.vocab_sizes,
             class_weights=class_weights,
             gamma=cfg.get('class_weight_gamma', 0.5),
-            w_max=cfg.get('class_weight_max', 10.0)
+            w_max=cfg.get('class_weight_max', 10.0),
+            component_weights=component_weights
         )
 
         self.component_names = COMPONENT_NAMES

@@ -27,6 +27,7 @@ from models.btc_model_decomposed import (
 )
 from data.audio_dataset_structured import AudioDatasetStructured, AudioDataLoaderStructured
 from utils.decomposed_inference import DecomposedChordTrainer, DecomposedChordInference, ChordMetrics
+from utils.chord_decomposition import COMPONENT_NAMES
 from utils.hparams import HParams
 
 # Setup logging
@@ -35,6 +36,39 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def parse_component_weights(spec: str):
+    """
+    Parse component weight spec from CLI.
+
+    Expected format:
+      "root=1,bass=1,triad=1,misc=1,6th=1,7th=1,9th=1,11th=0.3,13th=0.3"
+    """
+    if spec is None:
+        return None
+
+    out = {}
+    for item in spec.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        if '=' not in item:
+            raise ValueError(f"Invalid component weight item '{item}'. Expected key=value.")
+        key, value = item.split('=', 1)
+        key = key.strip()
+        value = value.strip()
+        if key not in COMPONENT_NAMES:
+            raise ValueError(f"Unknown component '{key}'. Valid: {COMPONENT_NAMES}")
+        try:
+            out[key] = float(value)
+        except ValueError as exc:
+            raise ValueError(f"Invalid numeric value for '{key}': '{value}'") from exc
+
+    # Fill unspecified components with default weight 1.0
+    for comp in COMPONENT_NAMES:
+        out.setdefault(comp, 1.0)
+    return out
 
 
 def main():
@@ -76,11 +110,18 @@ def main():
                        help='Backbone encoder for decomposed model')
     parser.add_argument('--kfold', type=int, default=4, choices=[0, 1, 2, 3, 4],
                        help='5-fold split index used for validation (default: 4)')
+    parser.add_argument('--component_weights', type=str, default=None,
+                       help='Optional per-component loss weights as comma-separated key=value list')
     
     args = parser.parse_args()
     
     if args.use_class_weights and args.no_class_weights:
         parser.error("Use only one of --use_class_weights or --no_class_weights")
+
+    try:
+        component_weights = parse_component_weights(args.component_weights)
+    except ValueError as e:
+        parser.error(str(e))
     
     # Setup device
     device = torch.device(args.device)
@@ -113,6 +154,8 @@ def main():
     logger.info(f"Data root: {data_root}")
     logger.info(f"Datasets: {dataset_names}")
     logger.info(f"K-Fold: {args.kfold}")
+    if component_weights is not None:
+        logger.info(f"Component weights: {component_weights}")
     
     train_dataset = AudioDatasetStructured(
         config,
@@ -179,9 +222,17 @@ def main():
     # Initialize model
     logger.info("Initializing model...")
     if args.backbone == 'chordformer':
-        model = ChordFormer_model_decomposed(config, class_weights=class_weights)
+        model = ChordFormer_model_decomposed(
+            config,
+            class_weights=class_weights,
+            component_weights=component_weights
+        )
     else:
-        model = BTC_model_decomposed(config, class_weights=class_weights)
+        model = BTC_model_decomposed(
+            config,
+            class_weights=class_weights,
+            component_weights=component_weights
+        )
     model = model.to(device)
     logger.info(f"Selected backbone: {args.backbone}")
     
@@ -230,6 +281,7 @@ def main():
         'class_weights_enabled': class_weights_enabled,
         'backbone': args.backbone,
         'kfold': args.kfold,
+        'component_weights': component_weights if component_weights is not None else 'default(all=1.0)',
         'model_config': {
             'hidden_size': config.model.get('hidden_size', 128),
             'num_layers': config.model.get('num_layers', 8),
