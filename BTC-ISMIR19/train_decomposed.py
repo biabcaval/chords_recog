@@ -316,6 +316,14 @@ def main():
         if component_losses:
             comp_str = " | ".join([f"{k[:4]}:{v:.3f}" for k, v in component_losses.items()])
             logger.info(f"  Components: {comp_str}")
+            weighted = getattr(trainer, 'last_component_weighted_losses', None)
+            weights_used = getattr(trainer, 'last_component_weights', None)
+            if weighted:
+                comp_str_w = " | ".join([f"{k[:4]}:{v:.3f}" for k, v in weighted.items()])
+                logger.info(f"  Components(weighted): {comp_str_w}")
+            if weights_used:
+                comp_str_alpha = " | ".join([f"{k[:4]}:{v:.2f}" for k, v in weights_used.items()])
+                logger.info(f"  Component weights: {comp_str_alpha}")
         
         training_history['train_loss'].append(train_loss)
         
@@ -330,6 +338,14 @@ def main():
             if val_component_losses:
                 comp_str = " | ".join([f"{k[:4]}:{v:.3f}" for k, v in val_component_losses.items()])
                 logger.info(f"  Val Components: {comp_str}")
+                val_weighted = getattr(trainer, 'last_component_weighted_losses', None)
+                val_weights_used = getattr(trainer, 'last_component_weights', None)
+                if val_weighted:
+                    comp_str_w = " | ".join([f"{k[:4]}:{v:.3f}" for k, v in val_weighted.items()])
+                    logger.info(f"  Val Components(weighted): {comp_str_w}")
+                if val_weights_used:
+                    comp_str_alpha = " | ".join([f"{k[:4]}:{v:.2f}" for k, v in val_weights_used.items()])
+                    logger.info(f"  Val Component weights: {comp_str_alpha}")
             training_history['val_loss'].append(val_loss)
             
             # Save best checkpoint

@@ -430,6 +430,7 @@ class MultiTaskLoss(nn.Module):
             # Default: equal weight for all components
             component_weights = {component: 1.0 for component in self.component_names}
         self.component_weights = component_weights
+        self.last_forward_breakdown = {}
     
     def forward(self, logits, labels):
         """
@@ -447,6 +448,7 @@ class MultiTaskLoss(nn.Module):
         """
         total_loss = None
         loss_dict = {}
+        self.last_forward_breakdown = {}
         
         for component in self.component_names:
             if component not in logits or component not in labels:
@@ -469,6 +471,11 @@ class MultiTaskLoss(nn.Module):
             # Apply component weight
             weight = self.component_weights.get(component, 1.0)
             weighted_loss = weight * component_loss
+            self.last_forward_breakdown[component] = {
+                'raw_loss': float(component_loss.detach().cpu().item()),
+                'weight': float(weight),
+                'weighted_loss': float(weighted_loss.detach().cpu().item()),
+            }
             
             if total_loss is None:
                 total_loss = weighted_loss

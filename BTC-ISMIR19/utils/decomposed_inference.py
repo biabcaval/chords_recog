@@ -174,6 +174,9 @@ class DecomposedChordTrainer:
         self.model = model
         self.device = device or next(model.parameters()).device
         self.verbose = verbose
+        self.last_component_raw_losses = {component: 0.0 for component in COMPONENT_NAMES}
+        self.last_component_weighted_losses = {component: 0.0 for component in COMPONENT_NAMES}
+        self.last_component_weights = {component: 1.0 for component in COMPONENT_NAMES}
     
     def train_epoch(self, train_loader, optimizer, scheduler=None):
         """
@@ -191,6 +194,8 @@ class DecomposedChordTrainer:
         self.model.train()
         total_loss = 0.0
         component_losses_sum = {component: 0.0 for component in COMPONENT_NAMES}
+        weighted_component_losses_sum = {component: 0.0 for component in COMPONENT_NAMES}
+        component_weights_sum = {component: 0.0 for component in COMPONENT_NAMES}
         num_batches = 0
         
         for batch_idx, batch in enumerate(train_loader):
@@ -225,6 +230,11 @@ class DecomposedChordTrainer:
             if batch_component_losses:
                 for comp, val in batch_component_losses.items():
                     component_losses_sum[comp] += val
+            breakdown = getattr(getattr(self.model, 'criterion', None), 'last_forward_breakdown', None)
+            if breakdown:
+                for comp, values in breakdown.items():
+                    weighted_component_losses_sum[comp] += values.get('weighted_loss', 0.0)
+                    component_weights_sum[comp] += values.get('weight', 1.0)
             
             if self.verbose and (batch_idx + 1) % max(1, len(train_loader) // 10) == 0:
                 print(f"Batch {batch_idx + 1}/{len(train_loader)}, Loss: {loss.item():.4f}")
@@ -234,6 +244,15 @@ class DecomposedChordTrainer:
         # Calculate average component losses
         component_losses_avg = {comp: val / num_batches if num_batches > 0 else 0.0 
                                 for comp, val in component_losses_sum.items()}
+        self.last_component_raw_losses = component_losses_avg
+        self.last_component_weighted_losses = {
+            comp: val / num_batches if num_batches > 0 else 0.0
+            for comp, val in weighted_component_losses_sum.items()
+        }
+        self.last_component_weights = {
+            comp: val / num_batches if num_batches > 0 else 1.0
+            for comp, val in component_weights_sum.items()
+        }
         
         return avg_loss, component_losses_avg
     
@@ -250,6 +269,8 @@ class DecomposedChordTrainer:
         self.model.eval()
         total_loss = 0.0
         component_losses_sum = {component: 0.0 for component in COMPONENT_NAMES}
+        weighted_component_losses_sum = {component: 0.0 for component in COMPONENT_NAMES}
+        component_weights_sum = {component: 0.0 for component in COMPONENT_NAMES}
         num_batches = 0
         
         with torch.no_grad():
@@ -275,12 +296,26 @@ class DecomposedChordTrainer:
                 if batch_component_losses:
                     for comp, val in batch_component_losses.items():
                         component_losses_sum[comp] += val
+                breakdown = getattr(getattr(self.model, 'criterion', None), 'last_forward_breakdown', None)
+                if breakdown:
+                    for comp, values in breakdown.items():
+                        weighted_component_losses_sum[comp] += values.get('weighted_loss', 0.0)
+                        component_weights_sum[comp] += values.get('weight', 1.0)
         
         avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
         
         # Calculate average component losses
         component_losses_avg = {comp: val / num_batches if num_batches > 0 else 0.0 
                                 for comp, val in component_losses_sum.items()}
+        self.last_component_raw_losses = component_losses_avg
+        self.last_component_weighted_losses = {
+            comp: val / num_batches if num_batches > 0 else 0.0
+            for comp, val in weighted_component_losses_sum.items()
+        }
+        self.last_component_weights = {
+            comp: val / num_batches if num_batches > 0 else 1.0
+            for comp, val in component_weights_sum.items()
+        }
         
         return {
             'val_loss': avg_loss,
