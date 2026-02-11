@@ -74,6 +74,8 @@ def main():
     parser.add_argument('--backbone', type=str, default='btc',
                        choices=['btc', 'chordformer'],
                        help='Backbone encoder for decomposed model')
+    parser.add_argument('--kfold', type=int, default=4, choices=[0, 1, 2, 3, 4],
+                       help='5-fold split index used for validation (default: 4)')
     
     args = parser.parse_args()
     
@@ -110,13 +112,15 @@ def main():
     
     logger.info(f"Data root: {data_root}")
     logger.info(f"Datasets: {dataset_names}")
+    logger.info(f"K-Fold: {args.kfold}")
     
     train_dataset = AudioDatasetStructured(
         config,
         root_dir=data_root,
         dataset_names=tuple(dataset_names),
         train=True,
-        decompose=True
+        decompose=True,
+        kfold=args.kfold
     )
     
     val_dataset = AudioDatasetStructured(
@@ -124,7 +128,8 @@ def main():
         root_dir=data_root,
         dataset_names=tuple(dataset_names),
         train=False,
-        decompose=True
+        decompose=True,
+        kfold=args.kfold
     )
     
     logger.info(f"Training samples: {len(train_dataset)}")
@@ -224,6 +229,7 @@ def main():
         'w_max': args.w_max,
         'class_weights_enabled': class_weights_enabled,
         'backbone': args.backbone,
+        'kfold': args.kfold,
         'model_config': {
             'hidden_size': config.model.get('hidden_size', 128),
             'num_layers': config.model.get('num_layers', 8),
