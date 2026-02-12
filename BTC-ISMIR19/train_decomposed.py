@@ -144,6 +144,16 @@ def main():
     logger.info(f"Loading configuration from {args.config}")
     config = HParams.load(args.config)
     
+    # Keep model input size aligned with preprocessing bins to avoid projection mismatch.
+    feature_n_bins = config.feature.get('n_bins', None) if hasattr(config, 'feature') else None
+    model_feature_size = config.model.get('feature_size', None) if hasattr(config, 'model') else None
+    if feature_n_bins is not None and model_feature_size != feature_n_bins:
+        logger.warning(
+            f"Config mismatch detected: model.feature_size={model_feature_size} "
+            f"!= feature.n_bins={feature_n_bins}. Overriding model.feature_size to {feature_n_bins}."
+        )
+        config.model['feature_size'] = feature_n_bins
+    
     # Prepare datasets
     logger.info("Preparing datasets...")
     
@@ -177,6 +187,16 @@ def main():
     
     logger.info(f"Training samples: {len(train_dataset)}")
     logger.info(f"Validation samples: {len(val_dataset)}")
+    
+    # Final guardrail: infer actual feature width from data and keep model in sync.
+    if len(train_dataset) > 0:
+        sample_feature_size = int(train_dataset[0]['feature'].shape[-1])
+        if config.model.get('feature_size') != sample_feature_size:
+            logger.warning(
+                f"Feature width mismatch from data: model.feature_size={config.model.get('feature_size')} "
+                f"but dataset provides {sample_feature_size}. Overriding model.feature_size to {sample_feature_size}."
+            )
+            config.model['feature_size'] = sample_feature_size
     
     # Create data loaders
     train_loader = AudioDataLoaderStructured(
