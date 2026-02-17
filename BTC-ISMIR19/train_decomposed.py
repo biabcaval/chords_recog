@@ -19,6 +19,7 @@ import logging
 from pathlib import Path
 import json
 from datetime import datetime
+import os
 
 from models.btc_model_decomposed import (
     BTC_model_decomposed,
@@ -29,6 +30,14 @@ from data.audio_dataset_structured import AudioDatasetStructured, AudioDataLoade
 from utils.decomposed_inference import DecomposedChordTrainer, DecomposedChordInference, ChordMetrics
 from utils.chord_decomposition import COMPONENT_NAMES
 from utils.hparams import HParams
+
+# Optional wandb integration
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    wandb = None
 
 # Setup logging
 logging.basicConfig(
@@ -69,6 +78,30 @@ def parse_component_weights(spec: str):
     for comp in COMPONENT_NAMES:
         out.setdefault(comp, 1.0)
     return out
+
+
+def _flatten_dict_for_wandb(data, prefix=""):
+    """Flatten nested dicts so hyperparameters are easy to filter in wandb UI."""
+    flat = {}
+    for key, value in data.items():
+        flat_key = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, dict):
+            flat.update(_flatten_dict_for_wandb(value, flat_key))
+        else:
+            flat[flat_key] = value
+    return flat
+
+
+def _log_wandb_artifact_safe(run, file_path, artifact_name, artifact_type, aliases=None, metadata=None):
+    """Log a single file as wandb artifact without interrupting training on failure."""
+    if run is None:
+        return
+    try:
+        artifact = wandb.Artifact(name=artifact_name, type=artifact_type, metadata=metadata or {})
+        artifact.add_file(str(file_path))
+        run.log_artifact(artifact, aliases=aliases or [])
+    except Exception as exc:
+        logger.warning(f"Failed to log wandb artifact {artifact_name}: {exc}")
 
 
 def main():
@@ -112,6 +145,14 @@ def main():
                        help='5-fold split index used for validation (default: 4)')
     parser.add_argument('--component_weights', type=str, default=None,
                        help='Optional per-component loss weights as comma-separated key=value list')
+    parser.add_argument('--wandb_api_key', type=str, default=None,
+                       help='Weights & Biases API key (or set WANDB_API_KEY env var)')
+    parser.add_argument('--wandb_entity', type=str, default=None,
+                       help='Weights & Biases entity (username or team)')
+    parser.add_argument('--wandb_project', type=str, default='chordMax',
+                       help='Weights & Biases project name')
+    parser.add_argument('--wandb_disabled', action='store_true',
+                       help='Disable Weights & Biases logging')
     
     args = parser.parse_args()
     
@@ -122,6 +163,10 @@ def main():
         component_weights = parse_component_weights(args.component_weights)
     except ValueError as e:
         parser.error(str(e))
+
+    # Never store/log credential values in run metadata.
+    safe_cli_args = vars(args).copy()
+    safe_cli_args.pop('wandb_api_key', None)
     
     # Setup device
     device = torch.device(args.device)
@@ -131,8 +176,9 @@ def main():
     if args.run_name:
         run_name = args.run_name
     else:
-        # Generate default name with timestamp
-        run_name = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+        # Generate structured default name for easier run browsing in wandb.
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = f"decomp_{args.backbone}_kfold{args.kfold}_{timestamp}"
     
     output_dir = Path(args.output_dir) / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -238,6 +284,56 @@ def main():
             logger.info(f"  {component}: min={weights.min():.3f}, max={weights.max():.3f}, mean={weights.mean():.3f}")
     else:
         logger.info("Class reweighting disabled (using unweighted CrossEntropy for all components)")
+
+    # Initialize wandb if available/enabled
+    wandb_run = None
+    wandb_enabled = False
+    if args.wandb_disabled:
+        logger.info("wandb logging disabled by --wandb_disabled")
+    elif not WANDB_AVAILABLE:
+        logger.warning("wandb package not available. Install with: pip install wandb")
+    else:
+        try:
+            wandb_api_key = args.wandb_api_key or os.getenv("WANDB_API_KEY")
+            wandb_entity = args.wandb_entity or os.getenv("WANDB_ENTITY")
+
+            if wandb_api_key:
+                wandb.login(key=wandb_api_key, relogin=True)
+            elif wandb.api.api_key is None:
+                logger.warning(
+                    "No wandb API key provided via --wandb_api_key or WANDB_API_KEY. "
+                    "Run 'wandb login' or pass the key in CLI/env."
+                )
+
+            wandb_run = wandb.init(
+                project=args.wandb_project,
+                entity=wandb_entity,
+                name=run_name,
+                config={
+                    # Keep a tiny top-level run namespace in init config.
+                    # Full hyperparameters are published later as hparams.*.
+                    'run.name': run_name,
+                    'run.backbone': args.backbone,
+                    'run.kfold': args.kfold,
+                    'run.output_dir': str(output_dir),
+                    'run.device': str(device),
+                },
+                tags=[args.backbone, f"kfold{args.kfold}", "decomposed"],
+            )
+            wandb_enabled = True
+            logger.info(f"wandb initialized: {wandb_run.url}")
+
+            if class_weights is not None:
+                class_weight_stats = {}
+                for component, weights in class_weights.items():
+                    class_weight_stats[f"class_weights/{component}_min"] = float(weights.min().item())
+                    class_weight_stats[f"class_weights/{component}_max"] = float(weights.max().item())
+                    class_weight_stats[f"class_weights/{component}_mean"] = float(weights.mean().item())
+                if class_weight_stats:
+                    wandb.log(class_weight_stats, step=0)
+        except Exception as e:
+            logger.error(f"Failed to initialize wandb: {e}")
+            wandb_enabled = False
     
     # Initialize model
     logger.info("Initializing model...")
@@ -324,6 +420,30 @@ def main():
         'start_time': datetime.now().isoformat(),
         'output_dir': str(output_dir),
     }
+
+    if wandb_enabled:
+        # Publish full effective training hyperparameters to wandb config.
+        # This makes sweeps/comparisons easier than inspecting checkpoint JSON.
+        effective_hparams = {
+            'training': training_config,
+            'config': {
+                'experiment': dict(config.experiment),
+                'model': dict(config.model),
+                'feature': dict(config.feature),
+                'mp3': dict(config.mp3),
+                'class_weights': dict(config.class_weights) if hasattr(config, 'class_weights') else {},
+            },
+            'runtime': {
+                'device': str(device),
+                'optimizer': 'Adam',
+                'scheduler': 'CosineAnnealingLR',
+            },
+            'cli_args': safe_cli_args,
+        }
+        wandb.config.update(
+            _flatten_dict_for_wandb(effective_hparams, prefix="hparams"),
+            allow_val_change=True
+        )
     
     for epoch in range(args.num_epochs):
         logger.info(f"\n=== Epoch {epoch + 1}/{args.num_epochs} ===")
@@ -346,6 +466,27 @@ def main():
                 logger.info(f"  Component weights: {comp_str_alpha}")
         
         training_history['train_loss'].append(train_loss)
+
+        if wandb_enabled:
+            train_log = {
+                'train/loss': float(train_loss),
+                'train/learning_rate': float(optimizer.param_groups[0]['lr']),
+                'epoch': epoch + 1,
+            }
+            if component_losses:
+                for name, value in component_losses.items():
+                    train_log[f"train/components/{name}"] = float(value)
+
+            weighted = getattr(trainer, 'last_component_weighted_losses', None)
+            if weighted:
+                for name, value in weighted.items():
+                    train_log[f"train/components_weighted/{name}"] = float(value)
+
+            weights_used = getattr(trainer, 'last_component_weights', None)
+            if weights_used:
+                for name, value in weights_used.items():
+                    train_log[f"train/component_weights/{name}"] = float(value)
+            wandb.log(train_log, step=epoch + 1)
         
         # Validate
         if (epoch + 1) % args.val_interval == 0:
@@ -367,6 +508,33 @@ def main():
                     comp_str_alpha = " | ".join([f"{k[:4]}:{v:.2f}" for k, v in val_weights_used.items()])
                     logger.info(f"  Val Component weights: {comp_str_alpha}")
             training_history['val_loss'].append(val_loss)
+
+            if wandb_enabled:
+                current_best_loss = best_val_loss
+                current_best_epoch = best_epoch
+                if val_loss < current_best_loss:
+                    current_best_loss = val_loss
+                    current_best_epoch = epoch + 1
+
+                val_log = {
+                    'val/loss': float(val_loss),
+                    'val/best_loss': float(current_best_loss),
+                    'val/best_epoch': int(current_best_epoch),
+                }
+                if val_component_losses:
+                    for name, value in val_component_losses.items():
+                        val_log[f"val/components/{name}"] = float(value)
+
+                val_weighted = getattr(trainer, 'last_component_weighted_losses', None)
+                if val_weighted:
+                    for name, value in val_weighted.items():
+                        val_log[f"val/components_weighted/{name}"] = float(value)
+
+                val_weights_used = getattr(trainer, 'last_component_weights', None)
+                if val_weights_used:
+                    for name, value in val_weights_used.items():
+                        val_log[f"val/component_weights/{name}"] = float(value)
+                wandb.log(val_log, step=epoch + 1)
             
             # Save best checkpoint
             if val_loss < best_val_loss:
@@ -415,6 +583,37 @@ def main():
                 with open(summary_path, 'w') as f:
                     json.dump(summary, f, indent=2)
                 logger.info(f"Saved checkpoint info to {summary_path}")
+
+                if wandb_enabled:
+                    wandb.log({
+                        'model/best_val_loss': float(best_val_loss),
+                        'model/best_epoch': int(best_epoch),
+                        'artifacts/best_checkpoint_path': str(checkpoint_path),
+                    }, step=epoch + 1)
+                    _log_wandb_artifact_safe(
+                        wandb_run,
+                        checkpoint_path,
+                        artifact_name=f"{run_name}-model-best",
+                        artifact_type="model",
+                        aliases=["best", f"epoch-{epoch + 1:03d}"],
+                        metadata={
+                            'epoch': int(epoch + 1),
+                            'val_loss': float(val_loss),
+                            'kfold': int(args.kfold),
+                            'backbone': args.backbone,
+                        },
+                    )
+                    _log_wandb_artifact_safe(
+                        wandb_run,
+                        summary_path,
+                        artifact_name=f"{run_name}-best-info",
+                        artifact_type="metadata",
+                        aliases=["best", f"epoch-{epoch + 1:03d}"],
+                        metadata={
+                            'epoch': int(epoch + 1),
+                            'val_loss': float(val_loss),
+                        },
+                    )
         
         # Update learning rate
         scheduler.step()
@@ -463,6 +662,48 @@ def main():
     logger.info(f"\n=== Training Complete ===")
     logger.info(f"Best validation loss: {best_val_loss:.4f} (Epoch {best_epoch})")
     logger.info(f"Checkpoints saved to: {output_dir}")
+
+    if wandb_enabled:
+        wandb.log({
+            'model/final_train_loss': float(training_history['train_loss'][-1]) if training_history['train_loss'] else None,
+            'model/final_val_loss': float(training_history['val_loss'][-1]) if training_history['val_loss'] else None,
+            'model/best_val_loss': float(best_val_loss),
+            'model/best_epoch': int(best_epoch),
+            'artifacts/final_model_path': str(final_path),
+            'artifacts/history_path': str(history_path),
+            'artifacts/output_dir': str(output_dir),
+        }, step=args.num_epochs)
+
+        _log_wandb_artifact_safe(
+            wandb_run,
+            final_path,
+            artifact_name=f"{run_name}-model-final",
+            artifact_type="model",
+            aliases=["final"],
+            metadata={
+                'epoch': int(args.num_epochs),
+                'best_epoch': int(best_epoch),
+                'best_val_loss': float(best_val_loss),
+                'kfold': int(args.kfold),
+                'backbone': args.backbone,
+            },
+        )
+        _log_wandb_artifact_safe(
+            wandb_run,
+            history_path,
+            artifact_name=f"{run_name}-training-history",
+            artifact_type="metrics",
+            aliases=["final"],
+            metadata={
+                'num_epochs': int(args.num_epochs),
+                'kfold': int(args.kfold),
+            },
+        )
+
+        wandb.run.summary['model/best_val_loss'] = float(best_val_loss)
+        wandb.run.summary['model/best_epoch'] = int(best_epoch)
+        wandb.run.summary['artifacts/output_dir'] = str(output_dir)
+        wandb.finish()
 
 
 if __name__ == '__main__':
