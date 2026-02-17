@@ -296,15 +296,36 @@ def main():
         try:
             wandb_api_key = args.wandb_api_key or os.getenv("WANDB_API_KEY")
             wandb_entity = args.wandb_entity or os.getenv("WANDB_ENTITY")
+            wandb_version = getattr(wandb, "__version__", "unknown")
+            logger.info(f"Detected wandb version: {wandb_version}")
 
             if wandb_api_key:
-                wandb.login(key=wandb_api_key, relogin=True)
-            elif wandb.api.api_key is None:
-                logger.warning(
-                    "No wandb API key provided via --wandb_api_key or WANDB_API_KEY. "
-                    "Run 'wandb login' or pass the key in CLI/env."
-                )
+                # Always export key to env so older SDKs can still pick it up.
+                os.environ["WANDB_API_KEY"] = wandb_api_key
+                if hasattr(wandb, "login"):
+                    try:
+                        wandb.login(key=wandb_api_key, relogin=True)
+                    except TypeError:
+                        # Older wandb versions may not support relogin kwarg.
+                        wandb.login(key=wandb_api_key)
+                else:
+                    logger.warning(
+                        "This wandb module does not expose wandb.login(); "
+                        "using WANDB_API_KEY environment variable fallback."
+                    )
+            else:
+                api_key_available = bool(os.getenv("WANDB_API_KEY"))
+                api_obj = getattr(wandb, "api", None)
+                if api_obj is not None and getattr(api_obj, "api_key", None):
+                    api_key_available = True
 
+                if not api_key_available:
+                    logger.warning(
+                        "No wandb API key provided via --wandb_api_key or WANDB_API_KEY. "
+                        "Run 'wandb login' or pass the key in CLI/env."
+                    )
+
+            # Initialize run even if entity is None (wandb uses default account/workspace).
             wandb_run = wandb.init(
                 project=args.wandb_project,
                 entity=wandb_entity,
@@ -320,8 +341,13 @@ def main():
                 },
                 tags=[args.backbone, f"kfold{args.kfold}", "decomposed"],
             )
+
             wandb_enabled = True
-            logger.info(f"wandb initialized: {wandb_run.url}")
+            run_url = getattr(wandb_run, "url", None)
+            if run_url:
+                logger.info(f"wandb initialized: {run_url}")
+            else:
+                logger.info("wandb initialized successfully")
 
             if class_weights is not None:
                 class_weight_stats = {}
@@ -333,6 +359,9 @@ def main():
                     wandb.log(class_weight_stats, step=0)
         except Exception as e:
             logger.error(f"Failed to initialize wandb: {e}")
+            module_path = getattr(wandb, "__file__", "unknown")
+            module_type = type(wandb).__name__
+            logger.error(f"wandb module info: type={module_type}, path={module_path}")
             wandb_enabled = False
     
     # Initialize model
