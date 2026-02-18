@@ -20,6 +20,8 @@ from pathlib import Path
 import json
 from datetime import datetime
 import os
+import sys
+import importlib
 
 from models.btc_model_decomposed import (
     BTC_model_decomposed,
@@ -31,13 +33,51 @@ from utils.decomposed_inference import DecomposedChordTrainer, DecomposedChordIn
 from utils.chord_decomposition import COMPONENT_NAMES
 from utils.hparams import HParams
 
-# Optional wandb integration
-try:
-    import wandb
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
-    wandb = None
+# Optional wandb integration with protection against local-module shadowing.
+def _import_wandb_package():
+    """
+    Import real wandb package even if a local ./wandb directory exists.
+
+    Returns:
+        tuple[module|None, bool, str]
+        (wandb_module, available, diagnostic_message)
+    """
+    try:
+        mod = importlib.import_module("wandb")
+        if hasattr(mod, "init"):
+            return mod, True, ""
+    except ImportError:
+        return None, False, "wandb package is not installed."
+
+    # A local "wandb" folder may shadow the real SDK (common when wandb logs are
+    # stored under ./wandb). Retry import with shadowing paths removed.
+    original_sys_path = list(sys.path)
+    script_dir = Path(__file__).resolve().parent
+    cwd = Path.cwd().resolve()
+
+    def _path_shadows_wandb(path_entry):
+        try:
+            base = cwd if path_entry in ("", ".") else Path(path_entry).resolve()
+        except Exception:
+            return False
+        if base in (script_dir, cwd) and (base / "wandb").exists():
+            return True
+        return (base / "wandb").exists() and str(base).startswith(str(script_dir))
+
+    try:
+        sys.path = [p for p in sys.path if not _path_shadows_wandb(p)]
+        sys.modules.pop("wandb", None)
+        mod = importlib.import_module("wandb")
+        if hasattr(mod, "init"):
+            return mod, True, "Recovered wandb import after bypassing local shadowing path."
+        return mod, False, "Imported module named wandb but it lacks wandb.init()."
+    except ImportError:
+        return None, False, "Failed to import wandb after removing shadowing paths."
+    finally:
+        sys.path = original_sys_path
+
+
+wandb, WANDB_AVAILABLE, WANDB_IMPORT_DIAGNOSTIC = _import_wandb_package()
 
 # Setup logging
 logging.basicConfig(
@@ -292,8 +332,12 @@ def main():
         logger.info("wandb logging disabled by --wandb_disabled")
     elif not WANDB_AVAILABLE:
         logger.warning("wandb package not available. Install with: pip install wandb")
+        if WANDB_IMPORT_DIAGNOSTIC:
+            logger.warning(f"wandb import diagnostic: {WANDB_IMPORT_DIAGNOSTIC}")
     else:
         try:
+            if WANDB_IMPORT_DIAGNOSTIC:
+                logger.info(f"wandb import diagnostic: {WANDB_IMPORT_DIAGNOSTIC}")
             wandb_api_key = args.wandb_api_key or os.getenv("WANDB_API_KEY")
             wandb_entity = args.wandb_entity or os.getenv("WANDB_ENTITY")
             wandb_version = getattr(wandb, "__version__", "unknown")
