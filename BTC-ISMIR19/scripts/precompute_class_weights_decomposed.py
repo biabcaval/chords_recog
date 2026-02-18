@@ -11,8 +11,14 @@ import argparse
 import hashlib
 import logging
 from pathlib import Path
+import sys
 
 import torch
+
+# Ensure project root is on sys.path when running from scripts/ directory.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from data.audio_dataset_structured import AudioDatasetStructured
 from models.btc_model_decomposed import MultiTaskLoss
