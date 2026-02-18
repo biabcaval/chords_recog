@@ -542,6 +542,13 @@ def main():
             else:
                 logger.info("wandb initialized successfully")
 
+            # Explicit metric mapping prevents hidden step conflicts.
+            wandb.define_metric("epoch")
+            wandb.define_metric("train/*", step_metric="epoch")
+            wandb.define_metric("val/*", step_metric="epoch")
+            wandb.define_metric("model/*", step_metric="epoch")
+            wandb.define_metric("artifacts/*", step_metric="epoch")
+
             if class_weights is not None:
                 class_weight_stats = {}
                 for component, weights in class_weights.items():
@@ -549,7 +556,8 @@ def main():
                     class_weight_stats[f"class_weights/{component}_max"] = float(weights.max().item())
                     class_weight_stats[f"class_weights/{component}_mean"] = float(weights.mean().item())
                 if class_weight_stats:
-                    wandb.log(class_weight_stats, step=0)
+                    class_weight_stats['epoch'] = 0
+                    wandb.log(class_weight_stats)
         except Exception as e:
             logger.error(f"Failed to initialize wandb: {e}")
             module_path = getattr(wandb, "__file__", "unknown")
@@ -673,7 +681,7 @@ def main():
     
     for epoch in range(args.num_epochs):
         logger.info(f"\n=== Epoch {epoch + 1}/{args.num_epochs} ===")
-        
+
         # Train
         train_loss, component_losses = trainer.train_epoch(train_loader, optimizer)
         logger.info(f"Train Loss: {train_loss:.4f}")
@@ -712,7 +720,7 @@ def main():
             if weights_used:
                 for name, value in weights_used.items():
                     train_log[f"train/component_weights/{name}"] = float(value)
-            wandb.log(train_log, step=epoch + 1)
+            wandb.log(train_log)
         
         # Validate
         if (epoch + 1) % args.val_interval == 0:
@@ -760,7 +768,8 @@ def main():
                 if val_weights_used:
                     for name, value in val_weights_used.items():
                         val_log[f"val/component_weights/{name}"] = float(value)
-                wandb.log(val_log, step=epoch + 1)
+                val_log['epoch'] = int(epoch + 1)
+                wandb.log(val_log)
             
             # Save best checkpoint
             if val_loss < best_val_loss:
@@ -815,7 +824,8 @@ def main():
                         'model/best_val_loss': float(best_val_loss),
                         'model/best_epoch': int(best_epoch),
                         'artifacts/best_checkpoint_path': str(checkpoint_path),
-                    }, step=epoch + 1)
+                        'epoch': int(epoch + 1),
+                    })
                     _log_wandb_artifact_safe(
                         wandb_run,
                         checkpoint_path,
@@ -898,7 +908,8 @@ def main():
             'artifacts/final_model_path': str(final_path),
             'artifacts/history_path': str(history_path),
             'artifacts/output_dir': str(output_dir),
-        }, step=args.num_epochs)
+            'epoch': int(args.num_epochs),
+        })
 
         _log_wandb_artifact_safe(
             wandb_run,
