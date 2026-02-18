@@ -22,6 +22,7 @@ from datetime import datetime
 import os
 import sys
 import importlib
+import hashlib
 
 from models.btc_model_decomposed import (
     BTC_model_decomposed,
@@ -144,6 +145,58 @@ def _log_wandb_artifact_safe(run, file_path, artifact_name, artifact_type, alias
         logger.warning(f"Failed to log wandb artifact {artifact_name}: {exc}")
 
 
+def _hash_string_list(values):
+    digest = hashlib.sha1()
+    for value in values:
+        digest.update(str(value).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()[:12]
+
+
+def _to_serializable_component_weights(weights_dict):
+    serializable = {}
+    for component, weights in weights_dict.items():
+        if isinstance(weights, torch.Tensor):
+            serializable[component] = weights.detach().cpu()
+        else:
+            serializable[component] = torch.tensor(weights, dtype=torch.float32)
+    return serializable
+
+
+def _load_class_weights_file(path, device):
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if isinstance(payload, dict) and 'class_weights' in payload:
+        loaded_weights = payload['class_weights']
+    elif isinstance(payload, dict):
+        loaded_weights = payload
+    else:
+        raise ValueError("Invalid class-weights file format.")
+
+    class_weights = {}
+    for component, weights in loaded_weights.items():
+        if not isinstance(weights, torch.Tensor):
+            weights = torch.tensor(weights, dtype=torch.float32)
+        class_weights[component] = weights.to(device)
+    return class_weights, payload
+
+
+def _build_class_weights_cache_path(
+    cache_dir,
+    dataset_names,
+    kfold,
+    gamma,
+    w_max,
+    train_paths,
+):
+    datasets_sig = _hash_string_list(dataset_names)
+    paths_sig = _hash_string_list(train_paths)
+    filename = (
+        f"class_weights_k{kfold}_g{gamma:.4f}_w{w_max:.4f}_"
+        f"ds{datasets_sig}_p{paths_sig}.pt"
+    )
+    return Path(cache_dir) / filename
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Train chord recognition model with structure decomposition'
@@ -185,6 +238,25 @@ def main():
                        help='5-fold split index used for validation (default: 4)')
     parser.add_argument('--component_weights', type=str, default=None,
                        help='Optional per-component loss weights as comma-separated key=value list')
+    parser.add_argument(
+        '--class_weights_mode',
+        type=str,
+        default='auto',
+        choices=['auto', 'compute', 'load'],
+        help="Class-weight strategy when enabled: auto(load->compute), compute, or load-only."
+    )
+    parser.add_argument(
+        '--class_weights_path',
+        type=str,
+        default=None,
+        help='Optional explicit .pt file path for precomputed class weights.'
+    )
+    parser.add_argument(
+        '--class_weights_cache_dir',
+        type=str,
+        default='./class_weights_cache',
+        help='Cache directory for computed class weights (used by auto/compute modes).'
+    )
     parser.add_argument('--wandb_api_key', type=str, default=None,
                        help='Weights & Biases API key (or set WANDB_API_KEY env var)')
     parser.add_argument('--wandb_entity', type=str, default=None,
@@ -309,17 +381,94 @@ def main():
         class_weights_enabled = config_class_weights_enabled
     
     class_weights = None
+    class_weights_source = 'disabled'
+    class_weights_file = None
     if class_weights_enabled:
-        logger.info("Computing class weights...")
-        class_weights = MultiTaskLoss.compute_class_weights(
-            train_dataset,
+        cache_path = _build_class_weights_cache_path(
+            cache_dir=args.class_weights_cache_dir,
+            dataset_names=dataset_names,
+            kfold=args.kfold,
             gamma=args.gamma,
             w_max=args.w_max,
-            device=device
+            train_paths=train_dataset.paths,
         )
-        
-        # Log class weights
-        logger.info("Class weights computed:")
+        explicit_path = Path(args.class_weights_path) if args.class_weights_path else None
+
+        if args.class_weights_mode == 'load':
+            load_path = explicit_path if explicit_path else cache_path
+            if not load_path.exists():
+                raise FileNotFoundError(
+                    f"class_weights_mode=load but file was not found: {load_path}\n"
+                    f"Provide --class_weights_path or precompute cache first."
+                )
+            logger.info(f"Loading class weights from {load_path}")
+            class_weights, _ = _load_class_weights_file(load_path, device=device)
+            class_weights_source = 'load'
+            class_weights_file = str(load_path)
+        elif args.class_weights_mode == 'auto':
+            load_path = explicit_path if explicit_path else cache_path
+            if load_path.exists():
+                logger.info(f"Loading cached class weights from {load_path}")
+                class_weights, _ = _load_class_weights_file(load_path, device=device)
+                class_weights_source = 'cache'
+                class_weights_file = str(load_path)
+            else:
+                logger.info("Cached class weights not found; computing class weights...")
+                class_weights, class_counts = MultiTaskLoss.compute_class_weights(
+                    train_dataset,
+                    gamma=args.gamma,
+                    w_max=args.w_max,
+                    device=device,
+                    return_counts=True,
+                )
+                class_weights_source = 'compute'
+                class_weights_file = str(load_path)
+                load_path.parent.mkdir(parents=True, exist_ok=True)
+                payload = {
+                    'class_weights': _to_serializable_component_weights(class_weights),
+                    'class_counts': {
+                        c: torch.tensor(v, dtype=torch.float32) for c, v in class_counts.items()
+                    },
+                    'meta': {
+                        'kfold': int(args.kfold),
+                        'gamma': float(args.gamma),
+                        'w_max': float(args.w_max),
+                        'dataset_names': list(dataset_names),
+                        'n_train_samples': int(len(train_dataset)),
+                    },
+                }
+                torch.save(payload, load_path)
+                logger.info(f"Saved class weights cache to {load_path}")
+        else:
+            logger.info("Computing class weights (compute mode)...")
+            class_weights, class_counts = MultiTaskLoss.compute_class_weights(
+                train_dataset,
+                gamma=args.gamma,
+                w_max=args.w_max,
+                device=device,
+                return_counts=True,
+            )
+            class_weights_source = 'compute'
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                'class_weights': _to_serializable_component_weights(class_weights),
+                'class_counts': {
+                    c: torch.tensor(v, dtype=torch.float32) for c, v in class_counts.items()
+                },
+                'meta': {
+                    'kfold': int(args.kfold),
+                    'gamma': float(args.gamma),
+                    'w_max': float(args.w_max),
+                    'dataset_names': list(dataset_names),
+                    'n_train_samples': int(len(train_dataset)),
+                },
+            }
+            torch.save(payload, cache_path)
+            class_weights_file = str(cache_path)
+            logger.info(f"Saved class weights cache to {cache_path}")
+
+        logger.info(f"Class weights source: {class_weights_source}")
+        logger.info("Class weights ready:")
         for component, weights in class_weights.items():
             logger.info(f"  {component}: min={weights.min():.3f}, max={weights.max():.3f}, mean={weights.mean():.3f}")
     else:
@@ -468,6 +617,10 @@ def main():
         'gamma': args.gamma,
         'w_max': args.w_max,
         'class_weights_enabled': class_weights_enabled,
+        'class_weights_mode': args.class_weights_mode,
+        'class_weights_source': class_weights_source,
+        'class_weights_file': class_weights_file,
+        'class_weights_cache_dir': args.class_weights_cache_dir,
         'backbone': args.backbone,
         'kfold': args.kfold,
         'component_weights': component_weights if component_weights is not None else 'default(all=1.0)',

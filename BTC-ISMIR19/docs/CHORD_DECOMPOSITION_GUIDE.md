@@ -234,6 +234,13 @@ python train_decomposed.py \
     --batch_size 64 \
     --num_epochs 150
 
+# Train with class weights loaded from cache (no recomputation at startup)
+python train_decomposed.py \
+    --backbone chordformer \
+    --kfold 0 \
+    --use_class_weights \
+    --class_weights_mode load
+
 # Validation only (NOT training): smoke test for BTC backbone
 python quick_test_decomposed.py --backbone btc
 
@@ -248,6 +255,37 @@ Checkpoints are saved to `checkpoints/<run_name>/`:
 - `model_best.pt` - Best model (lowest validation loss)
 - `model_best_info.json` - Human-readable metrics and config
 - `model_final.pt` - Final epoch model
+
+### Class Weights: Offline Precompute and Cache
+
+To avoid recomputing class weights every training run, use the offline precompute script:
+
+```bash
+# 1) Precompute once for a given fold/configuration
+python scripts/precompute_class_weights_decomposed.py \
+    --config run_config.yaml \
+    --kfold 0 \
+    --gamma 0.5 \
+    --w_max 10.0
+
+# 2) Train loading precomputed weights
+python train_decomposed.py \
+    --config run_config.yaml \
+    --kfold 0 \
+    --use_class_weights \
+    --class_weights_mode load
+```
+
+`train_decomposed.py` now supports:
+
+- `--class_weights_mode auto|compute|load`
+  - `auto` (default): tries cache first, computes only if missing
+  - `compute`: always recomputes and updates cache
+  - `load`: requires existing cache/file, never computes
+- `--class_weights_path`: explicit path to a precomputed `.pt` file
+- `--class_weights_cache_dir`: cache directory (default: `./class_weights_cache`)
+
+This decouples expensive preprocessing from training startup and makes runs reproducible across machines.
 
 ### Basic Training Loop (Python API)
 
@@ -427,6 +465,8 @@ For the decomposition to work seamlessly, ensure:
 loss_fn = model.criterion
 print(loss_fn.losses['root'].weight)  # Should show non-None weights
 ```
+
+If you use `--class_weights_mode load`, ensure the cache file exists first (or pass `--class_weights_path`).
 
 ### Imbalanced Component Predictions
 - Increase `class_weight_gamma` (more aggressive weighting)

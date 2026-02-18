@@ -9,6 +9,8 @@ __pycache__/
 # Folders
 BTC-ISMIR19/assets
 BTC-ISMIR19/inferences_1trainBillJaah_testRwc
+BTC-ISMIR19/wandb/
+BTC-ISMIR19/wandb_runs/
 
 # Distribution / packaging
 .Python

@@ -709,6 +709,36 @@ class_weights:
   w_max: 10.0
 ```
 
+### 7.7.1 Cache de Class Weights (novo fluxo recomendado)
+
+Para reduzir o tempo de startup do treino, desacoplamos o cálculo de class weights do loop principal.
+
+Pré-cálculo offline:
+
+```bash
+python scripts/precompute_class_weights_decomposed.py \
+    --config run_config.yaml \
+    --kfold 0 \
+    --gamma 0.5 \
+    --w_max 10.0
+```
+
+Treino usando cache pré-computado:
+
+```bash
+python train_decomposed.py \
+    --config run_config.yaml \
+    --kfold 0 \
+    --use_class_weights \
+    --class_weights_mode load
+```
+
+Novos argumentos em `train_decomposed.py`:
+
+- `--class_weights_mode auto|compute|load` (default: `auto`)
+- `--class_weights_path` (arquivo `.pt` explícito)
+- `--class_weights_cache_dir` (default: `./class_weights_cache`)
+
 ### 7.8 Loop de Treinamento (Interno)
 
 ```python
