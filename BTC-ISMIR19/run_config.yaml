@@ -14,6 +14,7 @@ experiment:
   learning_rate : 0.0001
   weight_decay : 0.00
   max_epoch : 100
+  scheduler_t_max : 100  # CosineAnnealingLR T_max (can differ from num_epochs)
   batch_size : 128
   save_step : 40
   data_ratio : 0.8

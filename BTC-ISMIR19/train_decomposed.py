@@ -594,8 +594,16 @@ def main():
         lr=args.learning_rate,
         weight_decay=args.weight_decay
     )
-    
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.num_epochs)
+
+    scheduler_t_max = int(config.experiment.get('scheduler_t_max', args.num_epochs))
+    if scheduler_t_max <= 0:
+        logger.warning(
+            f"Invalid scheduler_t_max={scheduler_t_max}; falling back to num_epochs={args.num_epochs}."
+        )
+        scheduler_t_max = args.num_epochs
+
+    scheduler = CosineAnnealingLR(optimizer, T_max=scheduler_t_max)
+    logger.info(f"Scheduler: CosineAnnealingLR(T_max={scheduler_t_max})")
     # Alternative: use ReduceLROnPlateau for adaptive scheduling
     # scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5, verbose=True)
     
@@ -624,6 +632,7 @@ def main():
         'num_epochs': args.num_epochs,
         'gamma': args.gamma,
         'w_max': args.w_max,
+        'scheduler_t_max': scheduler_t_max,
         'class_weights_enabled': class_weights_enabled,
         'class_weights_mode': args.class_weights_mode,
         'class_weights_source': class_weights_source,
