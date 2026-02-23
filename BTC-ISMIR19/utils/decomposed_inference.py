@@ -240,9 +240,11 @@ class DecomposedChordTrainer:
         with torch.no_grad():
             grad = criterion.gradnorm_weights.grad
             if grad is not None:
-                criterion.gradnorm_weights -= float(criterion.gradnorm_lr) * grad
-            criterion.gradnorm_weights.clamp_(min=float(criterion.gradnorm_w_min))
-            criterion.gradnorm_weights *= len(criterion.component_names) / criterion.gradnorm_weights.sum().clamp_min(eps)
+                criterion.gradnorm_weights.data -= float(criterion.gradnorm_lr) * grad
+            criterion.gradnorm_weights.data.clamp_(min=float(criterion.gradnorm_w_min))
+            criterion.gradnorm_weights.data.mul_(
+                len(criterion.component_names) / criterion.gradnorm_weights.data.sum().clamp_min(eps)
+            )
 
         self.last_gradnorm_loss = float(gradnorm_loss.detach().cpu().item())
         inv_rate_cpu = inv_rate.detach().cpu().tolist()
