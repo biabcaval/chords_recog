@@ -150,6 +150,7 @@ class BTC_model_decomposed(nn.Module):
         self.timestep = cfg['timestep']
         self.probs_out = cfg.get('probs_out', False)
         self.use_decomposition = cfg.get('use_decomposition', True)
+        self.last_shared_features = None
         
         # Feature extractor (bi-directional self-attention)
         params = (
@@ -181,7 +182,12 @@ class BTC_model_decomposed(nn.Module):
             class_weights=class_weights,
             gamma=cfg.get('class_weight_gamma', 0.5),
             w_max=cfg.get('class_weight_max', 10.0),
-            component_weights=component_weights
+            component_weights=component_weights,
+            gradnorm_enabled=cfg.get('gradnorm_enabled', False),
+            gradnorm_alpha=cfg.get('gradnorm_alpha', 1.5),
+            gradnorm_lr=cfg.get('gradnorm_lr', 0.025),
+            gradnorm_eps=cfg.get('gradnorm_eps', 1e-8),
+            gradnorm_w_min=cfg.get('gradnorm_w_min', 1e-3),
         )
         
         # Store component names for reference
@@ -216,6 +222,7 @@ class BTC_model_decomposed(nn.Module):
         
         # Feature extraction
         self_attn_output, weights_list = self.self_attn_layers(x)
+        self.last_shared_features = self_attn_output
         
         # Get logits from all heads
         logits = self.decomposer(self_attn_output)
@@ -284,6 +291,7 @@ class ChordFormer_model_decomposed(nn.Module):
         self.timestep = cfg['timestep']
         self.probs_out = cfg.get('probs_out', False)
         self.use_decomposition = cfg.get('use_decomposition', True)
+        self.last_shared_features = None
 
         # Conformer encoder (ChordFormer backbone)
         self.conformer_encoder = ConformerEncoder(
@@ -312,7 +320,12 @@ class ChordFormer_model_decomposed(nn.Module):
             class_weights=class_weights,
             gamma=cfg.get('class_weight_gamma', 0.5),
             w_max=cfg.get('class_weight_max', 10.0),
-            component_weights=component_weights
+            component_weights=component_weights,
+            gradnorm_enabled=cfg.get('gradnorm_enabled', False),
+            gradnorm_alpha=cfg.get('gradnorm_alpha', 1.5),
+            gradnorm_lr=cfg.get('gradnorm_lr', 0.025),
+            gradnorm_eps=cfg.get('gradnorm_eps', 1e-8),
+            gradnorm_w_min=cfg.get('gradnorm_w_min', 1e-3),
         )
 
         self.component_names = COMPONENT_NAMES
@@ -347,6 +360,7 @@ class ChordFormer_model_decomposed(nn.Module):
 
         # Feature extraction with Conformer encoder
         encoder_output, weights_list = self.conformer_encoder(x)
+        self.last_shared_features = encoder_output
 
         # Get logits from all decomposition heads
         logits = self.decomposer(encoder_output)
@@ -403,8 +417,19 @@ class MultiTaskLoss(nn.Module):
         component_weights: Optional dict of loss weights for each component
     """
     
-    def __init__(self, vocab_sizes, class_weights=None, gamma=0.5, w_max=10.0,
-                 component_weights=None):
+    def __init__(
+        self,
+        vocab_sizes,
+        class_weights=None,
+        gamma=0.5,
+        w_max=10.0,
+        component_weights=None,
+        gradnorm_enabled=False,
+        gradnorm_alpha=1.5,
+        gradnorm_lr=0.025,
+        gradnorm_eps=1e-8,
+        gradnorm_w_min=1e-3,
+    ):
         super().__init__()
         
         self.vocab_sizes = vocab_sizes
@@ -431,6 +456,43 @@ class MultiTaskLoss(nn.Module):
             component_weights = {component: 1.0 for component in self.component_names}
         self.component_weights = component_weights
         self.last_forward_breakdown = {}
+        self.last_raw_loss_tensors = {}
+
+        # GradNorm configuration/state.
+        self.gradnorm_enabled = bool(gradnorm_enabled)
+        self.gradnorm_alpha = float(gradnorm_alpha)
+        self.gradnorm_lr = float(gradnorm_lr)
+        self.gradnorm_eps = float(gradnorm_eps)
+        self.gradnorm_w_min = float(gradnorm_w_min)
+        self.gradnorm_initial_losses = None
+        self.last_gradnorm_info = {}
+
+        init_weights = torch.tensor(
+            [float(self.component_weights.get(c, 1.0)) for c in self.component_names],
+            dtype=torch.float32,
+        )
+        if self.gradnorm_enabled:
+            self.gradnorm_weights = nn.Parameter(init_weights.clone())
+        else:
+            self.register_parameter('gradnorm_weights', None)
+
+    def _get_weight_tensor(self, device):
+        if self.gradnorm_enabled and self.gradnorm_weights is not None:
+            return self.gradnorm_weights.to(device)
+        return torch.tensor(
+            [float(self.component_weights.get(c, 1.0)) for c in self.component_names],
+            dtype=torch.float32,
+            device=device,
+        )
+
+    def get_weight_dict(self):
+        if self.gradnorm_enabled and self.gradnorm_weights is not None:
+            with torch.no_grad():
+                return {
+                    c: float(v)
+                    for c, v in zip(self.component_names, self.gradnorm_weights.detach().cpu().tolist())
+                }
+        return {c: float(self.component_weights.get(c, 1.0)) for c in self.component_names}
     
     def forward(self, logits, labels):
         """
@@ -449,6 +511,8 @@ class MultiTaskLoss(nn.Module):
         total_loss = None
         loss_dict = {}
         self.last_forward_breakdown = {}
+        self.last_raw_loss_tensors = {}
+        weight_tensor = None
         
         for component in self.component_names:
             if component not in logits or component not in labels:
@@ -467,13 +531,18 @@ class MultiTaskLoss(nn.Module):
             
             # Calculate loss for this component
             component_loss = self.losses[component](logits_flat, labels_flat)
+            self.last_raw_loss_tensors[component] = component_loss
             
             # Apply component weight
-            weight = self.component_weights.get(component, 1.0)
-            weighted_loss = weight * component_loss
+            if weight_tensor is None:
+                weight_tensor = self._get_weight_tensor(component_loss.device)
+            weight_idx = self.component_names.index(component)
+            weight = weight_tensor[weight_idx]
+            # GradNorm updates weights separately; model update should not backprop into w_i.
+            weighted_loss = weight.detach() * component_loss if self.gradnorm_enabled else weight * component_loss
             self.last_forward_breakdown[component] = {
                 'raw_loss': float(component_loss.detach().cpu().item()),
-                'weight': float(weight),
+                'weight': float(weight.detach().cpu().item()),
                 'weighted_loss': float(weighted_loss.detach().cpu().item()),
             }
             

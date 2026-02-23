@@ -177,6 +177,80 @@ class DecomposedChordTrainer:
         self.last_component_raw_losses = {component: 0.0 for component in COMPONENT_NAMES}
         self.last_component_weighted_losses = {component: 0.0 for component in COMPONENT_NAMES}
         self.last_component_weights = {component: 1.0 for component in COMPONENT_NAMES}
+        self.last_gradnorm_loss = 0.0
+        self.last_gradnorm_inv_rate = {component: 1.0 for component in COMPONENT_NAMES}
+        self.last_gradnorm_grad_norm = {component: 0.0 for component in COMPONENT_NAMES}
+        self.last_gradnorm_target = {component: 0.0 for component in COMPONENT_NAMES}
+
+    def _apply_gradnorm_update(self):
+        criterion = getattr(self.model, 'criterion', None)
+        if criterion is None or not getattr(criterion, 'gradnorm_enabled', False):
+            return
+
+        raw_losses = getattr(criterion, 'last_raw_loss_tensors', {})
+        shared_features = getattr(self.model, 'last_shared_features', None)
+        if not raw_losses or shared_features is None:
+            return
+
+        component_names = [c for c in criterion.component_names if c in raw_losses]
+        if not component_names:
+            return
+
+        grad_norm_bases = []
+        raw_loss_values = []
+        eps = float(getattr(criterion, 'gradnorm_eps', 1e-8))
+
+        for component in component_names:
+            loss_i = raw_losses[component]
+            grad_i = torch.autograd.grad(
+                loss_i,
+                shared_features,
+                retain_graph=True,
+                allow_unused=True,
+            )[0]
+            if grad_i is None:
+                grad_norm = torch.tensor(0.0, device=loss_i.device)
+            else:
+                grad_norm = torch.norm(grad_i.detach(), p=2)
+            grad_norm_bases.append(grad_norm)
+            raw_loss_values.append(loss_i.detach().clamp_min(eps))
+
+        grad_norm_bases = torch.stack(grad_norm_bases)
+        raw_loss_values = torch.stack(raw_loss_values)
+
+        if criterion.gradnorm_initial_losses is None:
+            criterion.gradnorm_initial_losses = raw_loss_values.detach().clone()
+        init_losses = criterion.gradnorm_initial_losses.to(raw_loss_values.device).clamp_min(eps)
+
+        inv_loss_ratio = raw_loss_values / init_losses
+        inv_rate = inv_loss_ratio / inv_loss_ratio.mean().clamp_min(eps)
+
+        index_map = {c: i for i, c in enumerate(criterion.component_names)}
+        selected_idx = torch.tensor([index_map[c] for c in component_names], device=raw_loss_values.device)
+        w_selected = criterion.gradnorm_weights[selected_idx]
+        grad_norm = w_selected * grad_norm_bases
+        grad_norm_mean = grad_norm.mean()
+        target = (grad_norm_mean * (inv_rate ** float(criterion.gradnorm_alpha))).detach()
+
+        gradnorm_loss = torch.sum(torch.abs(grad_norm - target))
+        if criterion.gradnorm_weights.grad is not None:
+            criterion.gradnorm_weights.grad.zero_()
+        gradnorm_loss.backward(retain_graph=True)
+
+        with torch.no_grad():
+            grad = criterion.gradnorm_weights.grad
+            if grad is not None:
+                criterion.gradnorm_weights -= float(criterion.gradnorm_lr) * grad
+            criterion.gradnorm_weights.clamp_(min=float(criterion.gradnorm_w_min))
+            criterion.gradnorm_weights *= len(criterion.component_names) / criterion.gradnorm_weights.sum().clamp_min(eps)
+
+        self.last_gradnorm_loss = float(gradnorm_loss.detach().cpu().item())
+        inv_rate_cpu = inv_rate.detach().cpu().tolist()
+        grad_norm_cpu = grad_norm.detach().cpu().tolist()
+        target_cpu = target.detach().cpu().tolist()
+        self.last_gradnorm_inv_rate = {component: float(val) for component, val in zip(component_names, inv_rate_cpu)}
+        self.last_gradnorm_grad_norm = {component: float(val) for component, val in zip(component_names, grad_norm_cpu)}
+        self.last_gradnorm_target = {component: float(val) for component, val in zip(component_names, target_cpu)}
     
     def train_epoch(self, train_loader, optimizer, scheduler=None):
         """
@@ -214,6 +288,7 @@ class DecomposedChordTrainer:
             
             # Forward pass (now returns 4 values)
             predictions, loss, _, batch_component_losses = self.model(features, labels=labels)
+            self._apply_gradnorm_update()
             
             # Backward pass
             optimizer.zero_grad()
@@ -253,6 +328,9 @@ class DecomposedChordTrainer:
             comp: val / num_batches if num_batches > 0 else 1.0
             for comp, val in component_weights_sum.items()
         }
+        criterion = getattr(self.model, 'criterion', None)
+        if criterion is not None:
+            self.last_component_weights = criterion.get_weight_dict()
         
         return avg_loss, component_losses_avg
     

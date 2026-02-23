@@ -238,6 +238,18 @@ def main():
                        help='5-fold split index used for validation (default: 4)')
     parser.add_argument('--component_weights', type=str, default=None,
                        help='Optional per-component loss weights as comma-separated key=value list')
+    parser.add_argument('--use_gradnorm', action='store_true',
+                       help='Enable GradNorm adaptive task balancing')
+    parser.add_argument('--no_gradnorm', action='store_true',
+                       help='Disable GradNorm adaptive task balancing')
+    parser.add_argument('--gradnorm_alpha', type=float, default=None,
+                       help='GradNorm asymmetry alpha (higher means stronger balancing)')
+    parser.add_argument('--gradnorm_lr', type=float, default=None,
+                       help='Learning rate for GradNorm task weights update')
+    parser.add_argument('--gradnorm_eps', type=float, default=None,
+                       help='Numerical epsilon for GradNorm')
+    parser.add_argument('--gradnorm_w_min', type=float, default=None,
+                       help='Minimum allowed GradNorm task weight before renormalization')
     parser.add_argument(
         '--class_weights_mode',
         type=str,
@@ -270,6 +282,8 @@ def main():
     
     if args.use_class_weights and args.no_class_weights:
         parser.error("Use only one of --use_class_weights or --no_class_weights")
+    if args.use_gradnorm and args.no_gradnorm:
+        parser.error("Use only one of --use_gradnorm or --no_gradnorm")
 
     try:
         component_weights = parse_component_weights(args.component_weights)
@@ -311,6 +325,34 @@ def main():
             f"!= feature.n_bins={feature_n_bins}. Overriding model.feature_size to {feature_n_bins}."
         )
         config.model['feature_size'] = feature_n_bins
+
+    # Resolve GradNorm settings (CLI override > config > defaults).
+    gradnorm_cfg = config.get('gradnorm', {}) if hasattr(config, 'get') else {}
+    if args.use_gradnorm:
+        gradnorm_enabled = True
+    elif args.no_gradnorm:
+        gradnorm_enabled = False
+    else:
+        gradnorm_enabled = bool(gradnorm_cfg.get('enabled', False))
+
+    gradnorm_alpha = float(args.gradnorm_alpha) if args.gradnorm_alpha is not None else float(gradnorm_cfg.get('alpha', 1.5))
+    gradnorm_lr = float(args.gradnorm_lr) if args.gradnorm_lr is not None else float(gradnorm_cfg.get('lr', 0.025))
+    gradnorm_eps = float(args.gradnorm_eps) if args.gradnorm_eps is not None else float(gradnorm_cfg.get('eps', 1e-8))
+    gradnorm_w_min = float(args.gradnorm_w_min) if args.gradnorm_w_min is not None else float(gradnorm_cfg.get('w_min', 1e-3))
+
+    config.model['gradnorm_enabled'] = gradnorm_enabled
+    config.model['gradnorm_alpha'] = gradnorm_alpha
+    config.model['gradnorm_lr'] = gradnorm_lr
+    config.model['gradnorm_eps'] = gradnorm_eps
+    config.model['gradnorm_w_min'] = gradnorm_w_min
+    logger.info(
+        "GradNorm: enabled=%s alpha=%.4f lr=%.5f eps=%g w_min=%g",
+        gradnorm_enabled,
+        gradnorm_alpha,
+        gradnorm_lr,
+        gradnorm_eps,
+        gradnorm_w_min,
+    )
     
     # Prepare datasets
     logger.info("Preparing datasets...")
@@ -589,8 +631,12 @@ def main():
     logger.info(f"Trainable parameters: {trainable_params:,}")
     
     # Setup optimizer and scheduler
+    model_trainable_params = [
+        p for n, p in model.named_parameters()
+        if p.requires_grad and n != 'criterion.gradnorm_weights'
+    ]
     optimizer = optim.Adam(
-        model.parameters(),
+        model_trainable_params,
         lr=args.learning_rate,
         weight_decay=args.weight_decay
     )
@@ -641,6 +687,13 @@ def main():
         'backbone': args.backbone,
         'kfold': args.kfold,
         'component_weights': component_weights if component_weights is not None else 'default(all=1.0)',
+        'gradnorm': {
+            'enabled': gradnorm_enabled,
+            'alpha': gradnorm_alpha,
+            'lr': gradnorm_lr,
+            'eps': gradnorm_eps,
+            'w_min': gradnorm_w_min,
+        },
         'model_config': {
             'hidden_size': config.model.get('hidden_size', 128),
             'num_layers': config.model.get('num_layers', 8),
@@ -653,6 +706,11 @@ def main():
             'conv_kernel_size': config.model.get('conv_kernel_size', 31),
             'ff_expansion_factor': config.model.get('ff_expansion_factor', 4),
             'conv_expansion_factor': config.model.get('conv_expansion_factor', 2),
+            'gradnorm_enabled': config.model.get('gradnorm_enabled', False),
+            'gradnorm_alpha': config.model.get('gradnorm_alpha', 1.5),
+            'gradnorm_lr': config.model.get('gradnorm_lr', 0.025),
+            'gradnorm_eps': config.model.get('gradnorm_eps', 1e-8),
+            'gradnorm_w_min': config.model.get('gradnorm_w_min', 1e-3),
         },
         'datasets': dataset_names,
         'data_root': data_root,
@@ -707,6 +765,8 @@ def main():
             if weights_used:
                 comp_str_alpha = " | ".join([f"{k[:4]}:{v:.2f}" for k, v in weights_used.items()])
                 logger.info(f"  Component weights: {comp_str_alpha}")
+            if gradnorm_enabled:
+                logger.info(f"  GradNorm loss: {trainer.last_gradnorm_loss:.4f}")
         
         training_history['train_loss'].append(train_loss)
 
@@ -729,6 +789,14 @@ def main():
             if weights_used:
                 for name, value in weights_used.items():
                     train_log[f"train/component_weights/{name}"] = float(value)
+            if gradnorm_enabled:
+                train_log['train/gradnorm/loss'] = float(trainer.last_gradnorm_loss)
+                for name, value in trainer.last_gradnorm_inv_rate.items():
+                    train_log[f"train/gradnorm/inv_rate/{name}"] = float(value)
+                for name, value in trainer.last_gradnorm_grad_norm.items():
+                    train_log[f"train/gradnorm/grad_norm/{name}"] = float(value)
+                for name, value in trainer.last_gradnorm_target.items():
+                    train_log[f"train/gradnorm/target/{name}"] = float(value)
             wandb.log(train_log)
         
         # Validate

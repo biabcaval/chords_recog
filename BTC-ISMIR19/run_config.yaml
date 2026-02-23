@@ -81,6 +81,13 @@ class_weights:
   gamma: 0.5     # Weight formula exponent: (N_max / N_class)^gamma (higher => stronger reweighting)
   w_max: 10.0    # Upper cap for rare-class weights to avoid unstable gradients
 
+gradnorm:
+  enabled: False  # Adaptive multitask balancing (updates one weight per chord component)
+  alpha: 1.5      # Asymmetry strength from GradNorm paper
+  lr: 0.025       # Learning rate for GradNorm weights
+  eps: 1.0e-8     # Numerical stability epsilon
+  w_min: 1.0e-3   # Lower bound for each task weight before renormalization
+
 path:
   ckpt_path : 'model'
   result_path : '/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/results'
