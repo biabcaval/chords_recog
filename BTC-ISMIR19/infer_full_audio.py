@@ -2,6 +2,11 @@
 # encoding: utf-8
 """
 Full audio inference - processes entire audio file and shows all chord predictions.
+
+Usage:
+    python infer_full_audio.py --config run_config.yaml --checkpoint model_best.pt --audio_file song.mp3
+    python infer_full_audio.py --config run_config.yaml --checkpoint model_best.pt --audio_file song.mp3 --backbone chordformer
+    python infer_full_audio.py --config run_config.yaml --checkpoint model_best.pt --audio_file song.mp3 --output result.lab
 """
 
 import argparse
@@ -11,9 +16,25 @@ import librosa
 from pathlib import Path
 import logging
 
-from models.btc_model_decomposed import BTC_model_decomposed
+from models.btc_model_decomposed import BTC_model_decomposed, ChordFormer_model_decomposed
 from utils.chord_decomposition import ChordReassembler, COMPONENT_NAMES
 from utils.hparams import HParams
+
+
+def _build_model(config, backbone='auto', checkpoint_meta=None):
+    """
+    Instantiate the correct decomposed model based on backbone choice.
+
+    When backbone='auto', tries to detect from checkpoint metadata
+    (training_config.backbone), falling back to 'btc'.
+    """
+    if backbone == 'auto' and checkpoint_meta is not None:
+        tc = checkpoint_meta.get('training_config', {})
+        backbone = tc.get('backbone', 'btc')
+
+    if backbone == 'chordformer':
+        return ChordFormer_model_decomposed(config=config)
+    return BTC_model_decomposed(config=config)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,6 +125,9 @@ def main():
     parser.add_argument('--output', type=str, default=None, help='Save to file')
     parser.add_argument('--show_all', action='store_true', help='Show all frames (not just changes)')
     parser.add_argument('--max_frames', type=int, default=500, help='Max frames to display')
+    parser.add_argument('--backbone', type=str, default='auto',
+                       choices=['auto', 'btc', 'chordformer'],
+                       help='Model backbone (auto detects from checkpoint)')
     
     args = parser.parse_args()
     
@@ -113,9 +137,11 @@ def main():
     
     # Load model
     logger.info(f"Loading model from {args.checkpoint}")
-    model = BTC_model_decomposed(config=config.model).to(device)
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    model = _build_model(config, backbone=args.backbone, checkpoint_meta=checkpoint).to(device)
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    detected = checkpoint.get('training_config', {}).get('backbone', 'btc')
+    logger.info(f"Backbone: {detected}")
     model.eval()
     
     # Extract features

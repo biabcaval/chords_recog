@@ -463,5 +463,92 @@ python test.py
 
 ---
 
-**Última atualização:** Dezembro 2024
+---
+
+## Pipeline Decomposed (9 componentes) — ChordFormer / BTC
+
+O pipeline decomposed usa 9 cabeças de saída independentes em vez de 170 classes monolíticas.
+
+### Treinamento Decomposed
+
+```bash
+# ChordFormer com GradNorm (balanceamento adaptativo de tarefas)
+python train_decomposed.py \
+    --config run_config.yaml \
+    --backbone chordformer \
+    --kfold 0 \
+    --run_name cf_gradnorm_a15_k0 \
+    --num_epochs 100 \
+    --batch_size 128 \
+    --learning_rate 0.0001 \
+    --weight_decay 0.0 \
+    --no_class_weights \
+    --use_gradnorm \
+    --gradnorm_alpha 1.5 \
+    --gradnorm_lr 0.025 \
+    --wandb_project chordMax \
+    --wandb_entity teste-time
+
+# BTC decomposed (sem GradNorm)
+python train_decomposed.py \
+    --config run_config.yaml \
+    --backbone btc \
+    --kfold 0 \
+    --run_name btc_base_k0 \
+    --num_epochs 100 \
+    --batch_size 128 \
+    --learning_rate 0.0001
+```
+
+**Checkpoints salvos em:** `checkpoints/{run_name}/model_best.pt`
+
+### Inferência Decomposed
+
+Os scripts de inferência detectam automaticamente o backbone a partir do checkpoint (`--backbone auto`), mas você pode forçar com `--backbone chordformer` ou `--backbone btc`.
+
+#### Inferência em janela única (~10s)
+
+```bash
+python infer_decomposed.py \
+    --config run_config.yaml \
+    --checkpoint checkpoints/cf_gradnorm_a15_k0/model_best.pt \
+    --audio_file /caminho/para/musica.mp3 \
+    --output resultado.lab \
+    --aggregate
+```
+
+#### Inferência em áudio completo (chunk por chunk)
+
+```bash
+python infer_full_audio.py \
+    --config run_config.yaml \
+    --checkpoint checkpoints/cf_gradnorm_a15_k0/model_best.pt \
+    --audio_file /caminho/para/musica.mp3 \
+    --output resultado.lab
+```
+
+**Parâmetros de inferência:**
+
+| Parâmetro | Descrição |
+|---|---|
+| `--config` | Arquivo de configuração (mesmo usado no treino) |
+| `--checkpoint` | Checkpoint `.pt` do modelo treinado |
+| `--audio_file` | Arquivo de áudio (MP3, WAV) |
+| `--backbone` | `auto` (detecta do checkpoint), `btc`, ou `chordformer` |
+| `--output` | Caminho para salvar arquivo `.lab` (opcional) |
+| `--aggregate` | Mostra só mudanças de acorde (só `infer_decomposed.py`) |
+| `--show_all` | Mostra todos os frames (só `infer_full_audio.py`) |
+| `--device` | `cuda` ou `cpu` |
+
+### Formato de saída (.lab)
+
+```
+0.000	2.500	C:maj
+2.500	5.000	A:min7
+5.000	7.500	G:maj9
+```
+
+---
+
+**Última atualização:** Fevereiro 2026
 

@@ -7,7 +7,9 @@ This script performs inference on audio files using the decomposed chord model
 and returns the predicted chord sequences.
 
 Usage:
-    python infer_decomposed.py --checkpoint model_best.pt --audio_file song.mp3 --config run_config.yaml
+    python infer_decomposed.py --config run_config.yaml --checkpoint model_best.pt --audio_file song.mp3
+    python infer_decomposed.py --config run_config.yaml --checkpoint model_best.pt --audio_file song.mp3 --backbone chordformer
+    python infer_decomposed.py --config run_config.yaml --checkpoint model_best.pt --audio_file song.mp3 --output result.lab --aggregate
 """
 
 import argparse
@@ -17,10 +19,26 @@ import librosa
 from pathlib import Path
 import logging
 
-from models.btc_model_decomposed import BTC_model_decomposed
+from models.btc_model_decomposed import BTC_model_decomposed, ChordFormer_model_decomposed
 from utils.decomposed_inference import DecomposedChordInference, ChordMetrics
 from utils.chord_decomposition import ChordDecomposer, ChordReassembler
 from utils.hparams import HParams
+
+
+def _build_model(config, backbone='auto', checkpoint_meta=None):
+    """
+    Instantiate the correct decomposed model based on backbone choice.
+
+    When backbone='auto', tries to detect from checkpoint metadata
+    (training_config.backbone), falling back to 'btc'.
+    """
+    if backbone == 'auto' and checkpoint_meta is not None:
+        tc = checkpoint_meta.get('training_config', {})
+        backbone = tc.get('backbone', 'btc')
+
+    if backbone == 'chordformer':
+        return ChordFormer_model_decomposed(config=config)
+    return BTC_model_decomposed(config=config)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,7 +52,7 @@ class ChordRecognitionInference:
     High-level interface for chord recognition inference.
     """
     
-    def __init__(self, config_path, checkpoint_path, device='cuda'):
+    def __init__(self, config_path, checkpoint_path, device='cuda', backbone='auto'):
         """
         Initialize the inference pipeline.
         
@@ -42,21 +60,23 @@ class ChordRecognitionInference:
             config_path: Path to configuration file
             checkpoint_path: Path to model checkpoint
             device: Device to run inference on
+            backbone: 'btc', 'chordformer', or 'auto' (detect from checkpoint)
         """
         self.device = torch.device(device)
         
         # Load configuration
         self.config = HParams.load(config_path)
         
-        # Initialize model
-        self.model = BTC_model_decomposed(config=self.config.model)
+        # Load checkpoint first so we can detect backbone when auto
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        
+        # Initialize model with correct backbone
+        self.model = _build_model(self.config, backbone=backbone, checkpoint_meta=checkpoint)
         self.model = self.model.to(self.device)
         
-        # Load checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        # Use strict=False to ignore criterion weights saved in checkpoint
         self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        logger.info(f"Loaded checkpoint from {checkpoint_path}")
+        detected = checkpoint.get('training_config', {}).get('backbone', 'btc')
+        logger.info(f"Loaded checkpoint from {checkpoint_path} (backbone: {detected})")
         
         # Setup inference utilities
         self.inference = DecomposedChordInference(self.model, device=self.device)
@@ -273,6 +293,9 @@ def main():
                        help='Path to save output chord file')
     parser.add_argument('--aggregate', action='store_true', default=False,
                        help='Aggregate predictions to chord changes only')
+    parser.add_argument('--backbone', type=str, default='auto',
+                       choices=['auto', 'btc', 'chordformer'],
+                       help='Model backbone (auto detects from checkpoint)')
     
     args = parser.parse_args()
     
@@ -281,7 +304,8 @@ def main():
     inference_engine = ChordRecognitionInference(
         args.config,
         args.checkpoint,
-        device=args.device
+        device=args.device,
+        backbone=args.backbone
     )
     
     # Run inference
