@@ -1,6 +1,8 @@
-# Guia Completo: Treinamento e Inferência do Modelo BTC
+# Guia Completo: Treinamento e Inferência — ChordMax
 
-Este guia explica como treinar o modelo BTC para reconhecimento de acordes e como realizar inferências após o treinamento.
+Este guia explica como treinar o modelo ChordMax (ChordFormer) para reconhecimento de acordes e como realizar inferências após o treinamento.
+
+> **Nota**: as seções sobre `train.py`, `train_curriculum.py` e `test.py`/`test_full.py` são referência do pipeline legado. O pipeline atual usa `train_decomposed.py` e `infer_full_audio.py` (ver seção "Pipeline Decomposed").
 
 ## 📋 Índice
 
@@ -465,11 +467,11 @@ python test.py
 
 ---
 
-## Pipeline Decomposed (9 componentes) — ChordFormer / BTC
+## Pipeline ChordMax — Decomposed (9 componentes)
 
-O pipeline decomposed usa 9 cabeças de saída independentes em vez de 170 classes monolíticas.
+O pipeline ChordMax usa o encoder Conformer com 9 cabeças de saída independentes em vez de 170 classes monolíticas.
 
-### Treinamento Decomposed
+### Treinamento ChordMax
 
 ```bash
 # ChordFormer com GradNorm (balanceamento adaptativo de tarefas)
@@ -488,23 +490,13 @@ python train_decomposed.py \
     --gradnorm_lr 0.025 \
     --wandb_project chordMax \
     --wandb_entity teste-time
-
-# BTC decomposed (sem GradNorm)
-python train_decomposed.py \
-    --config run_config.yaml \
-    --backbone btc \
-    --kfold 0 \
-    --run_name btc_base_k0 \
-    --num_epochs 100 \
-    --batch_size 128 \
-    --learning_rate 0.0001
 ```
 
 **Checkpoints salvos em:** `checkpoints/{run_name}/model_best.pt`
 
-### Inferência Decomposed
+### Inferência ChordMax
 
-Os scripts de inferência detectam automaticamente o backbone a partir do checkpoint (`--backbone auto`), mas você pode forçar com `--backbone chordformer` ou `--backbone btc`.
+Os scripts de inferência detectam automaticamente o backbone a partir do checkpoint (`--backbone auto`).
 
 #### Inferência em janela única (~10s)
 
@@ -534,7 +526,7 @@ python infer_full_audio.py \
 | `--config` | Arquivo de configuração (mesmo usado no treino) |
 | `--checkpoint` | Checkpoint `.pt` do modelo treinado |
 | `--audio_file` | Arquivo de áudio (MP3, WAV) |
-| `--backbone` | `auto` (detecta do checkpoint), `btc`, ou `chordformer` |
+| `--backbone` | `auto` (detecta do checkpoint) ou `chordformer` |
 | `--output` | Caminho para salvar arquivo `.lab` (opcional) |
 | `--aggregate` | Mostra só mudanças de acorde (só `infer_decomposed.py`) |
 | `--show_all` | Mostra todos os frames (só `infer_full_audio.py`) |

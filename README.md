@@ -1,6 +1,6 @@
 # ChordMax — Automatic Chord Recognition
 
-Sistema de reconhecimento automático de acordes musicais a partir de áudio, baseado em arquiteturas Transformer (BTC) e Conformer (ChordFormer) com decomposição estrutural de acordes em 9 componentes independentes.
+Sistema de reconhecimento automático de acordes musicais a partir de áudio, baseado na arquitetura Conformer (ChordFormer) com decomposição estrutural de acordes em 9 componentes independentes e balanceamento adaptativo de tarefas via GradNorm.
 
 ## Arquitetura
 
@@ -56,6 +56,7 @@ python infer_full_audio.py \
 
 - [Pipeline Completo](BTC-ISMIR19/docs/PIPELINE_DOCUMENTATION.md)
 - [Guia de Decomposição](BTC-ISMIR19/docs/CHORD_DECOMPOSITION_GUIDE.md)
+- [Lógica de Saída Estruturada](BTC-ISMIR19/docs/STRUCTURED_OUTPUT_LOGIC.md)
 - [Guia de Treinamento e Inferência](BTC-ISMIR19/docs/GUIA_TREINAMENTO_E_INFERENCIA.md)
 
 ## Requisitos

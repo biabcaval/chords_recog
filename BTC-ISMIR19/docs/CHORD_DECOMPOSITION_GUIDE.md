@@ -104,7 +104,7 @@ train_loader = AudioDataLoaderStructured(
 
 ### 3. **Model Architecture** (`models/btc_model_decomposed.py`)
 
-Refactored BTC model with 9 parallel output heads.
+ChordMax model (Conformer encoder) with 9 parallel output heads.
 
 **Key Classes:**
 
@@ -124,13 +124,7 @@ Refactored BTC model with 9 parallel output heads.
   # }
   ```
 
-- `BTC_model_decomposed`: Full model with feature extractor + multi-head decomposer
-  ```python
-  model = BTC_model_decomposed(config, class_weights=class_weights)
-  predictions, loss, weights, component_losses = model(features, labels=labels_dict)
-  ```
-
-- `ChordFormer_model_decomposed`: Conformer backbone + the same 9-head decomposer API
+- `ChordFormer_model_decomposed`: Conformer encoder + 9-head decomposer (modelo principal do ChordMax)
   ```python
   from models.btc_model_decomposed import ChordFormer_model_decomposed
 
@@ -241,42 +235,30 @@ Handles inference, decoding, and metrics computation.
 
 ### Command-Line Training
 
-**Backbone choice (`--backbone`)**
-- `btc`: mantém o encoder BTC original (self-attention bidirecional), bom como baseline e para comparação direta com trabalhos anteriores.
-- `chordformer`: usa encoder Conformer (atenção + convolução), normalmente melhor para capturar padrões locais e dependências de longo alcance em áudio.
-
 ```bash
-# Train decomposed model with BTC backbone (default)
-python train_decomposed.py
-
-# Same training, but with a custom experiment name
-python train_decomposed.py --run_name my_experiment
-
-# Train decomposed model with ChordFormer backbone (Conformer encoder)
-python train_decomposed.py --backbone chordformer --run_name chordformer_decomp_v1
-
-# Train with custom hyperparameters
+# Treino ChordMax (ChordFormer + GradNorm)
 python train_decomposed.py \
-    --run_name baseline_v1 \
+    --backbone chordformer \
+    --kfold 0 \
+    --run_name cf_gradnorm_k0 \
+    --num_epochs 100 \
+    --batch_size 128 \
     --learning_rate 0.0001 \
-    --batch_size 64 \
-    --num_epochs 150
+    --no_class_weights \
+    --use_gradnorm \
+    --gradnorm_alpha 1.5 \
+    --gradnorm_lr 0.025 \
+    --wandb_project chordMax
 
-# Train with class weights loaded from cache (no recomputation at startup)
+# Treino com class weights carregados do cache
 python train_decomposed.py \
     --backbone chordformer \
     --kfold 0 \
     --use_class_weights \
     --class_weights_mode load
 
-# Validation only (NOT training): smoke test for BTC backbone
-python quick_test_decomposed.py --backbone btc
-
-# Validation only (NOT training): smoke test for ChordFormer backbone
+# Smoke test rápido
 python quick_test_decomposed.py --backbone chordformer
-
-# Validation only (NOT training): run both backbones
-python quick_test_decomposed.py
 ```
 
 Checkpoints are saved to `checkpoints/<run_name>/`:
@@ -320,7 +302,7 @@ This decouples expensive preprocessing from training startup and makes runs repr
 ```python
 import torch
 import torch.optim as optim
-from models.btc_model_decomposed import BTC_model_decomposed, MultiTaskLoss
+from models.btc_model_decomposed import ChordFormer_model_decomposed, MultiTaskLoss
 from data.audio_dataset_structured import AudioDatasetStructured, AudioDataLoaderStructured
 from utils.decomposed_inference import DecomposedChordTrainer, ChordMetrics
 from utils.hparams import HParams
@@ -341,7 +323,7 @@ class_weights = MultiTaskLoss.compute_class_weights(
 )
 
 # Initialize model
-model = BTC_model_decomposed(config, class_weights=class_weights)
+model = ChordFormer_model_decomposed(config, class_weights=class_weights)
 model = model.to('cuda')
 
 # Optimizer

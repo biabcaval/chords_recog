@@ -33,8 +33,8 @@ Reconhecer acordes musicais a partir de áudio, decompondo cada acorde em **9 co
 
 ```
 ┌─────────────┐    ┌──────────────┐    ┌─────────────┐    ┌──────────────┐
-│   Áudio     │───▶│    CQT       │───▶│   Modelo    │───▶│  9 Saídas    │
-│   (.wav)    │    │  Features    │    │   (BTC)     │    │  (softmax)   │
+│   Áudio     │───▶│    CQT       │───▶│ ChordMax    │───▶│  9 Saídas    │
+│   (.wav)    │    │  Features    │    │ (Conformer) │    │  (softmax)   │
 └─────────────┘    └──────────────┘    └─────────────┘    └──────────────┘
                                                                  │
                                                                  ▼
@@ -316,18 +316,19 @@ def _collate_fn_structured(batch):
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│              BTC / ChordFormer _model_decomposed                 │
+│              ChordMax (ChordFormer_model_decomposed)              │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  Input: (B, T, F) = (batch, 108, 252)                           │
 │                           │                                      │
 │                           ▼                                      │
 │  ┌─────────────────────────────────────────────────────────┐    │
-│  │       Bi-directional Self-Attention Layers (BTC)        │    │
-│  │  - Forward self-attention block                         │    │
-│  │  - Backward self-attention block                        │    │
-│  │  - Positionwise convolution                             │    │
-│  │  - Output: (B, T, hidden_size)                          │    │
+│  │              ConformerEncoder (12 blocos)               │    │
+│  │  - Input projection: Linear(252 → 128)                 │    │
+│  │  - Positional encoding                                  │    │
+│  │  - 12× ConformerBlock (Macaron-style):                  │    │
+│  │    x + 0.5*FFN → x + MHSA → x + Conv → x + 0.5*FFN    │    │
+│  │  - Output: (B, T, hidden_size=128)                      │    │
 │  └─────────────────────────────────────────────────────────┘    │
 │                           │                                      │
 │                           ▼                                      │
@@ -348,37 +349,33 @@ def _collate_fn_structured(batch):
 
 ### 5.2 Componentes do Modelo
 
-#### 5.2.1 Bi-directional Self-Attention Layers
+#### 5.2.1 ConformerEncoder
 
-Baseado na arquitetura BTC (Bi-directional Transformer for Chords):
+O ChordMax usa um encoder Conformer com 12 blocos Macaron-style. Cada bloco tem 4 conexões residuais:
 
 ```python
-class bi_directional_self_attention_layers(nn.Module):
-    def __init__(self, embedding_size, hidden_size, num_layers, ...):
-        # Projeção de entrada
-        self.embedding_proj = nn.Linear(embedding_size, hidden_size)
-        
-        # Timing signal (positional encoding)
-        self.timing_signal = _gen_timing_signal(max_length, hidden_size)
-        
-        # Stack de camadas bidirecionais
-        self.self_attn_layers = nn.Sequential(*[
-            bi_directional_self_attention(...)  # Forward + Backward attention
-            for l in range(num_layers)
-        ])
-
-class bi_directional_self_attention(nn.Module):
-    """Cada camada contém dois blocos de atenção."""
-    def __init__(self, ...):
-        self.attn_block = self_attention_block(...)          # Forward
-        self.backward_attn_block = self_attention_block(...) # Backward
-        self.linear = nn.Linear(hidden_size*2, hidden_size)  # Concatenação
-    
+class ConformerBlock(nn.Module):
     def forward(self, x):
-        forward_out = self.attn_block(x)
-        backward_out = self.backward_attn_block(x)
-        return self.linear(torch.cat([forward_out, backward_out], dim=2))
+        x = x + 0.5 * self.ff1(x)        # Half-step FFN
+        x = x + self.self_attn(x)         # Multi-head self-attention
+        x = x + self.conv_module(x)       # Depthwise convolution
+        x = x + 0.5 * self.ff2(x)        # Half-step FFN
+        x = self.layer_norm(x)
+        return x
+
+class ConformerEncoder(nn.Module):
+    def __init__(self, ...):
+        self.input_projection = nn.Linear(252, 128)  # feature_size → hidden_size
+        self.conformer_blocks = nn.ModuleList([
+            ConformerBlock(...) for _ in range(12)
+        ])
 ```
+
+**Parâmetros do Conformer:**
+- `conv_kernel_size=31`: contexto temporal amplo na conv depthwise
+- `ff_expansion_factor=4`: FFN interna de 128 → 512 → 128
+- `conv_expansion_factor=2`: expansão no módulo convolucional
+- 12 blocos × 4 residuais = 48 conexões residuais no total
 
 #### 5.2.2 Component Head
 
@@ -418,16 +415,7 @@ class MultiHeadChordDecomposer(nn.Module):
         return {name: head(x) for name, head in self.heads.items()}
 ```
 
-### 5.3 Backbones Disponíveis
-
-O modelo decomposed suporta dois backbones via `--backbone`:
-
-| Backbone | Encoder | Quando usar |
-|----------|---------|-------------|
-| `btc` | Self-attention bidirecional | Baseline, comparação com trabalhos anteriores |
-| `chordformer` | Conformer (atenção + conv depthwise) | Melhor captura de padrões locais e dependências longas |
-
-### 5.4 Parâmetros do Modelo
+### 5.3 Parâmetros do Modelo
 
 | Parâmetro | Valor | Descrição |
 |-----------|-------|-----------|
@@ -546,54 +534,39 @@ gradnorm:
 #### Treino Básico
 
 ```bash
-# Treino decomposed com backbone BTC (padrão), nome automático da run
-python train_decomposed.py
+# Treino ChordMax com nome automático da run
+python train_decomposed.py --backbone chordformer
 ```
 
 #### Treino com Nome Personalizado
 
 ```bash
-# Mesmo treino, mas com nome explícito para rastrear experimento
-python train_decomposed.py --run_name meu_experimento
-
-# Exemplos de nomes descritivos
-python train_decomposed.py --run_name baseline_v1
-python train_decomposed.py --run_name teste_dropout_alto
-python train_decomposed.py --run_name hidden256_layers10
+python train_decomposed.py --backbone chordformer --run_name meu_experimento
 ```
 
-#### Treino com Parâmetros Customizados
+#### Treino Completo (recomendado)
 
 ```bash
-# Alterar hiperparâmetros via linha de comando
 python train_decomposed.py \
-    --run_name experimento_lr_baixo \
-    --learning_rate 0.00005 \
-    --batch_size 64 \
-    --num_epochs 150
-
-# Usar arquivo de config diferente
-python train_decomposed.py \
-    --run_name teste_nova_config \
-    --config configs/minha_config.yaml
-
-# Treinar decomposed com backbone ChordFormer (Conformer encoder)
-python train_decomposed.py \
-    --run_name chordformer_decomp_v1 \
-    --backbone chordformer
+    --config run_config.yaml \
+    --backbone chordformer \
+    --kfold 0 \
+    --run_name cf_gradnorm_k0 \
+    --num_epochs 100 \
+    --batch_size 128 \
+    --learning_rate 0.0001 \
+    --no_class_weights \
+    --use_gradnorm \
+    --gradnorm_alpha 1.5 \
+    --gradnorm_lr 0.025 \
+    --wandb_project chordMax \
+    --wandb_entity teste-time
 ```
 
-#### Treino Rápido (para testes)
+#### Treino Rápido (smoke test)
 
 ```bash
-# Validação rápida do pipeline (NAO treina dataset real) - BTC
-python quick_test_decomposed.py --backbone btc
-
-# Validação rápida do pipeline (NAO treina dataset real) - ChordFormer
 python quick_test_decomposed.py --backbone chordformer
-
-# Executa ambos os backbones na mesma rodada
-python quick_test_decomposed.py --backbone both
 ```
 
 ### 7.2 Parâmetros do Script
@@ -610,7 +583,7 @@ python quick_test_decomposed.py --backbone both
 | `--weight_decay` | 1e-5 | Regularização L2 |
 | `--gamma` | 0.5 | Expoente do class weighting |
 | `--w_max` | 10.0 | Peso máximo por classe |
-| `--backbone` | btc | Backbone do modelo (`btc` ou `chordformer`) |
+| `--backbone` | chordformer | Backbone do modelo (`chordformer`) |
 | `--kfold` | 4 | Índice do k-fold para validação (0-4) |
 | `--log_interval` | 10 | Intervalo de log (batches) |
 | `--val_interval` | 1 | Intervalo de validação (epochs) |
@@ -965,7 +938,7 @@ python infer_full_audio.py \
 | `--config` | Arquivo de configuração (default: run_config.yaml) |
 | `--checkpoint` | Caminho para o modelo treinado (.pt) |
 | `--audio_file` | Arquivo de áudio (mp3, wav, etc.) |
-| `--backbone` | `auto` (detecta do checkpoint), `btc` ou `chordformer` |
+| `--backbone` | `auto` (detecta do checkpoint) ou `chordformer` |
 | `--device` | cuda ou cpu |
 | `--show_all` | Mostra todos os frames, não apenas mudanças |
 | `--max_frames` | Limite de frames a exibir (default: 500) |
@@ -1175,8 +1148,8 @@ TEST: Gradient Flow Verification
 Loss: 2.3456
 
 --- Gradient Norms by Module ---
-  self_attn_layers.input_fc            : avg=0.012345, max=0.023456 ✓
-  self_attn_layers.layers              : avg=0.008234, max=0.015678 ✓
+  conformer_encoder.input_projection   : avg=0.012345, max=0.023456 ✓
+  conformer_encoder.conformer_blocks   : avg=0.008234, max=0.015678 ✓
   decomposer.heads                     : avg=0.005678, max=0.009876 ✓
 
 --- Output Head Gradients ---
@@ -1275,14 +1248,13 @@ BTC-ISMIR19/
 │   ├── audio_dataset_structured.py   # Dataset com decomposição (9 componentes)
 │   └── curriculum_learning.py        # Curriculum learning
 ├── models/
-│   ├── btc_model.py                  # BTC, BTC_structured, ChordFormer (não-decomposed)
-│   ├── btc_model_decomposed.py       # BTC/ChordFormer decomposed + MultiTaskLoss + GradNorm
-│   ├── baseline_models.py            # CNN, CRNN
-│   └── crf_model.py                  # CRF
+│   ├── btc_model_decomposed.py       # ChordFormer decomposed + MultiTaskLoss + GradNorm
+│   ├── btc_model.py                  # Modelos legado (BTC, baselines)
+│   └── baseline_models.py            # CNN, CRNN (legado)
 ├── utils/
 │   ├── chord_decomposition.py        # ChordDecomposer & Reassembler (9 componentes)
 │   ├── decomposed_inference.py       # DecomposedChordTrainer, Inference, Metrics, GradNorm update
-│   ├── transformer_modules.py        # ConformerEncoder, BTC blocks, output layers
+│   ├── transformer_modules.py        # ConformerEncoder, output layers
 │   ├── mir_eval_modules.py           # idx2voca_chord, scoring
 │   ├── preprocess.py                 # Feature extraction (CQT)
 │   ├── hparams.py                    # HParams (YAML config loader)
@@ -1294,8 +1266,8 @@ BTC-ISMIR19/
 │   ├── precompute_class_weights_decomposed.py  # Cache de class weights
 │   ├── diagnose_decomposition_mismatch.py      # Diagnóstico train/val
 │   └── convert_to_decomposed.py      # Converte .pt 170-class → decomposed
-├── train_decomposed.py               # Treino decomposed (BTC/ChordFormer, GradNorm, wandb)
-├── train_curriculum.py               # Treino legado (curriculum learning)
+├── train_decomposed.py               # Treino ChordMax (ChordFormer + GradNorm + wandb)
+├── train_curriculum.py               # Treino legado
 ├── infer_decomposed.py               # Inferência janela única
 ├── infer_full_audio.py               # Inferência áudio completo (chunks)
 ├── debug_model.py                    # Debug e testes do modelo
@@ -1307,8 +1279,7 @@ BTC-ISMIR19/
 
 ## Referências
 
-1. **BTC: Bi-directional Transformer for Musical Chord Recognition** (ISMIR 2019) - Modelo base
-2. **ChordFormer: Conformer-based chord recognition** - Encoder Conformer + decomposição multi-tarefa
+1. **ChordMax (ChordFormer)**: Conformer encoder + decomposição multi-tarefa em 9 componentes
 3. **GradNorm: Gradient Normalization for Adaptive Loss Balancing** (ICML 2018) - Balanceamento adaptativo de tarefas
 4. **mir_eval** - Biblioteca padrão para avaliação MIR
 
