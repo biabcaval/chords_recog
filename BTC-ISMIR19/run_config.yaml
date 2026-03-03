@@ -19,7 +19,7 @@ experiment:
   save_step : 40
   data_ratio : 0.8
   data_root : '/home/daniel.melo/datasets'
-  dataset_names:
+  dataset_names:          # Datasets used for training and validation (k-fold split)
     - billboard
     - dj_avan
     - jaah

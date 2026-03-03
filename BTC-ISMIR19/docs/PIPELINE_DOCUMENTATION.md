@@ -563,6 +563,24 @@ python train_decomposed.py \
     --wandb_entity teste-time
 ```
 
+#### Treino com datasets específicos (override do config)
+
+```bash
+# Treina/valida apenas com billboard+jaah+queen (ignora config)
+python train_decomposed.py \
+    --config run_config.yaml \
+    --backbone chordformer \
+    --kfold 0 \
+    --train_datasets billboard jaah queen \
+    --run_name cf_3ds_k0 \
+    --num_epochs 100 \
+    --batch_size 128 \
+    --learning_rate 0.0001 \
+    --use_gradnorm
+```
+
+Os datasets passados via `--train_datasets` são usados tanto para treino (4 folds) quanto para validação (1 fold), seguindo a lógica de k-fold.
+
 #### Treino Rápido (smoke test)
 
 ```bash
@@ -596,6 +614,7 @@ python quick_test_decomposed.py --backbone chordformer
 | `--use_class_weights` | - | Forçar rebalanceamento por classe |
 | `--no_class_weights` | - | Desativar rebalanceamento por classe |
 | `--class_weights_mode` | auto | Estratégia de class weights (`auto`, `compute`, `load`) |
+| `--train_datasets` | config | Datasets para treino/validação (ex: `billboard jaah queen`). Override do config |
 | `--wandb_project` | chordMax | Projeto no Weights & Biases |
 | `--wandb_entity` | None | Entidade/time no W&B |
 | `--wandb_disabled` | - | Desativar logging W&B |

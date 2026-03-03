@@ -269,6 +269,8 @@ def main():
         default='./class_weights_cache',
         help='Cache directory for computed class weights (used by auto/compute modes).'
     )
+    parser.add_argument('--train_datasets', type=str, nargs='+', default=None,
+                       help='Datasets for training/validation (overrides config). Example: --train_datasets billboard jaah queen')
     parser.add_argument('--wandb_api_key', type=str, default=None,
                        help='Weights & Biases API key (or set WANDB_API_KEY env var)')
     parser.add_argument('--wandb_entity', type=str, default=None,
@@ -357,9 +359,9 @@ def main():
     # Prepare datasets
     logger.info("Preparing datasets...")
     
-    # Get data root and dataset names from config
+    # Get data root and dataset names (CLI overrides config)
     data_root = config.experiment.get('data_root', config.path.get('root_path', '/data/music/chord_recognition'))
-    dataset_names = config.experiment.get('dataset_names', ['billboard'])
+    dataset_names = args.train_datasets if args.train_datasets else config.experiment.get('dataset_names', ['billboard'])
     
     logger.info(f"Data root: {data_root}")
     logger.info(f"Datasets: {dataset_names}")
@@ -712,7 +714,7 @@ def main():
             'gradnorm_eps': config.model.get('gradnorm_eps', 1e-8),
             'gradnorm_w_min': config.model.get('gradnorm_w_min', 1e-3),
         },
-        'datasets': dataset_names,
+        'datasets': list(dataset_names),
         'data_root': data_root,
         'train_samples': len(train_dataset),
         'val_samples': len(val_dataset),
@@ -977,7 +979,7 @@ def main():
     logger.info(f"Checkpoints saved to: {output_dir}")
 
     if wandb_enabled:
-        wandb.log({
+        final_wandb_log = {
             'model/final_train_loss': float(training_history['train_loss'][-1]) if training_history['train_loss'] else None,
             'model/final_val_loss': float(training_history['val_loss'][-1]) if training_history['val_loss'] else None,
             'model/best_val_loss': float(best_val_loss),
@@ -986,7 +988,8 @@ def main():
             'artifacts/history_path': str(history_path),
             'artifacts/output_dir': str(output_dir),
             'epoch': int(args.num_epochs),
-        })
+        }
+        wandb.log(final_wandb_log)
 
         _log_wandb_artifact_safe(
             wandb_run,
