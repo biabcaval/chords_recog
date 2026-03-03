@@ -114,7 +114,7 @@ Refactored BTC model with 9 parallel output heads.
 
 - `MultiHeadChordDecomposer`: Container for all 9 component heads
   ```python
-  decomposer = MultiHeadChordDecomposer(hidden_size=256)
+  decomposer = MultiHeadChordDecomposer(hidden_size=128)
   logits = decomposer(encoder_output)
   # logits = {
   #     'root': tensor (batch, seq_len, 13),
@@ -138,16 +138,22 @@ Refactored BTC model with 9 parallel output heads.
   predictions, loss, weights, component_losses = model(features, labels=labels_dict)
   ```
 
-- `MultiTaskLoss`: Multi-task loss with class re-weighting
+- `MultiTaskLoss`: Multi-task loss with class re-weighting and GradNorm support
   - Computes separate CrossEntropyLoss for each component
   - Applies class weighting: $w_m^{(j)} = \min\left((\frac{n_m^{(j)}}{\max n_{m'}^{(j)}})^{-\gamma}, w_{max}\right)$
+  - Supports static `component_weights` (per-component loss multiplier)
+  - Supports **GradNorm** adaptive task balancing (dynamically learned `w_i`)
   - Parameters: γ = 0.5, w_max = 10.0 (configurable)
   
   ```python
   loss_fn = MultiTaskLoss(
       vocab_sizes={'root': 13, 'bass': 13, ...},
       gamma=0.5,
-      w_max=10.0
+      w_max=10.0,
+      component_weights={'root': 1.0, '11th': 0.3, ...},
+      gradnorm_enabled=True,
+      gradnorm_alpha=1.5,
+      gradnorm_lr=0.025,
   )
   
   # Compute class weights from training data
@@ -155,6 +161,28 @@ Refactored BTC model with 9 parallel output heads.
       train_dataset, gamma=0.5, w_max=10.0
   )
   ```
+
+#### GradNorm Integration
+
+When `gradnorm_enabled=True`, `MultiTaskLoss` maintains a learnable `nn.Parameter` 
+(`gradnorm_weights`) that is updated separately from the main optimizer. The update
+happens in `DecomposedChordTrainer._apply_gradnorm_update()` each training batch:
+
+1. Measures gradient norms per task at the shared encoder output.
+2. Computes relative inverse training rates.
+3. Updates `w_i` to balance gradient contributions across tasks.
+4. Renormalizes so `Σw_i = T` (9 tasks).
+
+```bash
+# Enable GradNorm from CLI
+python train_decomposed.py --use_gradnorm --gradnorm_alpha 1.5 --gradnorm_lr 0.025
+
+# Or configure in run_config.yaml
+# gradnorm:
+#   enabled: True
+#   alpha: 1.5
+#   lr: 0.025
+```
 
 ---
 
@@ -414,7 +442,7 @@ component_weights:                 # Optional: per-component loss weights
 
 ## Advantages of Chord Decomposition
 
-1. **Reduced Vocabulary**: 49 classes vs. ~170 classes
+1. **Reduced Vocabulary**: 51 classes vs. ~170 classes
 2. **Better Generalization**: Shared representations across related chords
 3. **Explicit Structure**: Interpretable predictions for each chord component
 4. **Natural Class Imbalance Handling**: Extensions naturally have fewer samples
@@ -439,16 +467,18 @@ For the decomposition to work seamlessly, ensure:
 ## Performance Notes
 
 ### Memory Usage
-- Reduced model size: ~49x fewer output units vs. monolithic
-- Slightly higher memory during training (8 loss computations)
+- Reduced output units: 51 total vs. 170 monolithic
+- Slightly higher memory during training (9 loss computations)
+- GradNorm adds ~5% compute overhead per batch (gradient norm computation)
 
 ### Training Speed
-- Typically 10-20% faster than monolithic approach due to reduced parameter count
-- Multi-task learning adds minimal overhead
+- Comparable to monolithic approach; multi-task loss adds minimal overhead
+- GradNorm: extra autograd pass per batch for gradient norm measurement
 
 ### Inference Speed
 - Comparable or slightly faster than monolithic approach
 - Batch decoding of components is efficient
+- No GradNorm overhead at inference (weights are frozen)
 
 ---
 

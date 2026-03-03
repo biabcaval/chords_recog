@@ -287,7 +287,7 @@ Os arquivos de normalização (mean e std) são salvos em:
 
 Exemplo:
 ```
-/home/daniel.melo/datasets/result/22050_10.0_5.0_cqt_144_24_2048_mix_kfold_2_normalization.pt
+/home/daniel.melo/datasets/result/22050_10.0_5.0_cqt_252_36_2048_mix_kfold_2_normalization.pt
 ```
 
 **Importante:** Este arquivo é necessário para fazer inferências! Ele contém a média e desvio padrão usados na normalização durante o treinamento.

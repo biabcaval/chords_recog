@@ -57,8 +57,8 @@ O áudio é convertido em uma representação tempo-frequência usando **Constan
 | Parâmetro | Valor | Descrição |
 |-----------|-------|-----------|
 | `song_hz` | 22050 | Taxa de amostragem |
-| `n_bins` | 144 | Número de bins de frequência |
-| `bins_per_octave` | 24 | Bins por oitava (2 por semitom) |
+| `n_bins` | 252 | Número de bins de frequência |
+| `bins_per_octave` | 36 | Bins por oitava (3 por semitom) |
 | `hop_length` | 2048 | Salto entre frames (~93ms) |
 
 **Cálculo:**
@@ -70,7 +70,7 @@ frame_duration = hop_length / song_hz  # 2048/22050 ≈ 0.093s
 fmin = librosa.note_to_hz('C1')  # ~32.7 Hz
 ```
 
-**Saída:** Matriz `(n_bins, n_frames)` = `(144, T)`
+**Saída:** Matriz `(n_bins, n_frames)` = `(252, T)`
 
 ### 2.2 Segmentação
 
@@ -100,7 +100,7 @@ Cada segmento é salvo como um arquivo PyTorch:
 
 ```python
 {
-    'feature': np.array,              # Shape: (144, 108) - CQT features
+    'feature': np.array,              # Shape: (252, 108) - CQT features
     'chord': list,                    # Lista de índices de acordes por frame
     'original_chords': list,          # Índices originais (backup)
     'original_chord_labels': list,    # Labels originais com extensões (ex: 'C:maj7(9)')
@@ -112,7 +112,7 @@ Cada segmento é salvo como um arquivo PyTorch:
 > `scripts/add_original_labels.py` e permite capturar extensões 9th, 11th, 13th que são
 > simplificadas no vocabulário padrão de 170 classes.
 
-**Localização:** `/datasets/result_decomposed/{dataset}_voca/22050_10.0_5.0/cqt_144_24_2048/{song}/`
+**Localização:** `/datasets/result/{dataset}_voca/22050_10.0_5.0/cqt_252_36_2048/{song}/`
 
 ### 2.5 Adicionando Labels Originais aos Arquivos .pt
 
@@ -239,7 +239,7 @@ class AudioDatasetStructured(Dataset):
         
         # 2. Processa features
         features = np.log(np.abs(data['feature']) + 1e-6)
-        features = features.T  # (T, 144)
+        features = features.T  # (T, 252)
         
         # 3. Converte índices para labels
         chord_labels = self._get_chord_labels(data['chord'])
@@ -250,7 +250,7 @@ class AudioDatasetStructured(Dataset):
         # {'root': [9, 9, ...], 'triad': [2, 2, ...], ...}
         
         return {
-            'feature': torch.FloatTensor(features),  # (108, 144)
+            'feature': torch.FloatTensor(features),  # (108, 252)
             'chord': chord_labels,                    # lista original
             'components': components                  # dict de tensores
         }
@@ -262,7 +262,7 @@ Agrupa amostras em batches:
 
 ```python
 def _collate_fn_structured(batch):
-    # Stack features: (B, T, F) = (batch, 108, 144)
+    # Stack features: (B, T, F) = (batch, 108, 252)
     features = torch.stack([s['feature'] for s in batch])
     
     # Stack components: (B, T) para cada componente
@@ -272,7 +272,7 @@ def _collate_fn_structured(batch):
     }
     
     return {
-        'features': features,      # (B, 108, 144)
+        'features': features,      # (B, 108, 252)
         'components': components   # Dict[str, Tensor(B, 108)]
     }
 ```
@@ -284,7 +284,7 @@ def _collate_fn_structured(batch):
 │                        DataLoader                                 │
 ├──────────────────────────────────────────────────────────────────┤
 │  Arquivo .pt                                                      │
-│  ├── feature: (144, T)                                           │
+│  ├── feature: (252, T)                                           │
 │  ├── chord: ['130', '130', '45', ...]  (índices como strings)    │
 │  └── original_chords: [...]                                      │
 │                           │                                       │
@@ -299,7 +299,7 @@ def _collate_fn_structured(batch):
 │                           │                                       │
 │                           ▼                                       │
 │  Batch Output:                                                    │
-│  ├── features: (B, 108, 144)                                     │
+│  ├── features: (B, 108, 252)                                     │
 │  └── components:                                                  │
 │      ├── root:  (B, 108) - valores 0-12                          │
 │      ├── bass:  (B, 108) - valores 0-12                          │
@@ -316,10 +316,10 @@ def _collate_fn_structured(batch):
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    BTC_model_decomposed                          │
+│              BTC / ChordFormer _model_decomposed                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  Input: (B, T, F) = (batch, 108, 144)                           │
+│  Input: (B, T, F) = (batch, 108, 252)                           │
 │                           │                                      │
 │                           ▼                                      │
 │  ┌─────────────────────────────────────────────────────────┐    │
@@ -418,17 +418,30 @@ class MultiHeadChordDecomposer(nn.Module):
         return {name: head(x) for name, head in self.heads.items()}
 ```
 
-### 5.3 Parâmetros do Modelo
+### 5.3 Backbones Disponíveis
+
+O modelo decomposed suporta dois backbones via `--backbone`:
+
+| Backbone | Encoder | Quando usar |
+|----------|---------|-------------|
+| `btc` | Self-attention bidirecional | Baseline, comparação com trabalhos anteriores |
+| `chordformer` | Conformer (atenção + conv depthwise) | Melhor captura de padrões locais e dependências longas |
+
+### 5.4 Parâmetros do Modelo
 
 | Parâmetro | Valor | Descrição |
 |-----------|-------|-----------|
-| `input_size` | 144 | Dimensão das features CQT |
+| `feature_size` | 252 | Dimensão das features CQT (= `n_bins`) |
 | `hidden_size` | 128 | Dimensão interna |
-| `num_layers` | 6 | Camadas do transformer |
+| `num_layers` | 12 | Blocos do encoder |
 | `num_heads` | 4 | Cabeças de atenção |
-| `dropout` | 0.1 | Taxa de dropout |
+| `input_dropout` | 0.2 | Dropout na entrada do encoder |
+| `layer_dropout` | 0.2 | Dropout dentro dos blocos |
+| `output_dropout` | 0.0 | Dropout nas cabeças de saída |
+| `conv_kernel_size` | 31 | Kernel da conv depthwise (ChordFormer) |
+| `ff_expansion_factor` | 4 | Expansão da FFN (ChordFormer) |
 
-**Total de parâmetros:** ~2.9M
+**Total de parâmetros:** ~4.65M (ChordFormer, 12 layers, hidden=128)
 
 ---
 
@@ -482,30 +495,45 @@ Componente '7th':
   - 'bb7':    500 frames → weight = 10.0 (capped)
 ```
 
-### 6.3 Código
+### 6.3 GradNorm (Balanceamento Adaptativo de Tarefas)
 
-```python
-def compute_class_weights(self, train_dataset, gamma=0.5, w_max=10.0):
-    # Conta ocorrências de cada classe
-    counts = {comp: defaultdict(int) for comp in COMPONENT_NAMES}
-    
-    for sample in train_dataset:
-        for comp in COMPONENT_NAMES:
-            for idx in sample['components'][comp]:
-                counts[comp][idx] += 1
-    
-    # Calcula pesos
-    weights = {}
-    for comp in COMPONENT_NAMES:
-        max_count = max(counts[comp].values())
-        w = []
-        for class_idx in range(vocab_size[comp]):
-            count = counts[comp][class_idx]
-            weight = min((count / max_count) ** (-gamma), w_max)
-            w.append(weight)
-        weights[comp] = torch.tensor(w)
-    
-    return weights
+O GradNorm ajusta dinamicamente os pesos `w_i` de cada componente durante o treino, baseado na velocidade relativa de aprendizado de cada tarefa.
+
+**Algoritmo (por batch):**
+1. Calcula perda bruta `L_i` por componente.
+2. Mede norma de gradiente `G_i = ||∇_W (w_i L_i)||` na camada compartilhada final.
+3. Calcula taxa relativa `r_i = (L_i/L_i(0)) / mean(L_j/L_j(0))`.
+4. Define alvo `G_i* = mean(G) * r_i^alpha`.
+5. Minimiza `L_grad = Σ|G_i - G_i*|` atualizando apenas `w_i`.
+6. Renormaliza `Σw_i = 9` (T = número de tarefas).
+
+**Hiperparâmetros:**
+
+| Parâmetro | Default | Descrição |
+|-----------|---------|-----------|
+| `alpha` | 1.5 | Força de balanceamento (maior = mais agressivo) |
+| `lr` | 0.025 | Learning rate dos pesos GradNorm |
+| `eps` | 1e-8 | Estabilidade numérica |
+| `w_min` | 1e-3 | Peso mínimo por tarefa |
+
+**Uso via CLI:**
+
+```bash
+python train_decomposed.py \
+    --use_gradnorm \
+    --gradnorm_alpha 1.5 \
+    --gradnorm_lr 0.025
+```
+
+**Configuração em `run_config.yaml`:**
+
+```yaml
+gradnorm:
+  enabled: False
+  alpha: 1.5
+  lr: 0.025
+  eps: 1.0e-8
+  w_min: 1.0e-3
 ```
 
 ---
@@ -583,9 +611,21 @@ python quick_test_decomposed.py --backbone both
 | `--gamma` | 0.5 | Expoente do class weighting |
 | `--w_max` | 10.0 | Peso máximo por classe |
 | `--backbone` | btc | Backbone do modelo (`btc` ou `chordformer`) |
+| `--kfold` | 4 | Índice do k-fold para validação (0-4) |
 | `--log_interval` | 10 | Intervalo de log (batches) |
 | `--val_interval` | 1 | Intervalo de validação (epochs) |
 | `--resume` | None | Checkpoint para continuar treino |
+| `--use_gradnorm` | - | Ativar GradNorm |
+| `--no_gradnorm` | - | Desativar GradNorm |
+| `--gradnorm_alpha` | 1.5 | Força de balanceamento GradNorm |
+| `--gradnorm_lr` | 0.025 | Learning rate dos pesos GradNorm |
+| `--component_weights` | None | Pesos estáticos por componente (`root=1,11th=0.3,...`) |
+| `--use_class_weights` | - | Forçar rebalanceamento por classe |
+| `--no_class_weights` | - | Desativar rebalanceamento por classe |
+| `--class_weights_mode` | auto | Estratégia de class weights (`auto`, `compute`, `load`) |
+| `--wandb_project` | chordMax | Projeto no Weights & Biases |
+| `--wandb_entity` | None | Entidade/time no W&B |
+| `--wandb_disabled` | - | Desativar logging W&B |
 
 ### 7.3 Estrutura de Checkpoints
 
@@ -634,7 +674,7 @@ Cada checkpoint `.pt` contém:
         'batch_size': 32,
         'model_config': {
             'hidden_size': 128,
-            'num_layers': 8,
+            'num_layers': 12,
             ...
         },
         'datasets': ['billboard', 'dj_avan', ...],
@@ -695,18 +735,28 @@ experiment:
   batch_size: 128
 
 model:
+  feature_size: 252
   hidden_size: 128
-  num_layers: 8
+  num_layers: 12
   num_heads: 4
   input_dropout: 0.2
   layer_dropout: 0.2
-  attention_dropout: 0.2
-  relu_dropout: 0.2
+  output_dropout: 0.0
+  conv_kernel_size: 31
+  ff_expansion_factor: 4
+  conv_expansion_factor: 2
 
 class_weights:
   enabled: True
   gamma: 0.5
   w_max: 10.0
+
+gradnorm:
+  enabled: False
+  alpha: 1.5
+  lr: 0.025
+  eps: 1.0e-8
+  w_min: 1.0e-3
 ```
 
 ### 7.7.1 Cache de Class Weights (novo fluxo recomendado)
@@ -792,7 +842,7 @@ A loss está na escala de ~2.0 porque é a soma de 9 componentes (média ~0.22 p
 │                         Inferência                               │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  Áudio → CQT Features → Modelo → 8 Outputs                      │
+│  Áudio → CQT Features → Modelo → 9 Outputs                      │
 │                                                                  │
 │  Para cada frame t:                                              │
 │  ┌─────────────────────────────────────────────────────────┐    │
@@ -875,41 +925,51 @@ class ChordReassembler:
 
 #### Inferência em Áudio Completo
 
-O script `infer_full_audio.py` processa um arquivo de áudio completo e reconhece acordes:
+O script `infer_full_audio.py` processa um arquivo de áudio completo e reconhece acordes.
+O backbone é detectado automaticamente a partir do checkpoint (`--backbone auto`):
 
 ```bash
-# Mostrar mudanças de acordes (formato agregado)
+# Mostrar mudanças de acordes (detecção automática de backbone)
 python infer_full_audio.py \
-    --checkpoint checkpoints/model_best.pt \
+    --config run_config.yaml \
+    --checkpoint checkpoints/cf_gradnorm_a15_k0/model_best.pt \
     --audio_file musica.mp3 \
     --device cuda
 
-# Mostrar TODOS os frames (primeiros 500)
+# Forçar backbone ChordFormer
 python infer_full_audio.py \
-    --checkpoint checkpoints/model_best.pt \
+    --config run_config.yaml \
+    --checkpoint checkpoints/cf_gradnorm_a15_k0/model_best.pt \
     --audio_file musica.mp3 \
-    --device cuda \
-    --show_all
+    --backbone chordformer
 
 # Salvar resultado em arquivo .lab
 python infer_full_audio.py \
-    --checkpoint checkpoints/model_best.pt \
+    --config run_config.yaml \
+    --checkpoint checkpoints/cf_gradnorm_a15_k0/model_best.pt \
     --audio_file musica.mp3 \
-    --device cuda \
     --output resultado.lab
+
+# Mostrar TODOS os frames (primeiros 500)
+python infer_full_audio.py \
+    --config run_config.yaml \
+    --checkpoint checkpoints/cf_gradnorm_a15_k0/model_best.pt \
+    --audio_file musica.mp3 \
+    --show_all
 ```
 
 **Parâmetros:**
 
 | Parâmetro | Descrição |
 |-----------|-----------|
-| `--checkpoint` | Caminho para o modelo treinado |
-| `--audio_file` | Arquivo de áudio (mp3, wav, etc.) |
 | `--config` | Arquivo de configuração (default: run_config.yaml) |
+| `--checkpoint` | Caminho para o modelo treinado (.pt) |
+| `--audio_file` | Arquivo de áudio (mp3, wav, etc.) |
+| `--backbone` | `auto` (detecta do checkpoint), `btc` ou `chordformer` |
 | `--device` | cuda ou cpu |
 | `--show_all` | Mostra todos os frames, não apenas mudanças |
 | `--max_frames` | Limite de frames a exibir (default: 500) |
-| `--output` | Salvar resultado em arquivo |
+| `--output` | Salvar resultado em arquivo .lab |
 
 **Exemplo de Output:**
 
@@ -939,7 +999,7 @@ python infer_full_audio.py \
 
 ```python
 import torch
-from models.btc_model_decomposed import BTC_model_decomposed
+from models.btc_model_decomposed import ChordFormer_model_decomposed
 from utils.chord_decomposition import ChordReassembler, COMPONENT_NAMES
 from utils.hparams import HParams
 import librosa
@@ -947,19 +1007,19 @@ import numpy as np
 
 # Carregar modelo
 config = HParams.load('run_config.yaml')
-model = BTC_model_decomposed(config=config.model)
-checkpoint = torch.load('checkpoints/model_best.pt', map_location='cpu')
+checkpoint = torch.load('checkpoints/cf_gradnorm_a15_k0/model_best.pt', map_location='cpu')
+model = ChordFormer_model_decomposed(config=config)
 model.load_state_dict(checkpoint['model_state_dict'], strict=False)
 model.eval()
 
 # Carregar áudio e extrair features
 y, sr = librosa.load('musica.mp3', sr=22050)
-cqt = librosa.cqt(y, sr=sr, n_bins=144, bins_per_octave=24, hop_length=2048)
+cqt = librosa.cqt(y, sr=sr, n_bins=252, bins_per_octave=36, hop_length=2048)
 feature = np.log(np.abs(cqt) + 1e-6)
 
 # Preparar input (primeiro chunk de 108 frames)
-chunk = feature[:, :108].T  # (108, 144)
-x = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0)  # (1, 108, 144)
+chunk = feature[:, :108].T  # (108, 252)
+x = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0)  # (1, 108, 252)
 
 # Inferência
 with torch.no_grad():
@@ -1029,7 +1089,7 @@ Total frames evaluated: 150,000
 - **Root 85%**: O modelo identifica a nota fundamental corretamente em 85% dos frames
 - **Triad 82%**: Distingue bem entre maj/min/dim/aug
 - **9th/11th/13th baixo F1**: Classes raras, difíceis de prever, mas alta acurácia (maioria é 'N')
-- **Full Chord 65%**: Quando exigimos todos os 8 corretos simultaneamente
+- **Full Chord 65%**: Quando exigimos todos os 9 componentes corretos simultaneamente
 
 ---
 
@@ -1079,8 +1139,8 @@ Verifica se o modelo processa corretamente dados sintéticos:
 ======================================================================
 TEST: Forward Pass with Synthetic Data
 ======================================================================
-Input shape: torch.Size([2, 1, 144, 108])
-Expected: (batch=2, 1, features=144, seq_len=108)
+Input shape: torch.Size([2, 1, 252, 108])
+Expected: (batch=2, 1, features=252, seq_len=108)
 
 --- Predictions ---
   root  : shape=[2, 108], unique=[0, 1, 2, 3, 4]...
@@ -1211,29 +1271,47 @@ Isso permite identificar:
 ```
 BTC-ISMIR19/
 ├── data/
-│   ├── audio_dataset.py              # Dataset base
-│   └── audio_dataset_structured.py   # Dataset com decomposição (9 componentes)
+│   ├── audio_dataset.py              # Dataset base (k-fold, augment)
+│   ├── audio_dataset_structured.py   # Dataset com decomposição (9 componentes)
+│   └── curriculum_learning.py        # Curriculum learning
 ├── models/
-│   └── btc_model_decomposed.py       # Modelo multi-head (9 cabeças)
+│   ├── btc_model.py                  # BTC, BTC_structured, ChordFormer (não-decomposed)
+│   ├── btc_model_decomposed.py       # BTC/ChordFormer decomposed + MultiTaskLoss + GradNorm
+│   ├── baseline_models.py            # CNN, CRNN
+│   └── crf_model.py                  # CRF
 ├── utils/
-│   ├── chord_decomposition.py        # ChordDecomposer & Reassembler
-│   ├── decomposed_inference.py       # Trainer, Inference, Metrics
-│   ├── mir_eval_modules.py           # idx2voca_chord mapping
-│   └── evaluation_metrics.py         # Métricas de avaliação
+│   ├── chord_decomposition.py        # ChordDecomposer & Reassembler (9 componentes)
+│   ├── decomposed_inference.py       # DecomposedChordTrainer, Inference, Metrics, GradNorm update
+│   ├── transformer_modules.py        # ConformerEncoder, BTC blocks, output layers
+│   ├── mir_eval_modules.py           # idx2voca_chord, scoring
+│   ├── preprocess.py                 # Feature extraction (CQT)
+│   ├── hparams.py                    # HParams (YAML config loader)
+│   └── chords.py                     # Chord vocab e intervalos
 ├── scripts/
+│   ├── preprocess_datasets.py        # Preprocessing principal
+│   ├── preprocess_decomposed.py      # Preprocessing decomposed
 │   ├── add_original_labels.py        # Adiciona labels originais aos .pt
-│   └── preprocess_with_extensions.py # Análise de extensões em .lab
-├── train_decomposed.py               # Script de treinamento
-├── debug_model.py                    # Script de debug e testes
-├── infer_full_audio.py               # Inferência em áudio completo
-├── evaluate_model.py                 # Script de avaliação
-└── run_config.yaml                   # Configurações
+│   ├── precompute_class_weights_decomposed.py  # Cache de class weights
+│   ├── diagnose_decomposition_mismatch.py      # Diagnóstico train/val
+│   └── convert_to_decomposed.py      # Converte .pt 170-class → decomposed
+├── train_decomposed.py               # Treino decomposed (BTC/ChordFormer, GradNorm, wandb)
+├── train_curriculum.py               # Treino legado (curriculum learning)
+├── infer_decomposed.py               # Inferência janela única
+├── infer_full_audio.py               # Inferência áudio completo (chunks)
+├── debug_model.py                    # Debug e testes do modelo
+├── quick_test_decomposed.py          # Smoke test rápido
+└── run_config.yaml                   # Configurações centrais
 ```
 
 ---
 
 ## Referências
 
-1. **BTC: Bitransformer for Chord Recognition** - Modelo base
-2. **Chord Structure Decomposition** - Técnica de decomposição
-3. **mir_eval** - Biblioteca padrão para avaliação MIR
+1. **BTC: Bi-directional Transformer for Musical Chord Recognition** (ISMIR 2019) - Modelo base
+2. **ChordFormer: Conformer-based chord recognition** - Encoder Conformer + decomposição multi-tarefa
+3. **GradNorm: Gradient Normalization for Adaptive Loss Balancing** (ICML 2018) - Balanceamento adaptativo de tarefas
+4. **mir_eval** - Biblioteca padrão para avaliação MIR
+
+---
+
+**Última atualização:** Fevereiro 2026
