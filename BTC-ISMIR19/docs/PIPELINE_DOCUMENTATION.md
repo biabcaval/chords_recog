@@ -1027,6 +1027,148 @@ for t in range(10):  # Primeiros 10 frames
     print(f"{time_sec:.2f}s: {chord}")
 ```
 
+### 8.5 Avaliação em Batch: Inferência + Métricas
+
+Para avaliar o modelo treinado em um dataset de teste completo e gerar relatórios CSV com métricas, o fluxo é dividido em dois passos:
+
+```
+┌─────────────────┐     ┌──────────────────────────────┐     ┌──────────────────────┐
+│  Checkpoint     │────▶│ run_inference_batch_          │────▶│  Pasta com .lab      │
+│  (model_best.pt)│     │ decomposed.py                │     │  preditos            │
+└─────────────────┘     └──────────────────────────────┘     └──────────┬───────────┘
+                                                                        │
+┌─────────────────┐     ┌──────────────────────────────┐                │
+│  Ground Truth   │────▶│ generate_metrics_csv.py       │◀───────────────┘
+│  (.lab anotados)│     └──────────────────────────────┘
+└─────────────────┘                    │
+                                       ▼
+                          ┌──────────────────────┐
+                          │  metrics_per_track.csv│
+                          │  metrics_summary.csv  │
+                          └──────────────────────┘
+```
+
+#### Passo 1: Inferência Batch (`run_inference_batch_decomposed.py`)
+
+Processa todos os áudios de um dataset e gera arquivos `.lab` com as predições.
+
+**Com `--test_dataset` (resolve o caminho automaticamente do config):**
+
+```bash
+python run_inference_batch_decomposed.py \
+    --checkpoint /caminho/para/checkpoints/model_best.pt \
+    --test_dataset rwc \
+    --backbone chordformer
+```
+
+**Com `--audio_dir` (caminho explícito para os áudios):**
+
+```bash
+python run_inference_batch_decomposed.py \
+    --checkpoint /caminho/para/checkpoints/model_best.pt \
+    --audio_dir /home/daniel.melo/datasets/rwc/audio \
+    --output_dir ./inferences_decomposed/chordformer_rwc \
+    --backbone chordformer
+```
+
+**Parâmetros:**
+
+| Parâmetro | Default | Descrição |
+|-----------|---------|-----------|
+| `--checkpoint` | (obrigatório) | Caminho do `.pt` do modelo treinado |
+| `--test_dataset` | — | Nome do dataset (`rwc`, `dj_avan`, `billboard`, `jaah`, `queen`, `robbiewilliams`). Resolve `audio_dir` do config |
+| `--audio_dir` | — | Alternativa: caminho direto para a pasta de áudios. Mutuamente exclusivo com `--test_dataset` |
+| `--backbone` | `chordformer` | Backbone do modelo: `chordformer`, `btc`, ou `auto` (detecta do checkpoint) |
+| `--config` | `run_config.yaml` | Arquivo de configuração |
+| `--output_dir` | (auto) | Pasta de saída dos `.lab`. Se omitido, gera em `./inferences_decomposed/inference_<exp>_test_<ds>/` |
+| `--output_base` | `./inferences_decomposed` | Base para nomes de pasta auto-gerados |
+| `--exp_name` | (do checkpoint) | Nome do experimento para a pasta de saída |
+| `--device` | `cuda` | Dispositivo (`cuda`, `cpu`) |
+
+**Saída:** Uma pasta com um arquivo `.lab` por música, no formato:
+
+```
+0.000 3.240 C:maj
+3.240 6.480 G:min7
+6.480 10.020 F:maj
+```
+
+#### Passo 2: Gerar Métricas (`generate_metrics_csv.py`)
+
+Compara os `.lab` preditos contra os `.lab` de referência (ground truth) do dataset de teste usando `mir_eval`.
+
+```bash
+python generate_metrics_csv.py \
+    --inference_dir ./inferences_decomposed/chordformer_rwc \
+    --gt_dir /home/daniel.melo/datasets/rwc/annotations
+```
+
+**Parâmetros:**
+
+| Parâmetro | Default | Descrição |
+|-----------|---------|-----------|
+| `--inference_dir` | (obrigatório) | Pasta com os `.lab` preditos |
+| `--gt_dir` | (obrigatório) | Pasta com os `.lab` de ground truth |
+| `--output_dir` | `./metrics_results` | Onde salvar os CSVs |
+| `--prefix` | `metrics` | Prefixo dos nomes dos CSVs |
+
+**Saída:** Dois CSVs em `--output_dir`:
+
+| Arquivo | Conteúdo |
+|---------|----------|
+| `{prefix}_per_track.csv` | Métricas por música: root, majmin, thirds, triads, tetrads, sevenths, mirex, segmentation, etc. |
+| `{prefix}_summary.csv` | Médias, desvios padrão e WCSR (Weighted Chord Symbol Recall) de cada métrica |
+
+**Métricas calculadas (via `mir_eval.chord.evaluate`):**
+
+| Métrica | Descrição |
+|---------|-----------|
+| root | Acurácia da nota fundamental |
+| majmin | Acurácia maior/menor |
+| thirds | Acurácia considerando terças |
+| triads | Acurácia de tríades completas |
+| tetrads | Acurácia de tétrades (com 7ª) |
+| sevenths | Acurácia da sétima |
+| mirex | Score MIREX ACE |
+| overseg / underseg / seg | Métricas de segmentação |
+| WCSR (por métrica) | Weighted Chord Symbol Recall — pondera pela duração de cada música |
+
+#### Exemplo Completo
+
+```bash
+cd /home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19
+
+# Passo 1: Inferência no RWC
+python run_inference_batch_decomposed.py \
+    --checkpoint /caminho/checkpoints/model_best.pt \
+    --test_dataset rwc \
+    --backbone chordformer \
+    --output_dir ./inferences_decomposed/chordformer_rwc
+
+# Passo 2: Métricas
+python generate_metrics_csv.py \
+    --inference_dir ./inferences_decomposed/chordformer_rwc \
+    --gt_dir /home/daniel.melo/datasets/rwc/annotations \
+    --prefix chordformer_rwc
+```
+
+Para testar no Djavan, basta trocar os caminhos:
+
+```bash
+python run_inference_batch_decomposed.py \
+    --checkpoint /caminho/checkpoints/model_best.pt \
+    --test_dataset dj_avan \
+    --backbone chordformer \
+    --output_dir ./inferences_decomposed/chordformer_djavan
+
+python generate_metrics_csv.py \
+    --inference_dir ./inferences_decomposed/chordformer_djavan \
+    --gt_dir /home/daniel.melo/datasets/dj_avan/annotations \
+    --prefix chordformer_djavan
+```
+
+O `--prefix` diferencia os CSVs para não sobrescrever resultados anteriores.
+
 ---
 
 ## 9. Métricas de Avaliação
@@ -1289,6 +1431,8 @@ BTC-ISMIR19/
 ├── train_curriculum.py               # Treino legado
 ├── infer_decomposed.py               # Inferência janela única
 ├── infer_full_audio.py               # Inferência áudio completo (chunks)
+├── run_inference_batch_decomposed.py # Inferência batch em dataset completo → .lab
+├── generate_metrics_csv.py           # Compara .lab preditos vs ground truth → CSVs de métricas
 ├── debug_model.py                    # Debug e testes do modelo
 ├── quick_test_decomposed.py          # Smoke test rápido
 └── run_config.yaml                   # Configurações centrais
