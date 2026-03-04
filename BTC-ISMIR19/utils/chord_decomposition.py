@@ -465,7 +465,7 @@ class ChordReassembler:
         if ext_7th == 'N' and not has_ext:
             # No 7th and no higher extensions — plain triad (+ optional 6th)
             chord = f"{root}:{triad}"
-            if ext_6th != 'N':
+            if ext_6th != 'N' and triad in ('maj', 'min'):
                 chord = f"{root}:{triad}6"
         elif ext_7th == '7':
             # Major 7th interval
