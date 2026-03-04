@@ -453,25 +453,56 @@ class ChordReassembler:
         if triad == 'N':
             return 'N'
         
-        # Build chord string: root:triad
-        chord = f"{root}:{triad}"
-        
-        # Add extensions in order: 7th, 9th, 11th, 13th
-        # Extensions are added sequentially as they appear in chord notation
+        # Add extensions in order: 6th, 7th, 9th, 11th, 13th
+        ext_6th = components.get('6th', 'N')
         ext_7th = components.get('7th', 'N')
         ext_9th = components.get('9th', 'N')
         ext_11th = components.get('11th', 'N')
         ext_13th = components.get('13th', 'N')
-        
-        # Add extensions in standard notation order
-        if ext_7th != 'N':
-            chord += ext_7th
+
+        has_ext = ext_7th != 'N' or ext_9th != 'N' or ext_11th != 'N' or ext_13th != 'N'
+
+        if ext_7th == 'N' and not has_ext:
+            # No 7th and no higher extensions — plain triad (+ optional 6th)
+            chord = f"{root}:{triad}"
+            if ext_6th != 'N':
+                chord = f"{root}:{triad}6"
+        elif ext_7th == '7':
+            # Major 7th interval
+            if triad == 'min':
+                chord = f"{root}:minmaj7"
+            else:
+                chord = f"{root}:{triad}7"
+        elif ext_7th == 'b7':
+            # Minor / dominant 7th interval
+            if triad == 'maj':
+                chord = f"{root}:7"
+            elif triad == 'min':
+                chord = f"{root}:min7"
+            elif triad == 'dim':
+                chord = f"{root}:hdim7"
+            elif triad == 'aug':
+                chord = f"{root}:aug7"
+            elif triad in ('sus2', 'sus4'):
+                chord = f"{root}:{triad}(b7)"
+            else:
+                chord = f"{root}:{triad}7"
+        elif ext_7th == 'bb7':
+            # Diminished 7th interval
+            if triad == 'dim':
+                chord = f"{root}:dim7"
+            else:
+                chord = f"{root}:{triad}7"
+        else:
+            chord = f"{root}:{triad}"
+
+        # Higher extensions as parenthetical — mir_eval standard
         if ext_9th != 'N':
-            chord += ext_9th
+            chord += f"({ext_9th})"
         if ext_11th != 'N':
-            chord += ext_11th
+            chord += f"({ext_11th})"
         if ext_13th != 'N':
-            chord += ext_13th
+            chord += f"({ext_13th})"
         
         # Add bass note if different from root
         if bass != 'N' and bass != root:
