@@ -18,8 +18,8 @@ feature:
 # =============================================================================
 
 experiment:
-  learning_rate: 0.0001
-  weight_decay: 0.00
+  learning_rate:  0.0001
+  weight_decay: 0.001
   max_epoch: 100
   scheduler_t_max: 100
   batch_size: 128
@@ -27,53 +27,6 @@ experiment:
   data_ratio: 0.8
   data_root: '/home/daniel.melo/datasets'
   dataset_names:
-    - billboard
-    - dj_avan
-    - jaah
-    - queen
-    - robbiewilliams
-    - rwc
-
-class_weights:
-  enabled: True
-  gamma: 0.5
-  w_max: 10.0
-
-gradnorm:
-  enabled: False
-  alpha: 1.5
-  lr: 0.025
-  eps: 1.0e-8
-  w_min: 1.0e-3
-
-curriculum:
-  enabled: False
-  strategy: 'mixed'
-  pacing: 'linear'
-  start_ratio: 0.3
-  pace_epochs: 30
-  difficulty_threshold: 0.5
-  warmup_epochs: 5
-
-# =============================================================================
-# Model — ChordMax (ChordFormer + decomposed multi-head output)
-# =============================================================================
-
-model:
-  # --- Input geometry ---
-  feature_size: 252          # Must match feature.n_bins
-  timestep: 108              # Sequence length per encoder window
-
-  # --- Conformer encoder ---
-  num_layers: 12             # Number of Conformer blocks
-  num_heads: 4               # Attention heads per block
-  hidden_size: 128           # Channel width throughout the encoder
-  conv_kernel_size: 31       # Depthwise-conv kernel (larger = wider temporal context)
-  ff_expansion_factor: 4     # FFN expansion ratio inside Conformer blocks
-  conv_expansion_factor: 2   # Conv module channel expansion ratio
-
-  # --- Dropout ---
-  input_dropout: 0.2         # Dropout at encoder input
   layer_dropout: 0.2         # Dropout inside each Conformer block
   output_dropout: 0.0        # Dropout in each decomposed output head
 
@@ -107,3 +60,50 @@ path:
   result_path: '/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/results'
   asset_path: '/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/assets'
   root_path: '/home/daniel.melo/datasets'
+    - billboard
+    - dj_avan
+    - jaah
+    - queen
+    - robbiewilliams
+    - rwc
+
+class_weights:
+  enabled: True
+  gamma: 0.5
+  w_max: 10.0
+
+gradnorm:
+  enabled: False
+  alpha: 0.7
+  lr: 0.005
+  eps: 1.0e-8
+  w_min: 1.0e-3
+
+curriculum:
+  enabled: False
+  strategy: 'mixed'
+  pacing: 'linear'
+  start_ratio: 0.3
+  pace_epochs: 30
+  difficulty_threshold: 0.5
+  warmup_epochs: 5
+
+# =============================================================================
+# Model — ChordMax (ChordFormer + decomposed multi-head output)
+# =============================================================================
+
+model:
+  # --- Input geometry ---
+  feature_size: 252          # Must match feature.n_bins
+  timestep: 108              # Sequence length per encoder window
+
+  # --- Conformer encoder ---
+  num_layers: 12             # Number of Conformer blocks
+  num_heads: 4               # Attention heads per block
+  hidden_size: 128           # Channel width throughout the encoder
+  conv_kernel_size: 31       # Depthwise-conv kernel (larger = wider temporal context)
+  ff_expansion_factor: 4     # FFN expansion ratio inside Conformer blocks
+  conv_expansion_factor: 2   # Conv module channel expansion ratio
+
+  # --- Dropout ---
+  input_dropout: 0.2         # Dropout at encoder input
