@@ -471,6 +471,8 @@ class ChordReassembler:
             # Major 7th interval
             if triad == 'min':
                 chord = f"{root}:minmaj7"
+            elif triad in ('sus2', 'sus4'):
+                chord = f"{root}:{triad}(7)"
             else:
                 chord = f"{root}:{triad}7"
         elif ext_7th == 'b7':
