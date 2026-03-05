@@ -279,6 +279,9 @@ def main():
                        help='Weights & Biases project name')
     parser.add_argument('--wandb_disabled', action='store_true',
                        help='Disable Weights & Biases logging')
+    parser.add_argument('--normalization', type=str, default=None,
+                       help='Path to normalization .pt file (mean/std). '
+                            'When provided, features are standardized before training.')
     
     args = parser.parse_args()
     
@@ -363,6 +366,13 @@ def main():
     data_root = config.experiment.get('data_root', config.path.get('root_path', '/data/music/chord_recognition'))
     dataset_names = args.train_datasets if args.train_datasets else config.experiment.get('dataset_names', ['billboard'])
     
+    normalization = None
+    if args.normalization:
+        normalization = torch.load(args.normalization, weights_only=False)
+        logger.info(f"Normalization: mean={normalization['mean']:.6f}, std={normalization['std']:.6f}  ({args.normalization})")
+    else:
+        logger.info("Normalization: disabled (raw log-CQT features)")
+
     logger.info(f"Data root: {data_root}")
     logger.info(f"Datasets: {dataset_names}")
     logger.info(f"K-Fold: {args.kfold}")
@@ -375,7 +385,8 @@ def main():
         dataset_names=tuple(dataset_names),
         train=True,
         decompose=True,
-        kfold=args.kfold
+        kfold=args.kfold,
+        normalization=normalization,
     )
     
     val_dataset = AudioDatasetStructured(
@@ -384,7 +395,8 @@ def main():
         dataset_names=tuple(dataset_names),
         train=False,
         decompose=True,
-        kfold=args.kfold
+        kfold=args.kfold,
+        normalization=normalization,
     )
     
     logger.info(f"Training samples: {len(train_dataset)}")
@@ -865,6 +877,12 @@ def main():
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
+
+                    # Feature normalization (None when training without normalization)
+                    'normalization': {
+                        'mean': normalization['mean'],
+                        'std': normalization['std'],
+                    } if normalization is not None else None,
                     
                     # Metrics at save time
                     'metrics': {
@@ -942,6 +960,10 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
+                'normalization': {
+                    'mean': normalization['mean'],
+                    'std': normalization['std'],
+                } if normalization is not None else None,
                 'metrics': {
                     'train_loss': train_loss,
                     'val_loss': val_loss if 'val_loss' in dir() else None,
@@ -957,6 +979,10 @@ def main():
     torch.save({
         'epoch': args.num_epochs,
         'model_state_dict': model.state_dict(),
+        'normalization': {
+            'mean': normalization['mean'],
+            'std': normalization['std'],
+        } if normalization is not None else None,
         'metrics': {
             'final_train_loss': training_history['train_loss'][-1] if training_history['train_loss'] else None,
             'final_val_loss': training_history['val_loss'][-1] if training_history['val_loss'] else None,
