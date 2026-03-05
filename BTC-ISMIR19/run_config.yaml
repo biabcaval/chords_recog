@@ -1,3 +1,7 @@
+# =============================================================================
+# Audio & Feature Extraction
+# =============================================================================
+
 mp3:
   song_hz: 22050
   inst_len: 10.0
@@ -7,19 +11,22 @@ feature:
   n_bins: 252
   bins_per_octave: 36
   hop_length: 2048
-  # large_voca: False
   large_voca: True
 
+# =============================================================================
+# Training
+# =============================================================================
+
 experiment:
-  learning_rate : 0.0001   # Initial LR for Adam (train_decomposed.py uses CLI override if provided)
-  weight_decay : 0.00      # L2 regularization in Adam
-  max_epoch : 100          # Total training epochs
-  scheduler_t_max : 100    # CosineAnnealingLR cycle length in epochs (can be != max_epoch)
-  batch_size : 128         # Number of training windows per optimizer step
-  save_step : 40
-  data_ratio : 0.8
-  data_root : '/home/daniel.melo/datasets'
-  dataset_names:          # Datasets used for training and validation (k-fold split)
+  learning_rate: 0.0001
+  weight_decay: 0.00
+  max_epoch: 100
+  scheduler_t_max: 100
+  batch_size: 128
+  save_step: 40
+  data_ratio: 0.8
+  data_root: '/home/daniel.melo/datasets'
+  dataset_names:
     - billboard
     - dj_avan
     - jaah
@@ -27,69 +34,76 @@ experiment:
     - robbiewilliams
     - rwc
 
-curriculum:
-  enabled: False  # Enable/disable curriculum learning
-  strategy: 'mixed'  # Options: 'chord_complexity', 'change_frequency', 'unique_chords', 'mixed'
-  pacing: 'linear'  # Options: 'linear', 'quadratic', 'exponential', 'step'
-  start_ratio: 0.3  # Start with easiest 30% of data
-  pace_epochs: 30  # Number of epochs to reach 100% data
-  difficulty_threshold: 0.5  # Threshold for "easy" vs "hard" samples
-  warmup_epochs: 5  # Number of epochs with only easy samples
-
-model:
-  # Input geometry
-  feature_size : 252       # Must match feature.n_bins for ChordFormer input projection
-  timestep : 108           # Max sequence length expected by the encoder
-  # num_chords : 25
-  num_chords : 170         # Kept for compatibility; decomposed model predicts components instead
-
-  # Dropout knobs
-  input_dropout : 0.2      # Dropout at encoder input
-  layer_dropout : 0.2      # Dropout inside encoder blocks (Conformer/BTC backbone internals)
-  attention_dropout : 0.2  # BTC-specific attention dropout (ignored by ChordFormer backbone)
-  relu_dropout : 0.2       # BTC-specific FFN dropout (ignored by ChordFormer backbone)
-  output_dropout : 0.0     # Dropout applied in EACH decomposed output head before classifier
-
-  # Core backbone width/depth
-  num_layers : 12          # Number of encoder blocks
-  num_heads : 4            # Attention heads per block
-  hidden_size : 128        # Model channel width
-  total_key_depth : 128
-  total_value_depth : 128
-  filter_size : 128
-  loss : 'ce'
-  probs_out : False
-  
-  # Structured output settings (ChordFormer approach)
-  use_structured_output : False  # Set to True to use structured output
-  num_roots : 13  # 12 pitches + no chord
-  num_qualities : 16  # 14 qualities + no chord + unknown
-  num_bass : 13  # 12 pitches + no bass
-  root_weight : 1.0  # Global weight for root loss component
-  quality_weight : 1.0  # Global weight for quality loss component
-  bass_weight : 1.0  # Global weight for bass loss component
-  
-  # Conformer-specific settings (ChordFormer architecture)
-  # These are only used when model='chordformer'
-  conv_kernel_size : 31      # Depthwise-conv kernel size (larger = wider temporal context)
-  ff_expansion_factor : 4    # FFN expansion ratio inside Conformer blocks
-  conv_expansion_factor : 2  # Conv module channel expansion ratio
-
-# Class weights for reweighted loss (addresses class imbalance)
 class_weights:
-  enabled: True  # Enable/disable class-reweighted CrossEntropy in decomposed heads
-  gamma: 0.5     # Weight formula exponent: (N_max / N_class)^gamma (higher => stronger reweighting)
-  w_max: 10.0    # Upper cap for rare-class weights to avoid unstable gradients
+  enabled: True
+  gamma: 0.5
+  w_max: 10.0
 
 gradnorm:
-  enabled: False  # Adaptive multitask balancing (updates one weight per chord component)
-  alpha: 1.5      # Asymmetry strength from GradNorm paper
-  lr: 0.025       # Learning rate for GradNorm weights
-  eps: 1.0e-8     # Numerical stability epsilon
-  w_min: 1.0e-3   # Lower bound for each task weight before renormalization
+  enabled: False
+  alpha: 1.5
+  lr: 0.025
+  eps: 1.0e-8
+  w_min: 1.0e-3
+
+curriculum:
+  enabled: False
+  strategy: 'mixed'
+  pacing: 'linear'
+  start_ratio: 0.3
+  pace_epochs: 30
+  difficulty_threshold: 0.5
+  warmup_epochs: 5
+
+# =============================================================================
+# Model — ChordMax (ChordFormer + decomposed multi-head output)
+# =============================================================================
+
+model:
+  # --- Input geometry ---
+  feature_size: 252          # Must match feature.n_bins
+  timestep: 108              # Sequence length per encoder window
+
+  # --- Conformer encoder ---
+  num_layers: 12             # Number of Conformer blocks
+  num_heads: 4               # Attention heads per block
+  hidden_size: 128           # Channel width throughout the encoder
+  conv_kernel_size: 31       # Depthwise-conv kernel (larger = wider temporal context)
+  ff_expansion_factor: 4     # FFN expansion ratio inside Conformer blocks
+  conv_expansion_factor: 2   # Conv module channel expansion ratio
+
+  # --- Dropout ---
+  input_dropout: 0.2         # Dropout at encoder input
+  layer_dropout: 0.2         # Dropout inside each Conformer block
+  output_dropout: 0.0        # Dropout in each decomposed output head
+
+  # --- Misc ---
+  probs_out: False            # True = return raw logits; False = return argmax predictions
+
+  # ---------------------------------------------------------------------------
+  # Legacy (BTC backbone only — ignored by ChordFormer, kept for compatibility)
+  # ---------------------------------------------------------------------------
+  num_chords: 170
+  loss: 'ce'
+  attention_dropout: 0.2     # BTC self-attention dropout
+  relu_dropout: 0.2          # BTC FFN dropout
+  total_key_depth: 128       # BTC multi-head attention key dim
+  total_value_depth: 128     # BTC multi-head attention value dim
+  filter_size: 128           # BTC positionwise FFN width
+  use_structured_output: False
+  num_roots: 13
+  num_qualities: 16
+  num_bass: 13
+  root_weight: 1.0
+  quality_weight: 1.0
+  bass_weight: 1.0
+
+# =============================================================================
+# Paths
+# =============================================================================
 
 path:
-  ckpt_path : 'model'
-  result_path : '/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/results'
-  asset_path : '/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/assets'
-  root_path : '/home/daniel.melo/datasets'
+  ckpt_path: 'model'
+  result_path: '/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/results'
+  asset_path: '/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/assets'
+  root_path: '/home/daniel.melo/datasets'
