@@ -51,18 +51,30 @@ class AudioDatasetStructured(BaseAudioDataset):
         # - 'components': dict with 9 component arrays
     """
     
-    def __init__(self, *args, decompose=True, **kwargs):
+    def __init__(self, *args, decompose=True, normalization=None, **kwargs):
         """
         Initialize the structured dataset.
         
         Args:
             decompose: If True, decompose chords into components
+            normalization: Optional dict with 'mean' and 'std' keys for
+                          feature normalization, or path to a .pt file.
+                          When provided, features are standardized after
+                          log-magnitude transform.
             *args, **kwargs: Arguments passed to parent AudioDataset
         """
         super().__init__(*args, **kwargs)
         self.decompose = decompose
         self.decomposer = ChordDecomposer() if decompose else None
         self.component_names = COMPONENT_NAMES
+
+        self.norm_mean = None
+        self.norm_std = None
+        if normalization is not None:
+            if isinstance(normalization, str):
+                normalization = torch.load(normalization, weights_only=False)
+            self.norm_mean = float(normalization['mean'])
+            self.norm_std = float(normalization['std'])
     
     def __getitem__(self, idx):
         """
@@ -81,24 +93,22 @@ class AudioDatasetStructured(BaseAudioDataset):
         data = torch.load(instance_path, weights_only=False)
 
         features = np.log(np.abs(data['feature']) + 1e-6)
+
+        if self.norm_mean is not None:
+            features = (features - self.norm_mean) / self.norm_std
         
         # Features are saved as (n_bins, timesteps), need to transpose to (timesteps, n_bins)
         if features.shape[0] != self.config.model['timestep']:
-            # Transpose if needed
             features = features.T  # Now (timesteps, n_bins)
         
-        # Clip/pad to expected timestep if needed
-        # Expected shape: (timestep, feature_size)
+        # Clip/pad to expected timestep
         timestep = self.config.model['timestep'] if hasattr(self.config, 'model') else 108
         if features.shape[0] > timestep:
-            # Take first timestep frames
             features = features[:timestep, :]
         elif features.shape[0] < timestep:
-            # Pad with zeros
             pad_length = timestep - features.shape[0]
             features = np.pad(features, ((0, pad_length), (0, 0)), mode='constant')
         
-        # Convert to tensor
         res['feature'] = torch.FloatTensor(features)
         
         # Handle chord labels - prefer original_chord_labels (full extensions)
