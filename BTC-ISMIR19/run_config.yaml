@@ -73,7 +73,7 @@ class_weights:
   w_max: 10.0
 
 gradnorm:
-  enabled: False
+  enabled: True
   alpha: 0.7
   lr: 0.005
   eps: 1.0e-8
