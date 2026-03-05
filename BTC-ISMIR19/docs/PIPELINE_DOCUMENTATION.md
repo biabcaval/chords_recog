@@ -89,10 +89,58 @@ duração = 108 × (2048 / 22050) ≈ 10.03 segundos
 
 ### 2.3 Normalização
 
+As features passam por dois estágios de normalização:
+
+**1. Log-magnitude (sempre aplicado):**
+
 ```python
-# Log-magnitude para compressão dinâmica
 features = np.log(np.abs(cqt) + 1e-6)
 ```
+
+**2. Padronização mean/std (opcional, recomendado):**
+
+```python
+features = (features - mean) / std
+```
+
+Os valores de mean e std são computados **uma única vez** sobre todos os dados dos datasets de **treino** (sem incluir dados de teste, para evitar data leakage):
+
+```bash
+python scripts/compute_normalization.py \
+    --config run_config.yaml \
+    --datasets billboard dj_avan jaah \
+    --output normalization_BiDjJa.pt
+```
+
+O script varre 100% dos arquivos `.pt` dos datasets indicados (sem split de k-fold) e salva um arquivo com dois escalares:
+
+```python
+{
+    'mean': -3.245,      # média global das features log-CQT
+    'std': 1.872,        # desvio padrão global
+    'datasets': ['billboard', 'dj_avan', 'jaah'],
+    'n_files': 523048,
+}
+```
+
+**Regras importantes:**
+
+- Cada combinação de datasets de treino precisa do seu próprio `normalization.pt`
+- Nunca incluir o dataset de teste no cálculo (data leakage)
+- Os valores são salvos automaticamente dentro dos checkpoints pelo `train_decomposed.py`
+- Na inferência, mean/std são carregados do checkpoint — sem necessidade de arquivo extra
+
+**Uso no treino:**
+
+```bash
+python train_decomposed.py \
+    --normalization normalization_BiDjJa.pt \
+    --train_datasets billboard dj_avan jaah \
+    --backbone chordformer \
+    --kfold 0
+```
+
+A normalização é aplicada on-the-fly no `AudioDatasetStructured.__getitem__()` a cada sample carregado. Se `--normalization` não for passado, o treino usa features sem padronização (apenas log-magnitude), mantendo retrocompatibilidade.
 
 ### 2.4 Estrutura dos Arquivos `.pt`
 
@@ -1424,6 +1472,7 @@ BTC-ISMIR19/
 │   ├── preprocess_datasets.py        # Preprocessing principal
 │   ├── preprocess_decomposed.py      # Preprocessing decomposed
 │   ├── add_original_labels.py        # Adiciona labels originais aos .pt
+│   ├── compute_normalization.py                # Calcula mean/std global para normalização
 │   ├── precompute_class_weights_decomposed.py  # Cache de class weights
 │   ├── diagnose_decomposition_mismatch.py      # Diagnóstico train/val
 │   └── convert_to_decomposed.py      # Converte .pt 170-class → decomposed
