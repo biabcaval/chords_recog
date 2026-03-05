@@ -77,6 +77,12 @@ class ChordRecognitionInference:
         self.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         detected = checkpoint.get('training_config', {}).get('backbone', 'btc')
         logger.info(f"Loaded checkpoint from {checkpoint_path} (backbone: {detected})")
+
+        self.normalization = checkpoint.get('normalization', None)
+        if self.normalization is not None:
+            logger.info(f"Normalization: mean={self.normalization['mean']:.6f}, std={self.normalization['std']:.6f}")
+        else:
+            logger.info("Normalization: disabled (raw log-CQT)")
         
         # Setup inference utilities
         self.inference = DecomposedChordInference(self.model, device=self.device)
@@ -116,8 +122,10 @@ class ChordRecognitionInference:
             hop_length=self.hop_length
         )
         
-        # Log magnitude
+        # Log magnitude + optional normalization
         feature = np.log(np.abs(cqt) + 1e-6)
+        if self.normalization is not None:
+            feature = (feature - self.normalization['mean']) / self.normalization['std']
         
         # Normalize to expected shape
         expected_length = self.config.mp3['inst_len'] / (self.hop_length / self.sr)

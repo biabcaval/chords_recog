@@ -143,9 +143,18 @@ def main():
     detected = checkpoint.get('training_config', {}).get('backbone', 'btc')
     logger.info(f"Backbone: {detected}")
     model.eval()
+
+    normalization = checkpoint.get('normalization', None)
+    if normalization is not None:
+        logger.info(f"Normalization: mean={normalization['mean']:.6f}, std={normalization['std']:.6f}")
+    else:
+        logger.info("Normalization: disabled (raw log-CQT)")
     
     # Extract features
     feature, sr, hop_length = extract_features_full(args.audio_file, config)
+
+    if normalization is not None:
+        feature = (feature - normalization['mean']) / normalization['std']
     
     # Process
     logger.info("Running inference...")
