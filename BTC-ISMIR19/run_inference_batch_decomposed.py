@@ -78,7 +78,7 @@ def build_model(config, backbone="auto", checkpoint_meta=None):
 
 
 def load_checkpoint(checkpoint_path, config, backbone, device):
-    """Load model from a decomposed-training checkpoint."""
+    """Load model and normalization from a decomposed-training checkpoint."""
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     model = build_model(config, backbone=backbone, checkpoint_meta=checkpoint)
@@ -88,13 +88,19 @@ def load_checkpoint(checkpoint_path, config, backbone, device):
     model.load_state_dict(checkpoint[state_key], strict=False)
     model.eval()
 
+    norm = checkpoint.get("normalization", None)
+    if norm is not None:
+        logger.info(f"Normalization from checkpoint: mean={norm['mean']:.6f}, std={norm['std']:.6f}")
+    else:
+        logger.info("No normalization found in checkpoint (raw log-CQT)")
+
     epoch = checkpoint.get("epoch", "?")
     logger.info(f"Loaded checkpoint {checkpoint_path}  (epoch {epoch})")
-    return model
+    return model, norm
 
 
-def audio_file_to_features(audio_path, config):
-    """Extract log-CQT features from an audio file."""
+def audio_file_to_features(audio_path, config, normalization=None):
+    """Extract log-CQT features from an audio file, optionally normalized."""
     sr = config.mp3["song_hz"]
     inst_len = config.mp3["inst_len"]
     n_bins = config.feature["n_bins"]
@@ -122,6 +128,9 @@ def audio_file_to_features(audio_path, config):
 
     feature = np.log(np.abs(feature) + 1e-6)
 
+    if normalization is not None:
+        feature = (feature - normalization['mean']) / normalization['std']
+
     feature_per_second = inst_len / config.model["timestep"]
     song_length_second = len(wav) / sr
     return feature, feature_per_second, song_length_second
@@ -137,7 +146,7 @@ def get_audio_paths(audio_dir):
     return sorted(paths)
 
 
-def run_inference(model, audio_dir, output_dir, config, device):
+def run_inference(model, audio_dir, output_dir, config, device, normalization=None):
     """Run inference on every audio file and write .lab outputs."""
     reassembler = ChordReassembler()
     os.makedirs(output_dir, exist_ok=True)
@@ -155,7 +164,7 @@ def run_inference(model, audio_dir, output_dir, config, device):
         try:
             logger.info(f"Processing: {song_name}")
 
-            feature, feature_per_second, _ = audio_file_to_features(audio_path, config)
+            feature, feature_per_second, _ = audio_file_to_features(audio_path, config, normalization)
             feature = feature.T  # (time, bins)
             time_unit = feature_per_second
 
@@ -275,7 +284,7 @@ def main():
     config.feature["large_voca"] = True
     config.model["num_chords"] = 170
 
-    model = load_checkpoint(args.checkpoint, config, args.backbone, device)
+    model, normalization = load_checkpoint(args.checkpoint, config, args.backbone, device)
 
     if args.audio_dir:
         audio_dir = args.audio_dir
@@ -301,7 +310,7 @@ def main():
     logger.info(f"Audio dir  : {audio_dir}")
     logger.info(f"Output dir : {output_dir}")
 
-    run_inference(model, audio_dir, output_dir, config, device)
+    run_inference(model, audio_dir, output_dir, config, device, normalization)
 
 
 if __name__ == "__main__":
