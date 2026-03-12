@@ -20,16 +20,40 @@ class ComponentHead(nn.Module):
     """
     Individual output head for a single chord component.
     
+    Supports two modes:
+      - Simple: Dropout -> Linear(hidden_size, vocab_size)
+      - FFN bottleneck: Linear(hidden_size, ffn_dim) -> ReLU -> Dropout
+                        -> Linear(ffn_dim, ffn_dim//2) -> ReLU
+                        -> Linear(ffn_dim//2, vocab_size)
+    
     Args:
         hidden_size: Size of the hidden representation from feature extractor
         vocab_size: Number of classes for this component
         dropout: Dropout probability
+        use_ffn: If True, use FFN bottleneck instead of direct projection
+        ffn_dim: Hidden dimension of the first FFN layer (default: hidden_size // 2)
     """
     
-    def __init__(self, hidden_size: int, vocab_size: int, dropout: float = 0.0):
+    def __init__(self, hidden_size: int, vocab_size: int, dropout: float = 0.0,
+                 use_ffn: bool = False, ffn_dim: int = None):
         super().__init__()
-        self.linear = nn.Linear(hidden_size, vocab_size)
-        self.dropout = nn.Dropout(dropout)
+        self.use_ffn = use_ffn
+        
+        if use_ffn:
+            if ffn_dim is None:
+                ffn_dim = hidden_size // 2
+            bottleneck_dim = ffn_dim // 2
+            self.ffn = nn.Sequential(
+                nn.Linear(hidden_size, ffn_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(ffn_dim, bottleneck_dim),
+                nn.ReLU(),
+                nn.Linear(bottleneck_dim, vocab_size),
+            )
+        else:
+            self.linear = nn.Linear(hidden_size, vocab_size)
+            self.dropout = nn.Dropout(dropout)
     
     def forward(self, x):
         """
@@ -39,9 +63,10 @@ class ComponentHead(nn.Module):
         Returns:
             logits: (batch_size, seq_len, vocab_size)
         """
+        if self.use_ffn:
+            return self.ffn(x)
         x = self.dropout(x)
-        logits = self.linear(x)
-        return logits
+        return self.linear(x)
 
 
 class MultiHeadChordDecomposer(nn.Module):
@@ -59,7 +84,8 @@ class MultiHeadChordDecomposer(nn.Module):
     8. 13th (3 classes)
     """
     
-    def __init__(self, hidden_size: int, dropout: float = 0.0):
+    def __init__(self, hidden_size: int, dropout: float = 0.0,
+                 use_ffn: bool = False, ffn_dim: int = None):
         super().__init__()
         self.hidden_size = hidden_size
         
@@ -69,7 +95,8 @@ class MultiHeadChordDecomposer(nn.Module):
         
         # Create output head for each component
         self.heads = nn.ModuleDict({
-            component: ComponentHead(hidden_size, self.vocab_sizes[component], dropout)
+            component: ComponentHead(hidden_size, self.vocab_sizes[component], dropout,
+                                     use_ffn=use_ffn, ffn_dim=ffn_dim)
             for component in COMPONENT_NAMES
         })
         
@@ -308,10 +335,14 @@ class ChordFormer_model_decomposed(nn.Module):
             attention_map=True,
         )
 
-        # Multi-head chord decomposition
+        # Multi-head chord decomposition (with optional FFN bottleneck)
+        use_head_ffn = cfg.get('use_head_ffn', False)
+        head_ffn_dim = cfg.get('head_ffn_dim', None)
         self.decomposer = MultiHeadChordDecomposer(
             hidden_size=cfg['hidden_size'],
-            dropout=cfg.get('output_dropout', 0.0)
+            dropout=cfg.get('output_dropout', 0.0),
+            use_ffn=use_head_ffn,
+            ffn_dim=head_ffn_dim,
         )
 
         # Loss function

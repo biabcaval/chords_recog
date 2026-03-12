@@ -77,6 +77,10 @@ model:
   layer_dropout: 0.2         # Dropout inside each Conformer block
   output_dropout: 0.0        # Dropout in each decomposed output head
 
+  # --- Output head FFN (ChordFormer only) ---
+  use_head_ffn: False          # Add FFN bottleneck in each output head
+  head_ffn_dim: null           # FFN hidden dim (default: hidden_size // 2)
+
   # --- Misc ---
   probs_out: False            # True = return raw logits; False = return argmax predictions
 

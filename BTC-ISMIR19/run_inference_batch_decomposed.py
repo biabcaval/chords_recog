@@ -62,11 +62,20 @@ DATASET_SHORT = {
 
 
 def build_model(config, backbone="auto", checkpoint_meta=None):
-    """Instantiate the correct decomposed model based on backbone choice."""
-    if backbone == "auto" and checkpoint_meta is not None:
+    """Instantiate the correct decomposed model based on backbone choice.
+
+    Also restores model_config fields (e.g. use_head_ffn) from checkpoint
+    so the model architecture matches the saved weights.
+    """
+    if checkpoint_meta is not None:
         tc = checkpoint_meta.get("training_config", {})
-        backbone = tc.get("backbone", "btc")
-        logger.info(f"Auto-detected backbone from checkpoint: {backbone}")
+        if backbone == "auto":
+            backbone = tc.get("backbone", "btc")
+            logger.info(f"Auto-detected backbone from checkpoint: {backbone}")
+        model_cfg = tc.get("model_config", {})
+        for key in ("use_head_ffn", "head_ffn_dim"):
+            if key in model_cfg:
+                config.model[key] = model_cfg[key]
 
     if backbone == "chordformer":
         model = ChordFormer_model_decomposed(config=config)

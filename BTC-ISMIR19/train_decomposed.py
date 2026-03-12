@@ -234,6 +234,10 @@ def main():
     parser.add_argument('--backbone', type=str, default='btc',
                        choices=['btc', 'chordformer'],
                        help='Backbone encoder for decomposed model')
+    parser.add_argument('--use_head_ffn', action='store_true',
+                       help='Add FFN bottleneck in each output head (ChordFormer only)')
+    parser.add_argument('--head_ffn_dim', type=int, default=None,
+                       help='FFN hidden dim in output heads (default: hidden_size//2)')
     parser.add_argument('--kfold', type=int, default=4, choices=[0, 1, 2, 3, 4],
                        help='5-fold split index used for validation (default: 4)')
     parser.add_argument('--component_weights', type=str, default=None,
@@ -357,6 +361,17 @@ def main():
         gradnorm_lr,
         gradnorm_eps,
         gradnorm_w_min,
+    )
+
+    # Resolve output-head FFN settings (CLI override > config).
+    if args.use_head_ffn:
+        config.model['use_head_ffn'] = True
+    if args.head_ffn_dim is not None:
+        config.model['head_ffn_dim'] = args.head_ffn_dim
+    logger.info(
+        "Output head FFN: enabled=%s dim=%s",
+        config.model.get('use_head_ffn', False),
+        config.model.get('head_ffn_dim', 'hidden_size//2'),
     )
     
     # Prepare datasets
@@ -725,6 +740,8 @@ def main():
             'gradnorm_lr': config.model.get('gradnorm_lr', 0.025),
             'gradnorm_eps': config.model.get('gradnorm_eps', 1e-8),
             'gradnorm_w_min': config.model.get('gradnorm_w_min', 1e-3),
+            'use_head_ffn': config.model.get('use_head_ffn', False),
+            'head_ffn_dim': config.model.get('head_ffn_dim', None),
         },
         'datasets': list(dataset_names),
         'data_root': data_root,

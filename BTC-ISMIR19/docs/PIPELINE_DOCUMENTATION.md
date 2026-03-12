@@ -427,21 +427,45 @@ class ConformerEncoder(nn.Module):
 
 #### 5.2.2 Component Head
 
-Cada componente tem sua própria cabeça de classificação:
+Cada componente tem sua própria cabeça de classificação, com dois modos de operação:
+
+**Modo simples (padrão):** projeção direta para o vocabulário.
+
+```python
+# use_head_ffn = False (default)
+Dropout -> Linear(hidden_size, vocab_size)
+```
+
+**Modo FFN bottleneck (opcional):** adiciona uma FFN com compressão progressiva antes da projeção final. Ativado via `--use_head_ffn` no treino.
+
+```python
+# use_head_ffn = True, head_ffn_dim = hidden_size // 2 (default = 64)
+Linear(128, 64) -> ReLU -> Dropout -> Linear(64, 32) -> ReLU -> Linear(32, vocab_size)
+```
 
 ```python
 class ComponentHead(nn.Module):
-    def __init__(self, hidden_size, num_classes, dropout=0.1):
-        self.layers = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size // 2, num_classes)
-        )
-    
-    def forward(self, x):
-        return self.layers(x)  # (B, T, num_classes)
+    def __init__(self, hidden_size, vocab_size, dropout=0.0,
+                 use_ffn=False, ffn_dim=None):
+        # Modo FFN: bottleneck com compressão progressiva
+        if use_ffn:
+            ffn_dim = ffn_dim or hidden_size // 2
+            bottleneck_dim = ffn_dim // 2
+            self.ffn = nn.Sequential(
+                nn.Linear(hidden_size, ffn_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(ffn_dim, bottleneck_dim),
+                nn.ReLU(),
+                nn.Linear(bottleneck_dim, vocab_size),
+            )
+        # Modo simples: projeção direta
+        else:
+            self.linear = nn.Linear(hidden_size, vocab_size)
+            self.dropout = nn.Dropout(dropout)
 ```
+
+A escolha entre os dois modos é controlada pelo parâmetro `use_head_ffn` no config/CLI e é salva automaticamente no checkpoint para que a inferência reconstrua a arquitetura correta.
 
 #### 5.2.3 Multi-Head Decomposer
 
@@ -476,8 +500,10 @@ class MultiHeadChordDecomposer(nn.Module):
 | `output_dropout` | 0.0 | Dropout nas cabeças de saída |
 | `conv_kernel_size` | 31 | Kernel da conv depthwise (ChordFormer) |
 | `ff_expansion_factor` | 4 | Expansão da FFN (ChordFormer) |
+| `use_head_ffn` | False | Ativar FFN bottleneck nas output heads (ChordFormer only) |
+| `head_ffn_dim` | hidden_size//2 | Dimensão oculta da FFN nas heads (default: 64 quando hidden=128) |
 
-**Total de parâmetros:** ~4.65M (ChordFormer, 12 layers, hidden=128)
+**Total de parâmetros:** ~4.65M sem FFN heads / ~4.68M com FFN heads (ChordFormer, 12 layers, hidden=128)
 
 ---
 
@@ -629,6 +655,25 @@ python train_decomposed.py \
 
 Os datasets passados via `--train_datasets` são usados tanto para treino (4 folds) quanto para validação (1 fold), seguindo a lógica de k-fold.
 
+#### Treino com FFN Bottleneck nas Output Heads
+
+```bash
+# FFN com dimensão padrão (hidden_size // 2 = 64)
+python train_decomposed.py \
+    --backbone chordformer \
+    --use_head_ffn \
+    --run_name cf_headffn_k0
+
+# FFN com dimensão customizada
+python train_decomposed.py \
+    --backbone chordformer \
+    --use_head_ffn \
+    --head_ffn_dim 96 \
+    --run_name cf_headffn96_k0
+```
+
+A FFN bottleneck adiciona uma rede `Linear(128→ffn_dim) → ReLU → Dropout → Linear(ffn_dim→ffn_dim//2) → ReLU → Linear(ffn_dim//2→vocab)` em cada uma das 9 output heads, substituindo a projeção direta `Linear(128→vocab)`. A configuração é salva no checkpoint e restaurada automaticamente na inferência.
+
 #### Treino Rápido (smoke test)
 
 ```bash
@@ -650,6 +695,8 @@ python quick_test_decomposed.py --backbone chordformer
 | `--gamma` | 0.5 | Expoente do class weighting |
 | `--w_max` | 10.0 | Peso máximo por classe |
 | `--backbone` | chordformer | Backbone do modelo (`chordformer`) |
+| `--use_head_ffn` | - | Ativar FFN bottleneck nas output heads (ChordFormer only) |
+| `--head_ffn_dim` | hidden_size//2 | Dimensão oculta da FFN nas heads |
 | `--kfold` | 4 | Índice do k-fold para validação (0-4) |
 | `--log_interval` | 10 | Intervalo de log (batches) |
 | `--val_interval` | 1 | Intervalo de validação (epochs) |
@@ -785,6 +832,8 @@ model:
   conv_kernel_size: 31
   ff_expansion_factor: 4
   conv_expansion_factor: 2
+  use_head_ffn: False           # FFN bottleneck nas output heads (ChordFormer only)
+  head_ffn_dim: null            # Dim da FFN (default: hidden_size // 2)
 
 class_weights:
   enabled: True

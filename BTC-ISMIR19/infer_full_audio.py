@@ -27,10 +27,17 @@ def _build_model(config, backbone='auto', checkpoint_meta=None):
 
     When backbone='auto', tries to detect from checkpoint metadata
     (training_config.backbone), falling back to 'btc'.
+    Also restores model_config fields (e.g. use_head_ffn) from checkpoint
+    so the model architecture matches the saved weights.
     """
-    if backbone == 'auto' and checkpoint_meta is not None:
+    if checkpoint_meta is not None:
         tc = checkpoint_meta.get('training_config', {})
-        backbone = tc.get('backbone', 'btc')
+        if backbone == 'auto':
+            backbone = tc.get('backbone', 'btc')
+        model_cfg = tc.get('model_config', {})
+        for key in ('use_head_ffn', 'head_ffn_dim'):
+            if key in model_cfg:
+                config.model[key] = model_cfg[key]
 
     if backbone == 'chordformer':
         return ChordFormer_model_decomposed(config=config)
