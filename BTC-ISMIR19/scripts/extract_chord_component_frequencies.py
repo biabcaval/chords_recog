@@ -6,7 +6,7 @@ This script scans dataset annotation folders, parses chord labels, maps them
 to plot-style component classes, and writes aggregate counts to a CSV.
 
 Main output format:
-    component,count
+    component,count,total_duration_seconds
 """
 
 from __future__ import annotations
@@ -102,6 +102,7 @@ class ProcessingStats:
     lines_valid: int = 0
     lines_skipped: int = 0
     unique_chords_seen: int = 0
+    duration_total_seconds: float = 0.0
 
     def merge(self, other: "ProcessingStats") -> None:
         self.files_processed += other.files_processed
@@ -109,6 +110,7 @@ class ProcessingStats:
         self.lines_valid += other.lines_valid
         self.lines_skipped += other.lines_skipped
         self.unique_chords_seen += other.unique_chords_seen
+        self.duration_total_seconds += other.duration_total_seconds
 
 
 class LightweightChordDecomposer:
@@ -434,7 +436,7 @@ def chord_to_plot_classes(
     return deduped
 
 
-def parse_lab_line(line: str) -> str | None:
+def parse_lab_line(line: str) -> Tuple[float, str] | None:
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
         return None
@@ -444,45 +446,58 @@ def parse_lab_line(line: str) -> str | None:
         return None
 
     # Typical format: <start> <end> <label...>
-    return " ".join(parts[2:])
+    try:
+        start_time = float(parts[0])
+        end_time = float(parts[1])
+    except ValueError:
+        return None
+
+    duration_seconds = max(0.0, end_time - start_time)
+    chord_label = " ".join(parts[2:])
+    return duration_seconds, chord_label
 
 
 def process_lab_file(
     lab_path: Path,
     decomposer: ChordDecomposer,
     cache: Dict[str, Tuple[str, ...]],
-) -> Tuple[Counter, ProcessingStats]:
+) -> Tuple[Counter, Counter, ProcessingStats]:
     counts: Counter = Counter()
+    durations: Counter = Counter()
     stats = ProcessingStats(files_processed=1)
 
     with lab_path.open("r", encoding="utf-8", errors="ignore") as handle:
         for line in handle:
             stats.lines_total += 1
-            chord_label = parse_lab_line(line)
-            if chord_label is None:
+            parsed = parse_lab_line(line)
+            if parsed is None:
                 stats.lines_skipped += 1
                 continue
+            duration_seconds, chord_label = parsed
 
             for comp_class in chord_to_plot_classes(chord_label, decomposer, cache):
                 counts[comp_class] += 1
+                durations[comp_class] += duration_seconds
 
             stats.lines_valid += 1
+            stats.duration_total_seconds += duration_seconds
 
-    return counts, stats
+    return counts, durations, stats
 
 
-def process_lab_file_worker(lab_path_str: str) -> Tuple[Dict[str, int], ProcessingStats]:
+def process_lab_file_worker(lab_path_str: str) -> Tuple[Dict[str, int], Dict[str, float], ProcessingStats]:
     lab_path = Path(lab_path_str)
     decomposer = make_decomposer()
     local_cache: Dict[str, Tuple[str, ...]] = {}
-    counts, stats = process_lab_file(lab_path, decomposer, local_cache)
+    counts, durations, stats = process_lab_file(lab_path, decomposer, local_cache)
     stats.unique_chords_seen = len(local_cache)
-    return dict(counts), stats
+    return dict(counts), dict(durations), stats
 
 
 def write_counts_csv(
     output_csv: Path,
     total_counts: Counter,
+    total_durations: Counter,
     include_zero_known: bool,
 ) -> None:
     known_set = set(PLOT_COMPONENT_ORDER)
@@ -498,43 +513,55 @@ def write_counts_csv(
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     with output_csv.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["component", "count"])
+        writer.writerow(["component", "count", "total_duration_seconds"])
         for comp_class in ordered_classes:
-            writer.writerow([comp_class, int(total_counts.get(comp_class, 0))])
+            writer.writerow(
+                [
+                    comp_class,
+                    int(total_counts.get(comp_class, 0)),
+                    f"{float(total_durations.get(comp_class, 0.0)):.6f}",
+                ]
+            )
 
 
 def run_sequential(
     lab_files: Sequence[Path],
     progress_every: int,
-) -> Tuple[Counter, ProcessingStats]:
+) -> Tuple[Counter, Counter, ProcessingStats]:
     decomposer = make_decomposer()
     cache: Dict[str, Tuple[str, ...]] = {}
     total_counts: Counter = Counter()
+    total_durations: Counter = Counter()
     total_stats = ProcessingStats()
 
     for idx, lab_path in enumerate(lab_files, start=1):
-        file_counts, file_stats = process_lab_file(lab_path, decomposer, cache)
+        file_counts, file_durations, file_stats = process_lab_file(lab_path, decomposer, cache)
         total_counts.update(file_counts)
+        total_durations.update(file_durations)
         total_stats.merge(file_stats)
 
         if progress_every > 0 and idx % progress_every == 0:
             print(f"Processed {idx}/{len(lab_files)} files...")
 
     total_stats.unique_chords_seen = len(cache)
-    return total_counts, total_stats
+    return total_counts, total_durations, total_stats
 
 
-def run_parallel(lab_files: Sequence[Path], num_workers: int) -> Tuple[Counter, ProcessingStats]:
+def run_parallel(lab_files: Sequence[Path], num_workers: int) -> Tuple[Counter, Counter, ProcessingStats]:
     total_counts: Counter = Counter()
+    total_durations: Counter = Counter()
     total_stats = ProcessingStats()
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        for counts_dict, stats in executor.map(process_lab_file_worker, (str(p) for p in lab_files)):
+        for counts_dict, durations_dict, stats in executor.map(
+            process_lab_file_worker, (str(p) for p in lab_files)
+        ):
             total_counts.update(counts_dict)
+            total_durations.update(durations_dict)
             total_stats.merge(stats)
 
     # Parallel workers have local caches, so this is an upper bound sum.
-    return total_counts, total_stats
+    return total_counts, total_durations, total_stats
 
 
 def main() -> None:
@@ -562,13 +589,13 @@ def main() -> None:
 
     if args.num_workers > 1:
         print(f"Processing mode: parallel ({args.num_workers} workers)")
-        total_counts, stats = run_parallel(lab_files, args.num_workers)
+        total_counts, total_durations, stats = run_parallel(lab_files, args.num_workers)
     else:
         print("Processing mode: sequential (shared cache enabled)")
-        total_counts, stats = run_sequential(lab_files, args.progress_every)
+        total_counts, total_durations, stats = run_sequential(lab_files, args.progress_every)
 
     output_csv = Path(args.output_csv).expanduser()
-    write_counts_csv(output_csv, total_counts, args.include_zero_known)
+    write_counts_csv(output_csv, total_counts, total_durations, args.include_zero_known)
 
     elapsed_s = time.perf_counter() - start_time
     print("\nDone.")
@@ -579,6 +606,7 @@ def main() -> None:
     print(f"Lines valid: {stats.lines_valid}")
     print(f"Lines skipped: {stats.lines_skipped}")
     print(f"Unique chord labels seen (cache): {stats.unique_chords_seen}")
+    print(f"Total annotation duration (s): {stats.duration_total_seconds:.3f}")
     print(f"Elapsed time: {elapsed_s:.2f}s")
 
 
