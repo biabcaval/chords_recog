@@ -39,6 +39,7 @@ from multiprocessing import Pool
 from pathlib import Path
 
 import torch
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -212,11 +213,15 @@ def process_song(args):
     """Process all .pt files for a single song. Designed for Pool.map()."""
     song_name, song_dir, lab_path, time_interval, n_frames_expected, dry_run, validate = args
 
-    annotations = load_lab_file(str(lab_path))
-    starts = _build_lookup(annotations)
-
     pt_files = sorted(song_dir.glob('*.pt'))
     stats = {'updated': 0, 'skipped': 0, 'errors': 0, 'mismatches': 0, 'checked': 0}
+
+    if dry_run:
+        stats['updated'] = len(pt_files)
+        return song_name, stats
+
+    annotations = load_lab_file(str(lab_path))
+    starts = _build_lookup(annotations)
 
     for pt_path in pt_files:
         try:
@@ -260,17 +265,12 @@ def process_song(args):
                 for i, (lab_chord, existing_idx) in enumerate(zip(labels, existing_chords)):
                     existing_idx = int(existing_idx)
                     expected_label = _idx170_to_label(existing_idx)
-                    # Compare root notes only (quality mapping differs between 170-class and .lab)
                     lab_root = lab_chord.split(':')[0].split('/')[0] if ':' in lab_chord or '/' in lab_chord else lab_chord
                     exp_root = expected_label.split(':')[0].split('/')[0] if ':' in expected_label or '/' in expected_label else expected_label
                     if lab_root == 'N' and exp_root == 'N':
                         continue
                     if lab_root != exp_root and lab_root != 'N' and exp_root != 'N':
                         stats['mismatches'] += 1
-                continue
-
-            if dry_run:
-                stats['updated'] += 1
                 continue
 
             data['original_chord_labels'] = labels
@@ -328,8 +328,7 @@ def main():
         matched, unmatched = match_songs(feat_dir, lab_dir)
         total_unmatched += len(unmatched)
 
-        pt_count = sum(len(list(sd.glob('*.pt'))) for sd, _ in matched.values())
-        print(f"  Songs matched: {len(matched)}, unmatched: {len(unmatched)}, .pt files: {pt_count}")
+        print(f"  Songs matched: {len(matched)}, unmatched: {len(unmatched)}")
 
         if unmatched and len(unmatched) <= 5:
             print(f"  Unmatched: {unmatched}")
@@ -346,11 +345,21 @@ def main():
         ]
         total_songs += len(work_items)
 
+        mode_label = 'validate' if args.validate else 'dry_run' if args.dry_run else 'process'
+        desc = f"  {dataset_name} [{mode_label}]"
+
         if args.num_workers > 1 and len(work_items) > 1:
+            results = []
             with Pool(processes=min(args.num_workers, len(work_items))) as pool:
-                results = pool.map(process_song, work_items)
+                for result in tqdm(
+                    pool.imap_unordered(process_song, work_items),
+                    total=len(work_items), desc=desc, unit="song"
+                ):
+                    results.append(result)
         else:
-            results = [process_song(item) for item in work_items]
+            results = []
+            for item in tqdm(work_items, desc=desc, unit="song"):
+                results.append(process_song(item))
 
         ds_stats = {'updated': 0, 'skipped': 0, 'errors': 0, 'mismatches': 0, 'checked': 0}
         for song_name, stats in results:
