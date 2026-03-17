@@ -133,17 +133,6 @@ def _flatten_dict_for_wandb(data, prefix=""):
     return flat
 
 
-def _log_wandb_artifact_safe(run, file_path, artifact_name, artifact_type, aliases=None, metadata=None):
-    """Log a single file as wandb artifact without interrupting training on failure."""
-    if run is None:
-        return
-    try:
-        artifact = wandb.Artifact(name=artifact_name, type=artifact_type, metadata=metadata or {})
-        artifact.add_file(str(file_path))
-        run.log_artifact(artifact, aliases=aliases or [])
-    except Exception as exc:
-        logger.warning(f"Failed to log wandb artifact {artifact_name}: {exc}")
-
 
 def _hash_string_list(values):
     digest = hashlib.sha1()
@@ -286,8 +275,11 @@ def main():
     parser.add_argument('--normalization', type=str, default=None,
                        help='Path to normalization .pt file (mean/std). '
                             'When provided, features are standardized before training.')
+    parser.add_argument('--no_class_distribution', action='store_true',
+                       help='Disable per-head class distribution logging during validation')
     
     args = parser.parse_args()
+    args.log_class_distribution = not args.no_class_distribution
     
     if args.use_class_weights and args.no_class_weights:
         parser.error("Use only one of --use_class_weights or --no_class_weights")
@@ -618,7 +610,6 @@ def main():
             wandb.define_metric("train/*", step_metric="epoch")
             wandb.define_metric("val/*", step_metric="epoch")
             wandb.define_metric("model/*", step_metric="epoch")
-            wandb.define_metric("artifacts/*", step_metric="epoch")
 
             if class_weights is not None:
                 class_weight_stats = {}
@@ -832,7 +823,8 @@ def main():
         
         # Validate
         if (epoch + 1) % args.val_interval == 0:
-            val_metrics = trainer.validate(val_loader)
+            log_dist = getattr(args, 'log_class_distribution', True)
+            val_metrics = trainer.validate(val_loader, compute_class_distribution=log_dist)
             val_loss = val_metrics['val_loss']
             val_component_losses = val_metrics.get('component_losses', {})
             logger.info(f"Val Loss: {val_loss:.4f}")
@@ -849,6 +841,24 @@ def main():
                 if val_weights_used:
                     comp_str_alpha = " | ".join([f"{k[:4]}:{v:.2f}" for k, v in val_weights_used.items()])
                     logger.info(f"  Val Component weights: {comp_str_alpha}")
+
+            # Log per-head class distributions
+            class_dist = val_metrics.get('class_distribution')
+            if class_dist:
+                logger.info("  --- Per-head class distribution (val) ---")
+                for comp, info in class_dist.items():
+                    acc = info['accuracy'] * 100
+                    names = info['class_names']
+                    pred_pct = info['pred_pct']
+                    tgt_pct = info['target_pct']
+                    recall = info['per_class_recall']
+                    pred_str = " ".join(f"{n}:{p:.0f}%" for n, p in zip(names, pred_pct) if p >= 0.5)
+                    tgt_str = " ".join(f"{n}:{p:.0f}%" for n, p in zip(names, tgt_pct) if p >= 0.5)
+                    recall_str = " ".join(f"{n}:{r*100:.0f}%" for i, (n, r) in enumerate(zip(names, recall)) if info['target_counts'][i] > 0)
+                    logger.info(f"  [{comp:5s}] Acc:{acc:5.1f}% | Pred: {pred_str}")
+                    logger.info(f"  {'':7s}          | GT:   {tgt_str}")
+                    logger.info(f"  {'':7s}          | Recall: {recall_str}")
+
             training_history['val_loss'].append(val_loss)
 
             if wandb_enabled:
@@ -876,6 +886,32 @@ def main():
                 if val_weights_used:
                     for name, value in val_weights_used.items():
                         val_log[f"val/component_weights/{name}"] = float(value)
+
+                if class_dist:
+                    for comp, info in class_dist.items():
+                        val_log[f"val/accuracy/{comp}"] = float(info['accuracy'])
+                        names = info['class_names']
+                        for i, cls_name in enumerate(names):
+                            val_log[f"val/pred_dist/{comp}/{cls_name}"] = float(info['pred_pct'][i])
+                            val_log[f"val/target_dist/{comp}/{cls_name}"] = float(info['target_pct'][i])
+                            val_log[f"val/recall/{comp}/{cls_name}"] = float(info['per_class_recall'][i])
+
+                    columns = ["component", "class", "pred_pct", "target_pct", "recall", "pred_count", "target_count"]
+                    table_data = []
+                    for comp, info in class_dist.items():
+                        for i, cls_name in enumerate(info['class_names']):
+                            table_data.append([
+                                comp, cls_name,
+                                round(float(info['pred_pct'][i]), 1),
+                                round(float(info['target_pct'][i]), 1),
+                                round(float(info['per_class_recall'][i]) * 100, 1),
+                                int(info['pred_counts'][i]),
+                                int(info['target_counts'][i]),
+                            ])
+                    val_log[f"val/class_distribution_table"] = wandb.Table(
+                        columns=columns, data=table_data
+                    )
+
                 val_log['epoch'] = int(epoch + 1)
                 wandb.log(val_log)
             
@@ -940,30 +976,6 @@ def main():
                         'artifacts/best_checkpoint_path': str(checkpoint_path),
                         'epoch': int(epoch + 1),
                     })
-                    _log_wandb_artifact_safe(
-                        wandb_run,
-                        checkpoint_path,
-                        artifact_name=f"{run_name}-model-best",
-                        artifact_type="model",
-                        aliases=["best", f"epoch-{epoch + 1:03d}"],
-                        metadata={
-                            'epoch': int(epoch + 1),
-                            'val_loss': float(val_loss),
-                            'kfold': int(args.kfold),
-                            'backbone': args.backbone,
-                        },
-                    )
-                    _log_wandb_artifact_safe(
-                        wandb_run,
-                        summary_path,
-                        artifact_name=f"{run_name}-best-info",
-                        artifact_type="metadata",
-                        aliases=["best", f"epoch-{epoch + 1:03d}"],
-                        metadata={
-                            'epoch': int(epoch + 1),
-                            'val_loss': float(val_loss),
-                        },
-                    )
         
         # Update learning rate
         scheduler.step()
@@ -1033,32 +1045,6 @@ def main():
             'epoch': int(args.num_epochs),
         }
         wandb.log(final_wandb_log)
-
-        _log_wandb_artifact_safe(
-            wandb_run,
-            final_path,
-            artifact_name=f"{run_name}-model-final",
-            artifact_type="model",
-            aliases=["final"],
-            metadata={
-                'epoch': int(args.num_epochs),
-                'best_epoch': int(best_epoch),
-                'best_val_loss': float(best_val_loss),
-                'kfold': int(args.kfold),
-                'backbone': args.backbone,
-            },
-        )
-        _log_wandb_artifact_safe(
-            wandb_run,
-            history_path,
-            artifact_name=f"{run_name}-training-history",
-            artifact_type="metrics",
-            aliases=["final"],
-            metadata={
-                'num_epochs': int(args.num_epochs),
-                'kfold': int(args.kfold),
-            },
-        )
 
         wandb.run.summary['model/best_val_loss'] = float(best_val_loss)
         wandb.run.summary['model/best_epoch'] = int(best_epoch)

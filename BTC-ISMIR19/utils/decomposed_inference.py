@@ -9,7 +9,7 @@ with the chord structure decomposition model.
 import torch
 import numpy as np
 from typing import Dict, Tuple, Optional, List
-from utils.chord_decomposition import ChordReassembler, ChordDecomposer, COMPONENT_NAMES
+from utils.chord_decomposition import ChordReassembler, ChordDecomposer, COMPONENT_NAMES, CHORD_VOCAB
 import logging
 
 logger = logging.getLogger(__name__)
@@ -336,15 +336,18 @@ class DecomposedChordTrainer:
         
         return avg_loss, component_losses_avg
     
-    def validate(self, val_loader):
+    def validate(self, val_loader, compute_class_distribution=True):
         """
         Run validation.
         
         Args:
             val_loader: DataLoader with validation batches
+            compute_class_distribution: If True, collect per-head class
+                distributions and per-class accuracy (recall).
         
         Returns:
             metrics: Dict with validation metrics including per-component losses
+                and optionally class distribution data.
         """
         self.model.eval()
         total_loss = 0.0
@@ -352,6 +355,17 @@ class DecomposedChordTrainer:
         weighted_component_losses_sum = {component: 0.0 for component in COMPONENT_NAMES}
         component_weights_sum = {component: 0.0 for component in COMPONENT_NAMES}
         num_batches = 0
+
+        vocab_sizes = {comp: len(CHORD_VOCAB[comp]) for comp in COMPONENT_NAMES}
+        if compute_class_distribution:
+            pred_counts = {comp: np.zeros(vocab_sizes[comp], dtype=np.int64)
+                          for comp in COMPONENT_NAMES}
+            target_counts = {comp: np.zeros(vocab_sizes[comp], dtype=np.int64)
+                            for comp in COMPONENT_NAMES}
+            correct_per_class = {comp: np.zeros(vocab_sizes[comp], dtype=np.int64)
+                                for comp in COMPONENT_NAMES}
+            total_correct = {comp: 0 for comp in COMPONENT_NAMES}
+            total_frames = 0
         
         with torch.no_grad():
             for batch in val_loader:
@@ -366,13 +380,11 @@ class DecomposedChordTrainer:
                 for component in COMPONENT_NAMES:
                     labels[component] = components[component].reshape(batch_size, seq_len)
                 
-                # Forward pass (now returns 4 values)
                 predictions, loss, _, batch_component_losses = self.model(features, labels=labels)
                 
                 total_loss += loss.item()
                 num_batches += 1
                 
-                # Aggregate component losses
                 if batch_component_losses:
                     for comp, val in batch_component_losses.items():
                         component_losses_sum[comp] += val
@@ -381,10 +393,22 @@ class DecomposedChordTrainer:
                     for comp, values in breakdown.items():
                         weighted_component_losses_sum[comp] += values.get('weighted_loss', 0.0)
                         component_weights_sum[comp] += values.get('weight', 1.0)
+
+                if compute_class_distribution:
+                    for comp in COMPONENT_NAMES:
+                        p = predictions[comp].cpu().numpy().reshape(-1)
+                        t = labels[comp].cpu().numpy().reshape(-1)
+                        n_cls = vocab_sizes[comp]
+                        pred_counts[comp] += np.bincount(p, minlength=n_cls)[:n_cls]
+                        target_counts[comp] += np.bincount(t, minlength=n_cls)[:n_cls]
+                        hits = (p == t)
+                        for cls_idx in range(n_cls):
+                            correct_per_class[comp][cls_idx] += hits[t == cls_idx].sum()
+                        total_correct[comp] += hits.sum()
+                    total_frames += p.shape[0]
         
         avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
         
-        # Calculate average component losses
         component_losses_avg = {comp: val / num_batches if num_batches > 0 else 0.0 
                                 for comp, val in component_losses_sum.items()}
         self.last_component_raw_losses = component_losses_avg
@@ -397,10 +421,35 @@ class DecomposedChordTrainer:
             for comp, val in component_weights_sum.items()
         }
         
-        return {
+        result = {
             'val_loss': avg_loss,
-            'component_losses': component_losses_avg
+            'component_losses': component_losses_avg,
         }
+
+        if compute_class_distribution and total_frames > 0:
+            class_dist = {}
+            for comp in COMPONENT_NAMES:
+                class_names = CHORD_VOCAB[comp]
+                n_cls = vocab_sizes[comp]
+                p_total = pred_counts[comp].sum()
+                t_total = target_counts[comp].sum()
+                comp_info = {
+                    'class_names': class_names,
+                    'pred_counts': pred_counts[comp],
+                    'target_counts': target_counts[comp],
+                    'pred_pct': (pred_counts[comp] / p_total * 100) if p_total > 0 else np.zeros(n_cls),
+                    'target_pct': (target_counts[comp] / t_total * 100) if t_total > 0 else np.zeros(n_cls),
+                    'per_class_recall': np.array([
+                        correct_per_class[comp][i] / target_counts[comp][i]
+                        if target_counts[comp][i] > 0 else 0.0
+                        for i in range(n_cls)
+                    ]),
+                    'accuracy': total_correct[comp] / total_frames,
+                }
+                class_dist[comp] = comp_info
+            result['class_distribution'] = class_dist
+
+        return result
 
 
 class ChordMetrics:
