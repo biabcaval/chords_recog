@@ -137,25 +137,26 @@ class TestChordDecomposition(unittest.TestCase):
         self.assertEqual(components['triad'], 'min')
     
     def test_maj9(self):
-        """Test C:maj9 decomposition (from user example)."""
+        """Test C:maj9 decomposition — shorthand implies major 7th."""
         components = self.decomposer.decompose('C:maj9')
         self.assertEqual(components['root'], 'C')
         self.assertEqual(components['triad'], 'maj')
+        self.assertEqual(components['7th'], '7')
         self.assertEqual(components['9th'], '9')
     
     def test_min7(self):
-        """Test min7 chord."""
+        """Test min7 chord (minor triad + minor/dominant 7th interval)."""
         components = self.decomposer.decompose('E:min7')
         self.assertEqual(components['root'], 'E')
         self.assertEqual(components['triad'], 'min')
-        self.assertEqual(components['7th'], '7')
+        self.assertEqual(components['7th'], 'b7')
     
     def test_dim7(self):
-        """Test diminished 7th."""
+        """Test diminished 7th (dim triad + diminished 7th interval)."""
         components = self.decomposer.decompose('F:dim7')
         self.assertEqual(components['root'], 'F')
         self.assertEqual(components['triad'], 'dim')
-        self.assertEqual(components['7th'], '7')
+        self.assertEqual(components['7th'], 'bb7')
     
     def test_aug(self):
         """Test augmented triad."""
@@ -196,17 +197,22 @@ class TestChordDecomposition(unittest.TestCase):
             self.assertEqual(components[comp], 'N')
     
     def test_complex_chord_13(self):
-        """Test complex chord with 13th."""
+        """Test complex chord with 13th — shorthand implies 7th, 9th, 11th."""
         components = self.decomposer.decompose('C:maj13')
         self.assertEqual(components['root'], 'C')
         self.assertEqual(components['triad'], 'maj')
+        self.assertEqual(components['7th'], '7')
+        self.assertEqual(components['9th'], '9')
+        self.assertEqual(components['11th'], '11')
         self.assertEqual(components['13th'], '13')
     
     def test_extension_order(self):
         """Test that extensions are extracted correctly without conflicts."""
-        # Test that '13' is not confused with '1' or '3'
         components = self.decomposer.decompose('C:min13')
         self.assertEqual(components['triad'], 'min')
+        self.assertEqual(components['7th'], 'b7')
+        self.assertEqual(components['9th'], '9')
+        self.assertEqual(components['11th'], '11')
         self.assertEqual(components['13th'], '13')
     
     def test_b9(self):
@@ -234,7 +240,7 @@ class TestChordDecomposition(unittest.TestCase):
         chords = ['C:maj', 'D:min7', 'E:aug', 'F:dim', 'N']
         result = self.decomposer.decompose_batch(chords)
         
-        self.assertEqual(len(result), 8)
+        self.assertEqual(len(result), len(COMPONENT_NAMES))
         for comp in COMPONENT_NAMES:
             self.assertIn(comp, result)
             self.assertEqual(len(result[comp]), 5)
@@ -304,20 +310,26 @@ class TestChordReassembly(unittest.TestCase):
         self.assertEqual(reassembled, original)
     
     def test_round_trip_complex(self):
-        """Test round trip for complex chords."""
-        test_chords = [
-            'C:maj7',
-            'D:min9',
-            'E:dim7',
-            'F:sus4',
-            'G:aug',
-            'A:min/E',
-            'B:maj13',
+        """Test round trip for complex chords.
+        
+        Shorthand notations (min9, maj13, etc.) expand to canonical form
+        with implied tones during decomposition, so the reassembled string
+        uses parenthetical extensions rather than shorthand.
+        """
+        # (input, expected_canonical_output)
+        test_cases = [
+            ('C:maj7', 'C:maj7'),
+            ('D:min9', 'D:min7(9)'),
+            ('E:dim7', 'E:dim7'),
+            ('F:sus4', 'F:sus4'),
+            ('G:aug', 'G:aug'),
+            ('A:min/E', 'A:min/E'),
+            ('B:maj13', 'B:maj7(9)(11)(13)'),
         ]
-        for chord in test_chords:
+        for chord, expected in test_cases:
             components = self.decomposer.decompose(chord)
             reassembled = self.reassembler.reassemble(components)
-            self.assertEqual(reassembled, chord, f"Round trip failed for {chord}")
+            self.assertEqual(reassembled, expected, f"Round trip failed for {chord}")
     
     def test_batch_reassembly(self):
         """Test batch reassembly from indices."""
@@ -447,10 +459,10 @@ class TestMultiTaskLoss(unittest.TestCase):
         self.seq_len = 50
     
     def test_loss_initialization(self):
-        """Loss should have 8 sub-losses."""
+        """Loss should have one sub-loss per component."""
         loss_fn = MultiTaskLoss(self.vocab_sizes)
         
-        self.assertEqual(len(loss_fn.losses), 8)
+        self.assertEqual(len(loss_fn.losses), len(COMPONENT_NAMES))
         for component in COMPONENT_NAMES:
             self.assertIn(component, loss_fn.losses)
     
@@ -524,7 +536,7 @@ class TestMultiTaskLoss(unittest.TestCase):
         weights = MultiTaskLoss.compute_class_weights(dataset, gamma=gamma, w_max=w_max)
         
         # Verify structure
-        self.assertEqual(len(weights), 8)
+        self.assertEqual(len(weights), len(COMPONENT_NAMES))
         for component in COMPONENT_NAMES:
             self.assertIn(component, weights)
             vocab_size = len(CHORD_VOCAB[component])
@@ -607,7 +619,7 @@ class TestEndToEndPipeline(unittest.TestCase):
         
         # 3. Forward pass
         with torch.no_grad():
-            predictions, _, _ = model(x)
+            predictions, _, _, _ = model(x)
         
         # 4. Decode predictions
         reassembler = ChordReassembler()
@@ -660,7 +672,7 @@ class TestEndToEndPipeline(unittest.TestCase):
         
         # Training step
         model.train()
-        predictions, loss, _ = model(x, labels=labels)
+        predictions, loss, _, _ = model(x, labels=labels)
         
         self.assertIsNotNone(loss)
         self.assertGreater(loss.item(), 0)

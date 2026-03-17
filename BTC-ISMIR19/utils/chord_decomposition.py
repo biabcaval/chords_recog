@@ -17,6 +17,7 @@ Components:
 9. 13th: 3 classes (N, 13, b13)
 """
 
+import re
 import numpy as np
 from typing import Dict, Tuple, List, Optional
 import torch
@@ -277,6 +278,47 @@ class ChordDecomposer:
         
         # Extract extensions from remaining string
         self._extract_extensions(remaining, components)
+        
+        # Add implied tones for shorthand (non-parenthetical) extensions
+        self._add_implied_tones(quality, components)
+    
+    def _add_implied_tones(self, original_quality: str, components: Dict[str, str]) -> None:
+        """
+        Add implied tones for shorthand (non-parenthetical) chord extensions.
+        
+        In music theory, shorthand extensions imply lower extensions:
+          - 9/min9/maj9  -> implies 7th is present
+          - 11/min11     -> implies 7th + 9th
+          - 13/min13     -> implies 7th + 9th + 11th
+        
+        Parenthetical extensions like (9), (11), (13) mean "add" and do NOT
+        imply lower extensions.
+        
+        The implied 7th type depends on the quality prefix:
+          - maj prefix  -> 7th = '7'  (major 7th)
+          - otherwise   -> 7th = 'b7' (dominant/minor 7th)
+        """
+        if components.get('7th', 'N') != 'N':
+            return
+        
+        # Strip parenthetical content to get the "core" shorthand
+        core = re.sub(r'\([^)]*\)', '', original_quality).lower()
+        
+        is_maj_quality = core.startswith('maj')
+        implied_7th = '7' if is_maj_quality else 'b7'
+        
+        if '13' in core and components.get('13th', 'N') != 'N':
+            components['7th'] = implied_7th
+            if components.get('9th', 'N') == 'N':
+                components['9th'] = '9'
+            if components.get('11th', 'N') == 'N':
+                components['11th'] = '11'
+        elif '11' in core and components.get('11th', 'N') != 'N':
+            components['7th'] = implied_7th
+            if components.get('9th', 'N') == 'N':
+                components['9th'] = '9'
+        elif '9' in core and components.get('9th', 'N') != 'N':
+            components['7th'] = implied_7th
     
     def _extract_extensions(self, remaining: str, components: Dict[str, str]) -> None:
         """
@@ -494,9 +536,13 @@ class ChordReassembler:
             if triad == 'dim':
                 chord = f"{root}:dim7"
             else:
-                chord = f"{root}:{triad}7"
+                chord = f"{root}:{triad}(bb7)"
         else:
             chord = f"{root}:{triad}"
+
+        # 6th as parenthetical when combined with 7th or higher extensions
+        if ext_6th != 'N' and has_ext:
+            chord += f"(6)"
 
         # Higher extensions as parenthetical — mir_eval standard
         if ext_9th != 'N':

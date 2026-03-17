@@ -162,20 +162,34 @@ A reconstrução segue regras musicais estritas, nesta ordem:
 - **Extensões opcionais**: 6th, 7th, 9th, 11th, 13th só aparecem se o modelo as prediz como presentes.
 - **Bass condicional**: só aparece na notação se for diferente do root (evita `C:maj/C`).
 
-### 3.3 Exemplos de reconstrução
+### 3.3 Conversão shorthand → canônica
+
+O decomposer adiciona **implied tones** para notações shorthand (não-parentéticas):
+
+| Shorthand | Expansão canônica (decompose → reassemble) |
+|---|---|
+| `D:min9` | `D:min7(9)` — shorthand implica b7 |
+| `C:maj9` | `C:maj7(9)` — shorthand implica 7 (major) |
+| `C:9` | `C:7(9)` — shorthand implica b7 |
+| `C:13` | `C:7(9)(11)(13)` — shorthand implica b7, 9, 11 |
+| `C:maj(9)` | `C:maj(9)` — parentético = "add", sem implied tones |
+
+### 3.4 Exemplos de reconstrução
 
 | Componentes preditos | Acorde reconstruído |
 |---|---|
 | root=C, triad=maj, 7th=7 | `C:maj7` |
-| root=G, triad=min, 7th=b7 | `G:minb7` |
-| root=D, triad=maj, 7th=b7 | `D:majb7` |
+| root=G, triad=min, 7th=b7 | `G:min7` |
+| root=D, triad=maj, 7th=b7 | `D:7` |
 | root=A, triad=min, bass=E | `A:min/E` |
 | root=E, misc=5 | `E:5` |
-| root=C, triad=maj, 7th=7, 9th=9, 13th=13 | `C:maj7913` |
+| root=C, triad=maj, 7th=7, 9th=9, 13th=13 | `C:maj7(9)(13)` |
+| root=C, triad=maj, 7th=bb7 | `C:maj(bb7)` |
+| root=A, triad=min, 6th=6, 7th=b7 | `A:min7(6)` |
 | root=N | `N` |
 | root=F, triad=N | `N` |
 
-### 3.4 Confiança na reconstrução
+### 3.5 Confiança na reconstrução
 
 O método `reassemble_with_confidence()` calcula um score de confiança para o acorde reconstruído. A regra é conservadora: a confiança final é o **mínimo** entre as confianças dos componentes ativos.
 

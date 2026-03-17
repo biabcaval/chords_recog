@@ -42,12 +42,13 @@ class TestChordDecomposition(unittest.TestCase):
         self.assertEqual(components['7th'], 'N')
     
     def test_complex_decomposition(self):
-        """Test decomposition of complex chord."""
+        """Test decomposition of complex chord — shorthand implies major 7th."""
         chord = 'D:maj9'
         components = self.decomposer.decompose(chord)
         
         self.assertEqual(components['root'], 'D')
         self.assertEqual(components['triad'], 'maj')
+        self.assertEqual(components['7th'], '7')
         self.assertEqual(components['9th'], '9')
     
     def test_slash_chord_decomposition(self):
@@ -97,13 +98,21 @@ class TestChordDecomposition(unittest.TestCase):
         self.assertEqual(reassembled, 'N')
     
     def test_round_trip(self):
-        """Test decompose -> reassemble round trip."""
-        test_chords = ['C:maj', 'D:min9', 'E:dim7', 'F:sus4/C', 'G:maj13']
+        """Test decompose -> reassemble round trip.
         
-        for chord in test_chords:
+        Shorthand notations expand to canonical form with implied tones.
+        """
+        test_cases = [
+            ('C:maj', 'C:maj'),
+            ('D:min9', 'D:min7(9)'),
+            ('E:dim7', 'E:dim7'),
+            ('F:sus4/C', 'F:sus4/C'),
+            ('G:maj13', 'G:maj7(9)(11)(13)'),
+        ]
+        for chord, expected in test_cases:
             components = self.decomposer.decompose(chord)
             reassembled = self.reassembler.reassemble(components)
-            self.assertEqual(reassembled, chord, f"Round trip failed for {chord}")
+            self.assertEqual(reassembled, expected, f"Round trip failed for {chord}")
 
 
 class TestVocabulary(unittest.TestCase):
