@@ -17,7 +17,8 @@ import torch
 from pathlib import Path
 
 from utils.chord_decomposition import (
-    ChordDecomposer, ChordReassembler, get_vocab_sizes, COMPONENT_NAMES
+    ChordDecomposer, ChordReassembler, get_vocab_sizes, COMPONENT_NAMES,
+    transpose_chord,
 )
 from models.btc_model_decomposed import (
     ComponentHead, MultiHeadChordDecomposer, MultiTaskLoss, BTC_model_decomposed
@@ -113,6 +114,56 @@ class TestChordDecomposition(unittest.TestCase):
             components = self.decomposer.decompose(chord)
             reassembled = self.reassembler.reassemble(components)
             self.assertEqual(reassembled, expected, f"Round trip failed for {chord}")
+
+
+class TestTransposeChord(unittest.TestCase):
+    """Test chord transposition utility."""
+
+    def test_no_shift(self):
+        self.assertEqual(transpose_chord('C:maj', 0), 'C:maj')
+
+    def test_special_labels(self):
+        self.assertEqual(transpose_chord('N', 5), 'N')
+        self.assertEqual(transpose_chord('X', 3), 'X')
+        self.assertEqual(transpose_chord('', 2), '')
+
+    def test_shift_up(self):
+        self.assertEqual(transpose_chord('A:min', 3), 'C:min')
+
+    def test_shift_down(self):
+        self.assertEqual(transpose_chord('D:maj7', -2), 'C:maj7')
+
+    def test_wrap_around(self):
+        self.assertEqual(transpose_chord('B:min', 1), 'C:min')
+        self.assertEqual(transpose_chord('C:maj', -1), 'B:maj')
+
+    def test_with_bass(self):
+        self.assertEqual(transpose_chord('C:maj7(9)/E', 2), 'D:maj7(9)/F#')
+
+    def test_flat_root(self):
+        self.assertEqual(transpose_chord('Bb:7', 2), 'C:7')
+        self.assertEqual(transpose_chord('Eb:min', 1), 'E:min')
+
+    def test_flat_bass(self):
+        self.assertEqual(transpose_chord('C:maj/Bb', 2), 'D:maj/C')
+
+    def test_extensions_preserved(self):
+        self.assertEqual(transpose_chord('A:min7(9)(13)', 3), 'C:min7(9)(13)')
+
+    def test_plain_root(self):
+        self.assertEqual(transpose_chord('G', 2), 'A')
+
+    def test_sharp_root(self):
+        self.assertEqual(transpose_chord('F#:dim7', 1), 'G:dim7')
+
+    def test_all_12_shifts(self):
+        """Shifting by 12 semitones should return to the same chord."""
+        chord = 'C#:maj7(9)/G#'
+        self.assertEqual(transpose_chord(chord, 12), chord)
+
+    def test_bass_numeric(self):
+        """Bass note like /5 (scale degree) should pass through unchanged."""
+        self.assertEqual(transpose_chord('D:maj6(9)/5', 3), 'F:maj6(9)/5')
 
 
 class TestVocabulary(unittest.TestCase):

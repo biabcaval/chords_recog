@@ -63,6 +63,86 @@ SEVENTH_EXTENSIONS = {
 }
 
 
+_NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+_NOTE_TO_IDX = {n: i for i, n in enumerate(_NOTES)}
+_FLAT_TO_SHARP = {'Cb': 'B', 'Db': 'C#', 'Eb': 'D#', 'Fb': 'E', 'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#'}
+
+
+def _parse_note(s: str) -> Tuple[str, int]:
+    """Parse a note name from the start of a string, return (note, chars_consumed)."""
+    if len(s) >= 2 and s[:2] in _FLAT_TO_SHARP:
+        return _FLAT_TO_SHARP[s[:2]], 2
+    if len(s) >= 2 and s[:2] in _NOTE_TO_IDX:
+        return s[:2], 2
+    if len(s) >= 1 and s[0] in _NOTE_TO_IDX:
+        return s[0], 1
+    return '', 0
+
+
+def _shift_note(note: str, semitones: int) -> str:
+    """Transpose a single note name by the given number of semitones."""
+    if note in _FLAT_TO_SHARP:
+        note = _FLAT_TO_SHARP[note]
+    idx = _NOTE_TO_IDX.get(note)
+    if idx is None:
+        return note
+    return _NOTES[(idx + semitones) % 12]
+
+
+def transpose_chord(chord_str: str, semitones: int) -> str:
+    """
+    Transpose a chord label by the given number of semitones.
+
+    Shifts root and bass notes while preserving quality and extensions.
+    Handles flats by normalising to sharps before transposing.
+
+    Examples:
+        transpose_chord('A:min', 3)       -> 'C:min'
+        transpose_chord('C:maj7(9)/E', 2) -> 'D:maj7(9)/F#'
+        transpose_chord('N', 5)           -> 'N'
+    """
+    if not chord_str or chord_str in ('N', 'X'):
+        return chord_str
+    if semitones == 0:
+        return chord_str
+
+    colon_idx = chord_str.find(':')
+    slash_idx = chord_str.rfind('/')
+
+    if colon_idx == -1 and slash_idx == -1:
+        note, consumed = _parse_note(chord_str)
+        if not note:
+            return chord_str
+        return _shift_note(note, semitones) + chord_str[consumed:]
+
+    if colon_idx != -1:
+        root_str = chord_str[:colon_idx]
+    elif slash_idx != -1:
+        root_str = chord_str[:slash_idx]
+    else:
+        root_str = chord_str
+
+    root_note, _ = _parse_note(root_str)
+    if not root_note:
+        return chord_str
+    new_root = _shift_note(root_note, semitones)
+
+    if slash_idx != -1 and slash_idx > colon_idx:
+        bass_str = chord_str[slash_idx + 1:]
+        bass_note, bass_consumed = _parse_note(bass_str)
+        if bass_note:
+            new_bass = _shift_note(bass_note, semitones)
+            middle = chord_str[len(root_str):slash_idx]
+            bass_suffix = bass_str[bass_consumed:]
+            return new_root + middle + '/' + new_bass + bass_suffix
+        else:
+            middle = chord_str[len(root_str):]
+            return new_root + middle
+    else:
+        rest = chord_str[len(root_str):]
+        return new_root + rest
+
+
 class ChordDecomposer:
     """
     Decomposes chord labels into 8 independent components.
