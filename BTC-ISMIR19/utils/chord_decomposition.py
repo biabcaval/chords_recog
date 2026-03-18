@@ -67,6 +67,12 @@ _NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 _NOTE_TO_IDX = {n: i for i, n in enumerate(_NOTES)}
 _FLAT_TO_SHARP = {'Cb': 'B', 'Db': 'C#', 'Eb': 'D#', 'Fb': 'E', 'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#'}
 
+DEGREE_TO_SEMITONE = {
+    '1': 0, 'b2': 1, '2': 2, 'b3': 3, '3': 4, '4': 5,
+    'b5': 6, '#4': 6, '5': 7, '#5': 8, 'b6': 8, '6': 9,
+    'bb7': 9, 'b7': 10, '7': 11,
+}
+
 
 def _parse_note(s: str) -> Tuple[str, int]:
     """Parse a note name from the start of a string, return (note, chars_consumed)."""
@@ -145,13 +151,13 @@ def transpose_chord(chord_str: str, semitones: int) -> str:
 
 class ChordDecomposer:
     """
-    Decomposes chord labels into 8 independent components.
+    Decomposes chord labels into 9 independent components.
     
     Example:
         decomposer = ChordDecomposer()
         components = decomposer.decompose('C:maj9')
         # Returns: {'root': 'C', 'bass': 'N', 'triad': 'maj', 'misc': 'N',
-        #           '7th': 'N', '9th': '9', '11th': 'N', '13th': 'N'}
+        #           '6th': 'N', '7th': '7', '9th': '9', '11th': 'N', '13th': 'N'}
     """
     
     # Mapping from flats to sharps (enharmonic equivalents)
@@ -216,177 +222,194 @@ class ChordDecomposer:
         
         return components
     
+    def _resolve_bass_degree(self, root: str, degree: str) -> Optional[str]:
+        """Convert a scale-degree bass (e.g., '5', 'b3') to an absolute note name."""
+        semitones = DEGREE_TO_SEMITONE.get(degree.lower())
+        if semitones is None:
+            return None
+        root_idx = _NOTE_TO_IDX.get(root)
+        if root_idx is None:
+            return None
+        return _NOTES[(root_idx + semitones) % 12]
+
     def _parse_chord(self, label: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """
         Parse chord label into (root, quality, bass).
         
+        Handles both note-name bass (e.g., /E) and scale-degree bass (e.g., /5, /b3)
+        from Harte notation .lab files.
+        
         Examples:
-            'C:maj9' -> ('C', 'maj9', None)
-            'D:min7/F#' -> ('D', 'min7', 'F#')
-            'C' -> ('C', None, None)
+            'C:maj9'     -> ('C', 'maj9', None)
+            'D:min7/F#'  -> ('D', 'min7', 'F#')
+            'C:maj/5'    -> ('C', 'maj', 'G')     # degree resolved
+            'A:min/b3'   -> ('A', 'min', 'C')     # degree resolved
+            'C'          -> ('C', None, None)
         """
         root = None
         quality = None
         bass = None
         
-        # Find the ':' separator for quality
         colon_idx = label.find(':')
         slash_idx = label.find('/')
         
         if colon_idx == -1 and slash_idx == -1:
-            # Just a root note (e.g., 'C')
             root = label
         elif colon_idx == -1:
-            # Root with bass but no quality (e.g., 'C/E')
             root = label[:slash_idx]
             bass = label[slash_idx + 1:]
         elif slash_idx == -1:
-            # Root with quality but no bass (e.g., 'C:maj9')
             root = label[:colon_idx]
             quality = label[colon_idx + 1:]
         else:
-            # Root, quality, and bass (e.g., 'C:maj9/E')
             root = label[:colon_idx]
             quality = label[colon_idx + 1:slash_idx]
             bass = label[slash_idx + 1:]
         
-        # Normalize flats to sharps
         if root:
             root = self._normalize_pitch(root)
         if bass:
             bass = self._normalize_pitch(bass)
         
-        # Validate root and bass are valid pitch classes
         if root and root not in self.pitch_classes:
             root = None
         if bass and bass not in self.pitch_classes:
-            bass = None
+            if root and root in self.pitch_classes:
+                bass = self._resolve_bass_degree(root, label[slash_idx + 1:])
+            else:
+                bass = None
         
         return root, quality, bass
     
     def _decompose_quality(self, quality: str, components: Dict[str, str]) -> None:
         """
         Decompose quality string into triad and extensions.
-        
-        Examples:
-            'maj9' -> triad='maj', extensions include 9th
-            'min7' -> triad='min', 7th='b7' (minor 7th interval)
-            'maj7' -> triad='maj', 7th='7' (major 7th interval)
-            '7' -> triad='maj', 7th='b7' (dominant 7th)
-            'min6' -> triad='min', 6th='6'
-            'maj6' -> triad='maj', 6th='6'
-            'minmaj7' -> triad='min', 7th='7' (minor with major 7th)
-            '5' -> triad='N', misc='5'
-            'hdim7' -> triad='dim', 7th='b7' (half-diminished)
-            'dim7' -> triad='dim', 7th='bb7' (diminished 7th)
-            
-        Also handles .lab file format with parenthetical extensions:
-            'maj7(9)' -> triad='maj', 7th='7', 9th='9'
-            '7(b9)' -> triad='maj', 7th='b7', 9th='b9'
-            'sus4(b7)' -> triad='sus4', 7th='b7'
+
+        Uses a phased architecture that correctly distinguishes shorthand
+        notation (e.g., ``min7`` = minor + dominant 7th) from parenthetical
+        extensions (e.g., ``min(7)`` = minor + **major** 7th added).
+
+        Phases:
+            1. Extract parenthetical content — ``(b9)``, ``(*3,9)``
+            2. Process the shorthand (quality without parens)
+            3. Add implied tones from shorthand (``9`` → implies 7th)
+            4. Apply parenthetical extensions
+            5. Apply omit (``*``) rules
         """
-        # Normalize parenthetical extensions from .lab files
-        # e.g., 'maj7(9)' -> 'maj79', '7(b9)' -> '7b9'
-        quality_normalized = quality.replace('(', '').replace(')', '')
-        quality_lower = quality_normalized.lower()
-        
-        # Check for special cases
-        if quality_lower == '5' or quality_lower == 'pedal':
+        paren_extensions, omit_notes = self._extract_paren_content(quality)
+
+        shorthand = re.sub(r'\([^)]*\)', '', quality).strip()
+        shorthand_lower = shorthand.lower()
+
+        self._process_shorthand(shorthand_lower, components)
+        self._add_implied_tones(shorthand, components)
+        self._apply_paren_extensions(paren_extensions, components)
+        self._apply_omit_rules(omit_notes, components)
+
+    # ------------------------------------------------------------------
+    # Phase 1: parenthetical content
+    # ------------------------------------------------------------------
+
+    def _extract_paren_content(self, quality: str) -> Tuple[List[str], List[str]]:
+        """Split ``(...)`` groups into extensions and omit notes."""
+        paren_extensions: List[str] = []
+        omit_notes: List[str] = []
+
+        for group in re.findall(r'\(([^)]*)\)', quality):
+            for item in group.split(','):
+                item = item.strip()
+                if not item:
+                    continue
+                if item.startswith('*'):
+                    omit_notes.append(item[1:])
+                else:
+                    paren_extensions.append(item)
+
+        return paren_extensions, omit_notes
+
+    # ------------------------------------------------------------------
+    # Phase 2: shorthand processing
+    # ------------------------------------------------------------------
+
+    def _process_shorthand(self, shorthand: str, components: Dict[str, str]) -> None:
+        """Process the shorthand portion of the quality (no parentheses)."""
+        if shorthand in ('5', 'pedal', '1'):
             components['misc'] = '5'
             return
-        
-        # Handle half-diminished (hdim = dim triad + minor 7th)
-        if quality_lower.startswith('hdim') or quality_lower == 'hdim7':
+
+        if shorthand.startswith('hdim') or shorthand == 'hdim7':
             components['triad'] = 'dim'
-            components['7th'] = 'b7'  # half-dim has minor 7th
-            remaining = quality_lower.replace('hdim', '', 1).replace('7', '', 1)
-            self._extract_extensions(remaining, components)
+            components['7th'] = 'b7'
+            remaining = shorthand.replace('hdim', '', 1).replace('7', '', 1)
+            self._extract_shorthand_extensions(remaining, components)
             return
-        
-        # Handle minmaj7 (minor triad + major 7th) - BEFORE general min/maj parsing
-        if 'minmaj7' in quality_lower or 'minmaj' in quality_lower:
+
+        if 'minmaj7' in shorthand or 'minmaj' in shorthand:
             components['triad'] = 'min'
-            components['7th'] = '7'  # major 7th
-            remaining = quality_lower.replace('minmaj7', '').replace('minmaj', '')
-            self._extract_extensions(remaining, components)
+            components['7th'] = '7'
+            remaining = shorthand.replace('minmaj7', '').replace('minmaj', '')
+            self._extract_shorthand_extensions(remaining, components)
             return
-        
-        # Handle dim7 specially (diminished triad + diminished 7th)
-        if quality_lower == 'dim7' or quality_lower.startswith('dim7'):
+
+        if shorthand == 'dim7' or shorthand.startswith('dim7'):
             components['triad'] = 'dim'
-            components['7th'] = 'bb7'  # diminished 7th
-            remaining = quality_lower.replace('dim7', '')
-            self._extract_extensions(remaining, components)
+            components['7th'] = 'bb7'
+            remaining = shorthand.replace('dim7', '')
+            self._extract_shorthand_extensions(remaining, components)
             return
-        
-        # Handle maj7 specially (major triad + major 7th)
-        # Must check BEFORE general 'maj' extraction to avoid maj7 -> maj + 7(b7)
-        if 'maj7' in quality_lower:
+
+        if 'maj7' in shorthand:
             components['triad'] = 'maj'
-            components['7th'] = '7'  # major 7th
-            remaining = quality_lower.replace('maj7', '')
-            self._extract_extensions(remaining, components)
+            components['7th'] = '7'
+            remaining = shorthand.replace('maj7', '')
+            self._extract_shorthand_extensions(remaining, components)
             return
-        
-        # Handle power chord variations
-        if quality_lower.startswith('(1,5)') or quality_lower == 'power':
+
+        if shorthand == 'power':
             components['misc'] = '5'
             return
-        
-        # Extract triad type (check longer patterns first)
+
         triad = None
-        remaining = quality_lower
-        
-        # Order matters: check longer patterns first to avoid partial matches
-        triad_patterns = ['sus2', 'sus4', 'maj', 'min', 'dim', 'aug']
-        for triad_name in triad_patterns:
-            if triad_name in quality_lower:
+        remaining = shorthand
+        for triad_name in ('sus2', 'sus4', 'maj', 'min', 'dim', 'aug'):
+            if triad_name in shorthand:
                 triad = triad_name
-                # Remove triad from remaining, being careful about position
-                idx = quality_lower.find(triad_name)
-                remaining = quality_lower[:idx] + quality_lower[idx + len(triad_name):]
+                idx = shorthand.find(triad_name)
+                remaining = shorthand[:idx] + shorthand[idx + len(triad_name):]
                 break
-        
+
         if triad:
             components['triad'] = triad
         else:
-            # If no explicit triad but has extensions, assume major triad
-            # e.g., 'C:7' means C major with dominant 7th
-            if any(ext in quality_lower for ext in ['6', '7', '9', '11', '13']):
+            if any(ext in shorthand for ext in ('6', '7', '9', '11', '13')):
                 components['triad'] = 'maj'
-                remaining = quality_lower
-        
-        # Extract extensions from remaining string
-        self._extract_extensions(remaining, components)
-        
-        # Add implied tones for shorthand (non-parenthetical) extensions
-        self._add_implied_tones(quality, components)
-    
-    def _add_implied_tones(self, original_quality: str, components: Dict[str, str]) -> None:
+                remaining = shorthand
+
+        self._extract_shorthand_extensions(remaining, components)
+
+    # ------------------------------------------------------------------
+    # Phase 3: implied tones
+    # ------------------------------------------------------------------
+
+    def _add_implied_tones(self, shorthand: str, components: Dict[str, str]) -> None:
         """
-        Add implied tones for shorthand (non-parenthetical) chord extensions.
-        
-        In music theory, shorthand extensions imply lower extensions:
-          - 9/min9/maj9  -> implies 7th is present
-          - 11/min11     -> implies 7th + 9th
-          - 13/min13     -> implies 7th + 9th + 11th
-        
-        Parenthetical extensions like (9), (11), (13) mean "add" and do NOT
-        imply lower extensions.
-        
-        The implied 7th type depends on the quality prefix:
-          - maj prefix  -> 7th = '7'  (major 7th)
-          - otherwise   -> 7th = 'b7' (dominant/minor 7th)
+        Add implied tones for shorthand extensions.
+
+        Shorthand extensions imply lower extensions:
+          - ``9``/``min9``/``maj9``  → implies 7th
+          - ``11``/``min11``         → implies 7th + 9th
+          - ``13``/``min13``         → implies 7th + 9th + 11th
+
+        Parenthetical ``(9)`` means *add* and does **not** imply lower
+        extensions — those are handled separately in ``_apply_paren_extensions``.
         """
         if components.get('7th', 'N') != 'N':
             return
-        
-        # Strip parenthetical content to get the "core" shorthand
-        core = re.sub(r'\([^)]*\)', '', original_quality).lower()
-        
+
+        core = shorthand.lower()
         is_maj_quality = core.startswith('maj')
         implied_7th = '7' if is_maj_quality else 'b7'
-        
+
         if '13' in core and components.get('13th', 'N') != 'N':
             components['7th'] = implied_7th
             if components.get('9th', 'N') == 'N':
@@ -399,59 +422,114 @@ class ChordDecomposer:
                 components['9th'] = '9'
         elif '9' in core and components.get('9th', 'N') != 'N':
             components['7th'] = implied_7th
-    
-    def _extract_extensions(self, remaining: str, components: Dict[str, str]) -> None:
+
+    # ------------------------------------------------------------------
+    # Phase 4: parenthetical extensions
+    # ------------------------------------------------------------------
+
+    def _apply_paren_extensions(self, extensions: List[str],
+                                components: Dict[str, str]) -> None:
         """
-        Extract extension components from remaining quality string.
-        
-        The order of extraction is important: higher extensions first (13 before 11 before 9)
-        to avoid partial matches (e.g., '13' containing '1').
-        
-        7th mapping:
-            'maj7' -> '7' (major 7th interval)
-            '7' alone -> 'b7' (dominant/minor 7th interval)
-            'bb7' -> 'bb7' (diminished 7th interval)
-        
-        Examples:
-            '9' -> adds 9th component
-            '7' -> adds 7th='b7' (dominant 7th)
-            'maj7' -> adds 7th='7' (major 7th)
-            '6' -> adds 6th='6'
-            '13' -> adds 13th component
-            
-        Also handles parenthetical extensions from .lab files:
-            '(9)' -> adds 9th component
-            '(b9)' -> adds 9th='b9'
-            '(#11)' -> adds 11th='#11'
+        Apply parenthetical extensions to components.
+
+        Key semantic difference from shorthand:
+            ``(7)`` = *add* major 7th interval (7th = '7')
+            ``(b7)`` = *add* dominant/minor 7th  (7th = 'b7')
         """
-        # Remove parentheses from extensions like (9), (b9), (#11)
-        # This normalizes .lab file format to standard format
-        remaining = remaining.replace('(', '').replace(')', '')
-        # Handle 13th extension FIRST (to avoid '1' matching in '13')
+        for ext in extensions:
+            low = ext.lower()
+
+            # --- 7th variants (only set if shorthand hasn't already) ---
+            if low == 'bb7':
+                if components.get('7th', 'N') == 'N':
+                    components['7th'] = 'bb7'
+            elif low == 'b7':
+                if components.get('7th', 'N') == 'N':
+                    components['7th'] = 'b7'
+            elif low == '7':
+                if components.get('7th', 'N') == 'N':
+                    components['7th'] = '7'
+
+            # --- 9th ---
+            elif low == '#9':
+                components['9th'] = '#9'
+            elif low == 'b9':
+                components['9th'] = 'b9'
+            elif low == '9':
+                components['9th'] = '9'
+
+            # --- 11th ---
+            elif low == '#11':
+                components['11th'] = '#11'
+            elif low == '11':
+                components['11th'] = '11'
+
+            # --- 13th ---
+            elif low == 'b13':
+                components['13th'] = 'b13'
+            elif low == '13':
+                components['13th'] = '13'
+
+            # --- 6th ---
+            elif low == '6':
+                components['6th'] = '6'
+
+            # --- altered 5th — modifies triad ---
+            elif low == 'b5':
+                if components.get('triad') == 'min':
+                    components['triad'] = 'dim'
+            elif low == '#5':
+                if components.get('triad') == 'maj':
+                    components['triad'] = 'aug'
+
+            # (4), (2), (b6) etc. — no vocab slot, silently ignored
+
+    # ------------------------------------------------------------------
+    # Phase 5: omit rules
+    # ------------------------------------------------------------------
+
+    def _apply_omit_rules(self, omit_notes: List[str],
+                          components: Dict[str, str]) -> None:
+        """
+        Handle ``*`` (omit) notation.
+
+        When the 3rd (``*3`` or ``*b3``) is omitted the triad identity is
+        lost.  We approximate as a power chord (``misc='5'``).
+        """
+        if not omit_notes:
+            return
+
+        omit_lower = {o.lower() for o in omit_notes}
+        if '3' in omit_lower or 'b3' in omit_lower:
+            components['triad'] = 'N'
+            components['misc'] = '5'
+
+    # ------------------------------------------------------------------
+    # Shorthand extension extraction (used by _process_shorthand)
+    # ------------------------------------------------------------------
+
+    def _extract_shorthand_extensions(self, remaining: str,
+                                      components: Dict[str, str]) -> None:
+        """
+        Extract extensions from the leftover shorthand string.
+
+        Extraction order (high → low) avoids partial matches
+        (e.g., ``'13'`` must be consumed before ``'1'``).
+        """
         if 'b13' in remaining:
             components['13th'] = 'b13'
             remaining = remaining.replace('b13', '', 1)
-        elif '#13' in remaining:
-            # Non-standard but handle gracefully
-            components['13th'] = '13'
-            remaining = remaining.replace('#13', '', 1)
         elif '13' in remaining:
             components['13th'] = '13'
             remaining = remaining.replace('13', '', 1)
-        
-        # Handle 11th extension SECOND (to avoid '1' matching in '11')
+
         if '#11' in remaining:
             components['11th'] = '#11'
             remaining = remaining.replace('#11', '', 1)
-        elif 'b11' in remaining:
-            # b11 is enharmonic to #9 but handle as 11
-            components['11th'] = '11'
-            remaining = remaining.replace('b11', '', 1)
         elif '11' in remaining:
             components['11th'] = '11'
             remaining = remaining.replace('11', '', 1)
-        
-        # Handle 9th extension THIRD
+
         if '#9' in remaining:
             components['9th'] = '#9'
             remaining = remaining.replace('#9', '', 1)
@@ -461,23 +539,18 @@ class ChordDecomposer:
         elif '9' in remaining:
             components['9th'] = '9'
             remaining = remaining.replace('9', '', 1)
-        
-        # Handle 7th extension (only if not already set by special cases)
+
         if components.get('7th', 'N') == 'N':
             if 'bb7' in remaining:
-                components['7th'] = 'bb7'  # diminished 7th
+                components['7th'] = 'bb7'
                 remaining = remaining.replace('bb7', '', 1)
-            elif 'maj7' in remaining:
-                components['7th'] = '7'  # major 7th
-                remaining = remaining.replace('maj7', '', 1)
             elif 'b7' in remaining:
-                components['7th'] = 'b7'  # minor 7th
+                components['7th'] = 'b7'
                 remaining = remaining.replace('b7', '', 1)
             elif '7' in remaining:
-                components['7th'] = 'b7'  # dominant 7th = minor 7th interval
+                components['7th'] = 'b7'
                 remaining = remaining.replace('7', '', 1)
-        
-        # Handle 6th extension
+
         if '6' in remaining:
             components['6th'] = '6'
             remaining = remaining.replace('6', '', 1)
@@ -565,8 +638,22 @@ class ChordReassembler:
         
         # Priority 2: Power chord case (misc = '5')
         if misc == '5':
-            # Power chord: root:5 with optional bass
             chord = f"{root}:5"
+            ext_6th = components.get('6th', 'N')
+            ext_7th = components.get('7th', 'N')
+            ext_9th = components.get('9th', 'N')
+            ext_11th = components.get('11th', 'N')
+            ext_13th = components.get('13th', 'N')
+            if ext_6th != 'N':
+                chord += '(6)'
+            if ext_7th != 'N':
+                chord += f'({ext_7th})'
+            if ext_9th != 'N':
+                chord += f'({ext_9th})'
+            if ext_11th != 'N':
+                chord += f'({ext_11th})'
+            if ext_13th != 'N':
+                chord += f'({ext_13th})'
             if bass != 'N' and bass != root:
                 chord += f"/{bass}"
             return chord

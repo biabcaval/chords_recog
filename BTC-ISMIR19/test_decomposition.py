@@ -109,11 +109,436 @@ class TestChordDecomposition(unittest.TestCase):
             ('E:dim7', 'E:dim7'),
             ('F:sus4/C', 'F:sus4/C'),
             ('G:maj13', 'G:maj7(9)(11)(13)'),
+            ('C:5', 'C:5'),
         ]
         for chord, expected in test_cases:
             components = self.decomposer.decompose(chord)
             reassembled = self.reassembler.reassemble(components)
             self.assertEqual(reassembled, expected, f"Round trip failed for {chord}")
+
+
+class TestBassScaleDegree(unittest.TestCase):
+    """Bug 1: bass scale-degree notation (/5, /b3) in .lab files."""
+
+    def setUp(self):
+        self.decomposer = ChordDecomposer()
+
+    def test_bass_degree_5(self):
+        c = self.decomposer.decompose('C:maj/5')
+        self.assertEqual(c['root'], 'C')
+        self.assertEqual(c['bass'], 'G')
+        self.assertEqual(c['triad'], 'maj')
+
+    def test_bass_degree_3(self):
+        c = self.decomposer.decompose('D:maj/3')
+        self.assertEqual(c['bass'], 'F#')
+
+    def test_bass_degree_b3(self):
+        c = self.decomposer.decompose('A:min/b3')
+        self.assertEqual(c['bass'], 'C')
+
+    def test_bass_degree_b7(self):
+        c = self.decomposer.decompose('C:7/b7')
+        self.assertEqual(c['bass'], 'A#')
+
+    def test_bass_degree_7(self):
+        c = self.decomposer.decompose('C:maj7/7')
+        self.assertEqual(c['bass'], 'B')
+
+    def test_bass_degree_b5(self):
+        c = self.decomposer.decompose('G:dim/b5')
+        self.assertEqual(c['bass'], 'C#')
+
+    def test_bass_note_name_still_works(self):
+        """Absolute note names should still be parsed correctly."""
+        c = self.decomposer.decompose('C:maj/E')
+        self.assertEqual(c['bass'], 'E')
+
+    def test_bass_degree_with_extensions(self):
+        c = self.decomposer.decompose('D:maj6(9)/5')
+        self.assertEqual(c['root'], 'D')
+        self.assertEqual(c['bass'], 'A')
+        self.assertEqual(c['6th'], '6')
+        self.assertEqual(c['9th'], '9')
+
+
+class TestParenVsShorthand(unittest.TestCase):
+    """Bug 2: parenthetical (7) = major 7th vs shorthand 7 = dominant."""
+
+    def setUp(self):
+        self.decomposer = ChordDecomposer()
+
+    def test_min_paren_7_is_major_7th(self):
+        c = self.decomposer.decompose('C:min(7)')
+        self.assertEqual(c['triad'], 'min')
+        self.assertEqual(c['7th'], '7')
+
+    def test_min7_shorthand_is_dominant_7th(self):
+        c = self.decomposer.decompose('C:min7')
+        self.assertEqual(c['triad'], 'min')
+        self.assertEqual(c['7th'], 'b7')
+
+    def test_aug_paren_7(self):
+        c = self.decomposer.decompose('C:aug(7)')
+        self.assertEqual(c['triad'], 'aug')
+        self.assertEqual(c['7th'], '7')
+
+    def test_aug7_shorthand(self):
+        c = self.decomposer.decompose('C:aug7')
+        self.assertEqual(c['triad'], 'aug')
+        self.assertEqual(c['7th'], 'b7')
+
+    def test_sus4_paren_7(self):
+        c = self.decomposer.decompose('C:sus4(7)')
+        self.assertEqual(c['triad'], 'sus4')
+        self.assertEqual(c['7th'], '7')
+
+    def test_sus4_paren_b7(self):
+        c = self.decomposer.decompose('C:sus4(b7)')
+        self.assertEqual(c['triad'], 'sus4')
+        self.assertEqual(c['7th'], 'b7')
+
+    def test_sus2_paren_7(self):
+        c = self.decomposer.decompose('C:sus2(7)')
+        self.assertEqual(c['triad'], 'sus2')
+        self.assertEqual(c['7th'], '7')
+
+    def test_maj6_paren_7(self):
+        c = self.decomposer.decompose('C:maj6(7)')
+        self.assertEqual(c['triad'], 'maj')
+        self.assertEqual(c['6th'], '6')
+        self.assertEqual(c['7th'], '7')
+
+    def test_min6_paren_7(self):
+        c = self.decomposer.decompose('C:min6(7)')
+        self.assertEqual(c['triad'], 'min')
+        self.assertEqual(c['6th'], '6')
+        self.assertEqual(c['7th'], '7')
+
+    def test_min_paren_9_is_add9(self):
+        """min(9) = add 9 (no implied 7th), vs min9 shorthand."""
+        c = self.decomposer.decompose('C:min(9)')
+        self.assertEqual(c['triad'], 'min')
+        self.assertEqual(c['9th'], '9')
+        self.assertEqual(c['7th'], 'N')
+
+    def test_min9_shorthand_implies_b7(self):
+        c = self.decomposer.decompose('C:min9')
+        self.assertEqual(c['triad'], 'min')
+        self.assertEqual(c['9th'], '9')
+        self.assertEqual(c['7th'], 'b7')
+
+
+class TestPowerChordExtensions(unittest.TestCase):
+    """Bug 3: 5(...) power chord with extensions."""
+
+    def setUp(self):
+        self.decomposer = ChordDecomposer()
+        self.reassembler = ChordReassembler()
+
+    def test_plain_5(self):
+        c = self.decomposer.decompose('C:5')
+        self.assertEqual(c['misc'], '5')
+        self.assertEqual(c['triad'], 'N')
+
+    def test_5_b7(self):
+        c = self.decomposer.decompose('C:5(b7)')
+        self.assertEqual(c['misc'], '5')
+        self.assertEqual(c['7th'], 'b7')
+        self.assertEqual(c['triad'], 'N')
+
+    def test_5_9(self):
+        c = self.decomposer.decompose('C:5(9)')
+        self.assertEqual(c['misc'], '5')
+        self.assertEqual(c['9th'], '9')
+
+    def test_5_b13(self):
+        c = self.decomposer.decompose('C:5(b13)')
+        self.assertEqual(c['misc'], '5')
+        self.assertEqual(c['13th'], 'b13')
+
+    def test_5_b7_b9(self):
+        c = self.decomposer.decompose('C:5(b7,b9)')
+        self.assertEqual(c['misc'], '5')
+        self.assertEqual(c['7th'], 'b7')
+        self.assertEqual(c['9th'], 'b9')
+
+    def test_pedal(self):
+        c = self.decomposer.decompose('C:pedal')
+        self.assertEqual(c['misc'], '5')
+
+    def test_quality_1(self):
+        c = self.decomposer.decompose('C:1')
+        self.assertEqual(c['misc'], '5')
+
+    def test_reassemble_power_with_ext(self):
+        c = self.decomposer.decompose('C:5(b7)')
+        reassembled = self.reassembler.reassemble(c)
+        self.assertEqual(reassembled, 'C:5(b7)')
+
+    def test_reassemble_power_with_multi_ext(self):
+        c = self.decomposer.decompose('C:5(b7,b9)')
+        reassembled = self.reassembler.reassemble(c)
+        self.assertEqual(reassembled, 'C:5(b7)(b9)')
+
+
+class TestMin7b5AsHdim(unittest.TestCase):
+    """Bug 4: min7(b5) should decompose the same as hdim7."""
+
+    def setUp(self):
+        self.decomposer = ChordDecomposer()
+
+    def test_min7_b5_equals_hdim7(self):
+        hdim = self.decomposer.decompose('C:hdim7')
+        minb5 = self.decomposer.decompose('C:min7(b5)')
+        self.assertEqual(hdim['triad'], 'dim')
+        self.assertEqual(hdim['7th'], 'b7')
+        self.assertEqual(minb5['triad'], hdim['triad'])
+        self.assertEqual(minb5['7th'], hdim['7th'])
+
+    def test_min_b5_no_7th(self):
+        """min(b5) without 7th → just dim triad."""
+        c = self.decomposer.decompose('C:min(b5)')
+        self.assertEqual(c['triad'], 'dim')
+        self.assertEqual(c['7th'], 'N')
+
+    def test_maj_sharp5_becomes_aug(self):
+        c = self.decomposer.decompose('C:maj(#5)')
+        self.assertEqual(c['triad'], 'aug')
+
+
+class TestOmitNotation(unittest.TestCase):
+    """Bug 5: * (omit) notation."""
+
+    def setUp(self):
+        self.decomposer = ChordDecomposer()
+
+    def test_maj_omit_3(self):
+        c = self.decomposer.decompose('C:maj(*3)')
+        self.assertEqual(c['triad'], 'N')
+        self.assertEqual(c['misc'], '5')
+
+    def test_min_omit_b3(self):
+        c = self.decomposer.decompose('A:min(*b3)')
+        self.assertEqual(c['triad'], 'N')
+        self.assertEqual(c['misc'], '5')
+
+    def test_7_omit_3(self):
+        c = self.decomposer.decompose('C:7(*3)')
+        self.assertEqual(c['triad'], 'N')
+        self.assertEqual(c['misc'], '5')
+        self.assertEqual(c['7th'], 'b7')
+
+    def test_7_omit_5_with_9(self):
+        """*5 without *3 preserves triad identity."""
+        c = self.decomposer.decompose('C:7(*5,9)')
+        self.assertEqual(c['triad'], 'maj')
+        self.assertEqual(c['7th'], 'b7')
+        self.assertEqual(c['9th'], '9')
+
+    def test_maj_omit_3_and_5(self):
+        c = self.decomposer.decompose('C:maj(*3,*5)')
+        self.assertEqual(c['triad'], 'N')
+        self.assertEqual(c['misc'], '5')
+
+    def test_min7_omit_b3_and_5(self):
+        c = self.decomposer.decompose('C:min7(*b3,*5)')
+        self.assertEqual(c['triad'], 'N')
+        self.assertEqual(c['misc'], '5')
+        self.assertEqual(c['7th'], 'b7')
+
+    def test_maj7_omit_3(self):
+        c = self.decomposer.decompose('C:maj7(*3)')
+        self.assertEqual(c['triad'], 'N')
+        self.assertEqual(c['misc'], '5')
+        self.assertEqual(c['7th'], '7')
+
+
+class TestComprehensiveShorthands(unittest.TestCase):
+    """Verify all standard shorthands still decompose correctly."""
+
+    def setUp(self):
+        self.d = ChordDecomposer()
+
+    def test_maj(self):
+        c = self.d.decompose('C:maj')
+        self.assertEqual(c['triad'], 'maj')
+
+    def test_min(self):
+        c = self.d.decompose('C:min')
+        self.assertEqual(c['triad'], 'min')
+
+    def test_dim(self):
+        c = self.d.decompose('C:dim')
+        self.assertEqual(c['triad'], 'dim')
+
+    def test_aug(self):
+        c = self.d.decompose('C:aug')
+        self.assertEqual(c['triad'], 'aug')
+
+    def test_sus2(self):
+        c = self.d.decompose('C:sus2')
+        self.assertEqual(c['triad'], 'sus2')
+
+    def test_sus4(self):
+        c = self.d.decompose('C:sus4')
+        self.assertEqual(c['triad'], 'sus4')
+
+    def test_maj7(self):
+        c = self.d.decompose('C:maj7')
+        self.assertEqual(c['triad'], 'maj')
+        self.assertEqual(c['7th'], '7')
+
+    def test_min7(self):
+        c = self.d.decompose('C:min7')
+        self.assertEqual(c['triad'], 'min')
+        self.assertEqual(c['7th'], 'b7')
+
+    def test_dom7(self):
+        c = self.d.decompose('C:7')
+        self.assertEqual(c['triad'], 'maj')
+        self.assertEqual(c['7th'], 'b7')
+
+    def test_dim7(self):
+        c = self.d.decompose('C:dim7')
+        self.assertEqual(c['triad'], 'dim')
+        self.assertEqual(c['7th'], 'bb7')
+
+    def test_hdim7(self):
+        c = self.d.decompose('C:hdim7')
+        self.assertEqual(c['triad'], 'dim')
+        self.assertEqual(c['7th'], 'b7')
+
+    def test_minmaj7(self):
+        c = self.d.decompose('C:minmaj7')
+        self.assertEqual(c['triad'], 'min')
+        self.assertEqual(c['7th'], '7')
+
+    def test_maj6(self):
+        c = self.d.decompose('C:maj6')
+        self.assertEqual(c['triad'], 'maj')
+        self.assertEqual(c['6th'], '6')
+
+    def test_min6(self):
+        c = self.d.decompose('C:min6')
+        self.assertEqual(c['triad'], 'min')
+        self.assertEqual(c['6th'], '6')
+
+    def test_dom9(self):
+        c = self.d.decompose('C:9')
+        self.assertEqual(c['triad'], 'maj')
+        self.assertEqual(c['7th'], 'b7')
+        self.assertEqual(c['9th'], '9')
+
+    def test_maj9(self):
+        c = self.d.decompose('C:maj9')
+        self.assertEqual(c['triad'], 'maj')
+        self.assertEqual(c['7th'], '7')
+        self.assertEqual(c['9th'], '9')
+
+    def test_min9(self):
+        c = self.d.decompose('C:min9')
+        self.assertEqual(c['triad'], 'min')
+        self.assertEqual(c['7th'], 'b7')
+        self.assertEqual(c['9th'], '9')
+
+    def test_7sus4(self):
+        c = self.d.decompose('C:7sus4')
+        self.assertEqual(c['triad'], 'sus4')
+        self.assertEqual(c['7th'], 'b7')
+
+    def test_aug7(self):
+        c = self.d.decompose('C:aug7')
+        self.assertEqual(c['triad'], 'aug')
+        self.assertEqual(c['7th'], 'b7')
+
+
+class TestCombinedParenExtensions(unittest.TestCase):
+    """Mixed shorthand + parenthetical extensions from real .lab files."""
+
+    def setUp(self):
+        self.d = ChordDecomposer()
+
+    def test_maj7_9(self):
+        c = self.d.decompose('C:maj7(9)')
+        self.assertEqual(c['triad'], 'maj')
+        self.assertEqual(c['7th'], '7')
+        self.assertEqual(c['9th'], '9')
+
+    def test_7_b9(self):
+        c = self.d.decompose('C:7(b9)')
+        self.assertEqual(c['triad'], 'maj')
+        self.assertEqual(c['7th'], 'b7')
+        self.assertEqual(c['9th'], 'b9')
+
+    def test_7_sharp9_b13(self):
+        c = self.d.decompose('C:7(#9,b13)')
+        self.assertEqual(c['triad'], 'maj')
+        self.assertEqual(c['7th'], 'b7')
+        self.assertEqual(c['9th'], '#9')
+        self.assertEqual(c['13th'], 'b13')
+
+    def test_min7_9_11(self):
+        c = self.d.decompose('C:min7(9,11)')
+        self.assertEqual(c['triad'], 'min')
+        self.assertEqual(c['7th'], 'b7')
+        self.assertEqual(c['9th'], '9')
+        self.assertEqual(c['11th'], '11')
+
+    def test_7sus4_13(self):
+        c = self.d.decompose('C:7sus4(13)')
+        self.assertEqual(c['triad'], 'sus4')
+        self.assertEqual(c['7th'], 'b7')
+        self.assertEqual(c['13th'], '13')
+
+    def test_dim7_b13(self):
+        c = self.d.decompose('C:dim7(b13)')
+        self.assertEqual(c['triad'], 'dim')
+        self.assertEqual(c['7th'], 'bb7')
+        self.assertEqual(c['13th'], 'b13')
+
+    def test_hdim7_b9(self):
+        c = self.d.decompose('C:hdim7(b9)')
+        self.assertEqual(c['triad'], 'dim')
+        self.assertEqual(c['7th'], 'b7')
+        self.assertEqual(c['9th'], 'b9')
+
+    def test_minmaj7_9(self):
+        c = self.d.decompose('C:minmaj7(9)')
+        self.assertEqual(c['triad'], 'min')
+        self.assertEqual(c['7th'], '7')
+        self.assertEqual(c['9th'], '9')
+
+    def test_aug7_b9(self):
+        c = self.d.decompose('C:aug7(b9)')
+        self.assertEqual(c['triad'], 'aug')
+        self.assertEqual(c['7th'], 'b7')
+        self.assertEqual(c['9th'], 'b9')
+
+    def test_maj6_9(self):
+        c = self.d.decompose('C:maj6(9)')
+        self.assertEqual(c['triad'], 'maj')
+        self.assertEqual(c['6th'], '6')
+        self.assertEqual(c['9th'], '9')
+
+    def test_min6_b7(self):
+        c = self.d.decompose('C:min6(b7)')
+        self.assertEqual(c['triad'], 'min')
+        self.assertEqual(c['6th'], '6')
+        self.assertEqual(c['7th'], 'b7')
+
+    def test_sus4_b7_9(self):
+        c = self.d.decompose('C:sus4(b7,9)')
+        self.assertEqual(c['triad'], 'sus4')
+        self.assertEqual(c['7th'], 'b7')
+        self.assertEqual(c['9th'], '9')
+
+    def test_maj7_9_sharp11(self):
+        c = self.d.decompose('C:maj7(9,#11)')
+        self.assertEqual(c['triad'], 'maj')
+        self.assertEqual(c['7th'], '7')
+        self.assertEqual(c['9th'], '9')
+        self.assertEqual(c['11th'], '#11')
 
 
 class TestTransposeChord(unittest.TestCase):
