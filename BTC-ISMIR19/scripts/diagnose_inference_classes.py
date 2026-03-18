@@ -93,7 +93,7 @@ def run_inference(feature, model, device, timestep=108, return_probs=False):
 
         if chunk.shape[1] < timestep:
             pad_width = timestep - chunk.shape[1]
-            chunk = np.pad(chunk, ((0, 0), (0, pad_width)), mode="constant", constant_values=-6)
+            chunk = np.pad(chunk, ((0, 0), (0, pad_width)), mode="constant", constant_values=0)
 
         chunk_tensor = torch.tensor(chunk.T, dtype=torch.float32).unsqueeze(0).to(device)
         actual_frames = min(end - start, timestep)

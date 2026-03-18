@@ -140,7 +140,7 @@ class ChordRecognitionInference:
             feature = feature[:, :int(expected_length)]
         elif feature.shape[1] < expected_length:
             pad_width = ((0, 0), (0, int(expected_length) - feature.shape[1]))
-            feature = np.pad(feature, pad_width, mode='constant', constant_values=-6)
+            feature = np.pad(feature, pad_width, mode='constant', constant_values=0)
         
         # Convert to tensor with batch dimension
         feature_tensor = torch.tensor(feature, dtype=torch.float32)

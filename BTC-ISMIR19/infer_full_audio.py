@@ -95,7 +95,7 @@ def process_in_chunks(feature, model, device, timestep=108):
         # Pad if necessary
         if chunk.shape[1] < chunk_size:
             pad_width = chunk_size - chunk.shape[1]
-            chunk = np.pad(chunk, ((0, 0), (0, pad_width)), mode='constant', constant_values=-6)
+            chunk = np.pad(chunk, ((0, 0), (0, pad_width)), mode='constant', constant_values=0)
         
         # Convert to tensor: (batch, seq_len, features)
         chunk_tensor = torch.tensor(chunk.T, dtype=torch.float32).unsqueeze(0)  # (1, timestep, n_bins)
