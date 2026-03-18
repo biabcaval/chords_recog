@@ -12,6 +12,7 @@ Usage:
 """
 
 import os
+import re
 import argparse
 import glob
 import numpy as np
@@ -21,6 +22,41 @@ from collections import defaultdict
 import warnings
 
 warnings.filterwarnings('ignore')
+
+
+# ---------------------------------------------------------------------------
+# Chord label normalization (mir_eval compatibility)
+# ---------------------------------------------------------------------------
+
+def normalize_chord_for_mir_eval(label):
+    """Rewrite a chord label so that mir_eval.chord can parse it.
+
+    Fixes two classes of issues produced by ChordReassembler:
+      1. Multiple parenthetical groups  e.g. sus4(b7)(9) -> sus4(b7,9)
+      2. Unrecognised shorthands        e.g. aug7        -> aug(b7)
+    """
+    if label in ('N', 'X', '') or ':' not in label:
+        return label
+
+    # Separate optional bass suffix  "/E", "/F#", …
+    bass_suffix = ''
+    slash_idx = label.rfind('/')
+    if slash_idx > label.rfind(')'):
+        bass_suffix = label[slash_idx:]
+        main = label[:slash_idx]
+    else:
+        main = label
+
+    # aug7 -> aug(b7)   (mir_eval doesn't know the "aug7" shorthand)
+    main = re.sub(r':aug7\b', ':aug(b7)', main)
+
+    # Merge multiple (...) groups into one comma-separated group
+    groups = re.findall(r'\(([^)]+)\)', main)
+    if len(groups) > 1:
+        base = re.sub(r'\([^)]+\)', '', main)
+        main = f"{base}({','.join(groups)})"
+
+    return main + bass_suffix
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +133,9 @@ def calculate_metrics(inference_dir, ground_truth_dir):
         try:
             ref_intervals, ref_labels = parse_lab_file(gt_file)
             est_intervals, est_labels = parse_lab_file(inf_file)
+
+            ref_labels = [normalize_chord_for_mir_eval(l) for l in ref_labels]
+            est_labels = [normalize_chord_for_mir_eval(l) for l in est_labels]
 
             if len(ref_intervals) == 0 or len(est_intervals) == 0:
                 continue
