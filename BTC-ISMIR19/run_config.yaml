@@ -28,14 +28,15 @@ experiment:
   data_root: '/home/daniel.melo/datasets'
   dataset_names:
     - billboard
-    - dj_avan
+    - dj_avan_songbook1
+    - dj_avan_songbook2
     - jaah
     - queen
     - robbiewilliams
     - rwc
 
 class_weights:
-  enabled: False
+  enabled: True
   gamma: 0.5
   w_max: 10.0
 

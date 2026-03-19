@@ -46,7 +46,8 @@ DATASET_AUDIO_SUBDIR = {
     "billboard": "billboard/audio",
     "jaah": "jaah/audio",
     "rwc": "rwc/audio",
-    "dj_avan": "dj_avan/audio",
+    "dj_avan_songbook1": "dj_avan_songbook1/audio",
+    "dj_avan_songbook2": "dj_avan_songbook2/audio",
     "queen": "queen/audio",
     "robbiewilliams": "robbiewilliams/audio",
 }
@@ -55,7 +56,8 @@ DATASET_SHORT = {
     "billboard": "Bi",
     "jaah": "Ja",
     "rwc": "Rw",
-    "dj_avan": "Dj",
+    "dj_avan_songbook1": "Dj1",
+    "dj_avan_songbook2": "Dj2",
     "queen": "Qu",
     "robbiewilliams": "Ro",
 }

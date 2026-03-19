@@ -300,8 +300,8 @@ def main():
         '--datasets',
         type=str,
         nargs='+',
-        default=['billboard', 'dj_avan'],
-        help='Dataset names to preprocess (default: billboard dj_avan)'
+        default=['billboard', 'dj_avan_songbook1', 'dj_avan_songbook2'],
+        help='Dataset names to preprocess (default: billboard dj_avan_songbook1 dj_avan_songbook2)'
     )
     parser.add_argument(
         '--num_workers',
