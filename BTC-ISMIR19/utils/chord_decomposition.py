@@ -639,40 +639,50 @@ class ChordReassembler:
         # Priority 2: Power chord case (misc = '5')
         if misc == '5':
             chord = f"{root}:5"
-            ext_6th = components.get('6th', 'N')
-            ext_7th = components.get('7th', 'N')
-            ext_9th = components.get('9th', 'N')
-            ext_11th = components.get('11th', 'N')
-            ext_13th = components.get('13th', 'N')
-            if ext_6th != 'N':
-                chord += '(6)'
-            if ext_7th != 'N':
-                chord += f'({ext_7th})'
-            if ext_9th != 'N':
-                chord += f'({ext_9th})'
-            if ext_11th != 'N':
-                chord += f'({ext_11th})'
-            if ext_13th != 'N':
-                chord += f'({ext_13th})'
+            paren_exts = []
+            if components.get('6th', 'N') != 'N':
+                paren_exts.append('6')
+            if components.get('7th', 'N') != 'N':
+                paren_exts.append(components['7th'])
+            if components.get('9th', 'N') != 'N':
+                paren_exts.append(components['9th'])
+            if components.get('11th', 'N') != 'N':
+                paren_exts.append(components['11th'])
+            if components.get('13th', 'N') != 'N':
+                paren_exts.append(components['13th'])
+            if paren_exts:
+                chord += f"({','.join(paren_exts)})"
             if bass != 'N' and bass != root:
                 chord += f"/{bass}"
             return chord
         
-        # Priority 3: No triad means no chord (unless power chord)
-        if triad == 'N':
-            return 'N'
-        
-        # Add extensions in order: 6th, 7th, 9th, 11th, 13th
+        # Collect extensions before deciding on triad
         ext_6th = components.get('6th', 'N')
         ext_7th = components.get('7th', 'N')
         ext_9th = components.get('9th', 'N')
         ext_11th = components.get('11th', 'N')
         ext_13th = components.get('13th', 'N')
 
-        has_ext = ext_7th != 'N' or ext_9th != 'N' or ext_11th != 'N' or ext_13th != 'N'
+        has_ext = (ext_6th != 'N' or ext_7th != 'N' or ext_9th != 'N'
+                   or ext_11th != 'N' or ext_13th != 'N')
 
-        if ext_7th == 'N' and not has_ext:
-            # No 7th and no higher extensions — plain triad (+ optional 6th)
+        # Priority 3: No triad — if extensions are present, default to
+        # major triad (mirrors decompose convention: implicit triad for
+        # chords like "C:7").  Only output 'N' when nothing else is active.
+        if triad == 'N':
+            if has_ext or bass != 'N':
+                triad = 'maj'
+            else:
+                return 'N'
+
+        has_ext_7plus = ext_7th != 'N' or ext_9th != 'N' or ext_11th != 'N' or ext_13th != 'N'
+
+        # All non-shorthand extensions are collected here so the output
+        # always uses a single comma-separated parenthetical group,
+        # e.g. sus4(b7,9) instead of sus4(b7)(9).
+        paren_exts: list = []
+
+        if ext_7th == 'N' and not has_ext_7plus:
             chord = f"{root}:{triad}"
             if ext_6th != 'N' and triad in ('maj', 'min'):
                 chord = f"{root}:{triad}6"
@@ -680,10 +690,11 @@ class ChordReassembler:
             # Major 7th interval
             if triad == 'min':
                 chord = f"{root}:minmaj7"
-            elif triad in ('sus2', 'sus4'):
-                chord = f"{root}:{triad}(7)"
+            elif triad == 'maj':
+                chord = f"{root}:maj7"
             else:
-                chord = f"{root}:{triad}7"
+                chord = f"{root}:{triad}"
+                paren_exts.append('7')
         elif ext_7th == 'b7':
             # Minor / dominant 7th interval
             if triad == 'maj':
@@ -692,32 +703,29 @@ class ChordReassembler:
                 chord = f"{root}:min7"
             elif triad == 'dim':
                 chord = f"{root}:hdim7"
-            elif triad == 'aug':
-                chord = f"{root}:aug7"
-            elif triad in ('sus2', 'sus4'):
-                chord = f"{root}:{triad}(b7)"
             else:
-                chord = f"{root}:{triad}7"
+                chord = f"{root}:{triad}"
+                paren_exts.append('b7')
         elif ext_7th == 'bb7':
             # Diminished 7th interval
             if triad == 'dim':
                 chord = f"{root}:dim7"
             else:
-                chord = f"{root}:{triad}(bb7)"
+                chord = f"{root}:{triad}"
+                paren_exts.append('bb7')
         else:
             chord = f"{root}:{triad}"
 
-        # 6th as parenthetical when combined with 7th or higher extensions
         if ext_6th != 'N' and has_ext:
-            chord += f"(6)"
-
-        # Higher extensions as parenthetical — mir_eval standard
+            paren_exts.append('6')
         if ext_9th != 'N':
-            chord += f"({ext_9th})"
+            paren_exts.append(ext_9th)
         if ext_11th != 'N':
-            chord += f"({ext_11th})"
+            paren_exts.append(ext_11th)
         if ext_13th != 'N':
-            chord += f"({ext_13th})"
+            paren_exts.append(ext_13th)
+        if paren_exts:
+            chord += f"({','.join(paren_exts)})"
         
         # Add bass note if different from root
         if bass != 'N' and bass != root:
