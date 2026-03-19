@@ -557,6 +557,11 @@ class Chords:
         
         for i in ref_labels:
             chord_root, quality, scale_degrees, bass = mir_eval.chord.split(i, reduce_extended_chords=True)
+            if '6' in scale_degrees:
+                if quality == 'maj':
+                    quality = 'maj6'
+                elif quality == 'min':
+                    quality = 'min6'
             root, bass_note, ivs, is_major = self.chord(i)
             
             # Convert to IDs for structured output
