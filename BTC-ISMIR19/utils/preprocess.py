@@ -55,21 +55,42 @@ class Preprocess():
     def find_audio_path_generic(self, audio_dir, lab_filename):
         """
         Generic function to find audio file matching a label file.
-        Matches by base filename (without extension).
-        Uses case-insensitive matching and normalizes spaces/underscores.
+        Three-pass matching strategy:
+          1. Exact basename match (case-insensitive, space→underscore)
+          2. Prefix match (handles descriptive suffixes like jaah_018-artist_title)
+          3. Numeric ID match (handles zero-padding differences like jaah_000 vs jaah_00)
         """
         lab_basename = os.path.splitext(lab_filename)[0]
-        # Normalize: lowercase and replace spaces with underscores
         lab_normalized = lab_basename.lower().replace(' ', '_')
-        
-        for filename in os.listdir(audio_dir):
-            audio_basename = os.path.splitext(filename)[0]
-            # Check for common audio extensions
-            if filename.lower().endswith(('.mp3', '.wav', '.flac', '.m4a')):
-                # Normalize audio basename the same way
-                audio_normalized = audio_basename.lower().replace(' ', '_')
-                if audio_normalized == lab_normalized:
-                    return filename
+
+        candidates = [f for f in os.listdir(audio_dir)
+                       if f.lower().endswith(('.mp3', '.wav', '.flac', '.m4a'))]
+
+        for filename in candidates:
+            audio_normalized = os.path.splitext(filename)[0].lower().replace(' ', '_')
+            if audio_normalized == lab_normalized:
+                return filename
+
+        for filename in candidates:
+            audio_normalized = os.path.splitext(filename)[0].lower().replace(' ', '_')
+            if (audio_normalized.startswith(lab_normalized + '-') or
+                audio_normalized.startswith(lab_normalized + '_') or
+                lab_normalized.startswith(audio_normalized + '-') or
+                lab_normalized.startswith(audio_normalized + '_')):
+                return filename
+
+        lab_match = re.match(r'(.+?)(\d+)$', lab_normalized)
+        if lab_match:
+            lab_prefix, lab_num = lab_match.group(1), int(lab_match.group(2))
+            for filename in candidates:
+                audio_normalized = os.path.splitext(filename)[0].lower().replace(' ', '_')
+                audio_match = re.match(r'(.+?)(\d+)(.*)', audio_normalized)
+                if audio_match:
+                    audio_prefix = audio_match.group(1)
+                    audio_num = int(audio_match.group(2))
+                    if audio_prefix == lab_prefix and audio_num == lab_num:
+                        return filename
+
         return None
 
     def get_all_files(self):
