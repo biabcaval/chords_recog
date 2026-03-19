@@ -64,9 +64,10 @@ def decompose_preprocessed_data(data_dir, output_dir, force=False):
             # Extract components
             if isinstance(data, dict):
                 features = data.get('feature', data.get('cqt'))
-                chords = data.get('chord_str', data.get('chord'))
+                chords = data.get('original_chord_labels',
+                                  data.get('chord_str',
+                                  data.get('chord')))
             else:
-                # Assume it's tuple/list
                 features, chords = data[:2]
             
             if features is None:
@@ -76,12 +77,17 @@ def decompose_preprocessed_data(data_dir, output_dir, force=False):
             # Convert chords to strings if needed
             if isinstance(chords, torch.Tensor):
                 if chords.dtype in [torch.long, torch.int]:
-                    # Index-based, skip
                     failed.append((pt_file.name, "Index-based labels"))
                     continue
                 chord_list = [str(c) for c in chords]
             elif isinstance(chords, np.ndarray):
+                if chords.dtype in (np.int64, np.int32, np.int16):
+                    failed.append((pt_file.name, "Index-based labels"))
+                    continue
                 chord_list = [str(c) for c in chords]
+            elif isinstance(chords, list) and chords and hasattr(chords[0], '__int__'):
+                failed.append((pt_file.name, "Index-based labels"))
+                continue
             else:
                 chord_list = list(chords)
             
