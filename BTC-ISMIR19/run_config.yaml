@@ -67,7 +67,7 @@ model:
 
   # --- Conformer encoder ---
   num_layers: 12             # Number of Conformer blocks
-  num_heads: 4               # Attention heads per block
+  num_heads: 8               # Attention heads per block
   hidden_size: 128           # Channel width throughout the encoder
   conv_kernel_size: 31       # Depthwise-conv kernel (larger = wider temporal context)
   ff_expansion_factor: 4     # FFN expansion ratio inside Conformer blocks
