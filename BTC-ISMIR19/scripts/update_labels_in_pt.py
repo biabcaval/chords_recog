@@ -23,6 +23,7 @@ import os
 import sys
 import argparse
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 import torch
 
@@ -148,15 +149,71 @@ def recompute_labels(chord_info, start_sec, stretch_factor, shift_factor,
 
 
 # ---------------------------------------------------------------------------
+# Per-song worker (runs in child process when num_workers > 1)
+# ---------------------------------------------------------------------------
+
+def _process_song(song_dir_str, ann_dir, target_dir, time_interval):
+    """Process all .pt files for a single song. Returns (updated, skipped)."""
+    song_dir = Path(song_dir_str)
+    chord_class = Chords()
+
+    lab_path = find_lab_for_song(song_dir.name, ann_dir)
+    if lab_path is None:
+        return 0, len(list(song_dir.glob('*.pt')))
+
+    try:
+        chord_info = chord_class.get_converted_chord_voca(lab_path)
+    except Exception as e:
+        print(f"    Error reading {lab_path}: {e}")
+        return 0, len(list(song_dir.glob('*.pt')))
+
+    out_song_dir = Path(target_dir) / song_dir.name
+    out_song_dir.mkdir(parents=True, exist_ok=True)
+
+    updated = 0
+    skipped = 0
+
+    for pt_file in sorted(song_dir.glob('*.pt')):
+        try:
+            data = torch.load(pt_file, map_location='cpu', weights_only=False)
+
+            etc = data.get('etc', '')
+            if not etc or '_' not in etc:
+                skipped += 1
+                continue
+
+            start_sec, _ = parse_etc_field(etc)
+            stretch, shift = parse_pt_filename(pt_file.name)
+            n_frames = len(data['chord'])
+
+            ch, ro, qu, ba = recompute_labels(
+                chord_info, start_sec, stretch, shift,
+                time_interval, n_frames,
+            )
+
+            data['chord']   = ch
+            data['root']    = ro
+            data['quality'] = qu
+            data['bass']    = ba
+
+            torch.save(data, out_song_dir / pt_file.name)
+            updated += 1
+        except Exception as e:
+            print(f"    Error {pt_file.name}: {e}")
+            skipped += 1
+
+    return updated, skipped
+
+
+# ---------------------------------------------------------------------------
 # Per-dataset driver
 # ---------------------------------------------------------------------------
 
 def update_dataset(data_root, source_name, target_name,
                    annotations_subdir, song_filter,
-                   mp3_string, feature_string, time_interval):
+                   mp3_string, feature_string, time_interval,
+                   num_workers=1):
     """Update labels for every .pt in one dataset."""
-
-    chord_class = Chords()
 
     source_dir = os.path.join(data_root, 'result',
                               source_name + '_voca', mp3_string, feature_string)
@@ -175,55 +232,35 @@ def update_dataset(data_root, source_name, target_name,
     if song_filter:
         song_dirs = [d for d in song_dirs if song_filter(d.name)]
 
-    updated = 0
-    skipped = 0
+    if not song_dirs:
+        print(f"  No songs found in {source_dir}")
+        return 0, 0
 
-    for song_dir in tqdm(song_dirs, desc=f"  {target_name}"):
-        lab_path = find_lab_for_song(song_dir.name, ann_dir)
-        if lab_path is None:
-            skipped += len(list(song_dir.glob('*.pt')))
-            continue
+    total_updated = 0
+    total_skipped = 0
 
-        try:
-            chord_info = chord_class.get_converted_chord_voca(lab_path)
-        except Exception as e:
-            print(f"    Error reading {lab_path}: {e}")
-            skipped += len(list(song_dir.glob('*.pt')))
-            continue
+    if num_workers <= 1:
+        for song_dir in tqdm(song_dirs, desc=f"  {target_name}"):
+            up, sk = _process_song(str(song_dir), ann_dir, target_dir, time_interval)
+            total_updated += up
+            total_skipped += sk
+    else:
+        workers = min(num_workers, len(song_dirs))
+        print(f"  Using {workers} parallel workers for {len(song_dirs)} songs")
+        futures = {}
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for song_dir in song_dirs:
+                fut = pool.submit(_process_song, str(song_dir), ann_dir,
+                                  target_dir, time_interval)
+                futures[fut] = song_dir.name
 
-        out_song_dir = Path(target_dir) / song_dir.name
-        out_song_dir.mkdir(parents=True, exist_ok=True)
+            for fut in tqdm(as_completed(futures), total=len(futures),
+                            desc=f"  {target_name}"):
+                up, sk = fut.result()
+                total_updated += up
+                total_skipped += sk
 
-        for pt_file in sorted(song_dir.glob('*.pt')):
-            try:
-                data = torch.load(pt_file, map_location='cpu', weights_only=False)
-
-                etc = data.get('etc', '')
-                if not etc or '_' not in etc:
-                    skipped += 1
-                    continue
-
-                start_sec, _ = parse_etc_field(etc)
-                stretch, shift = parse_pt_filename(pt_file.name)
-                n_frames = len(data['chord'])
-
-                ch, ro, qu, ba = recompute_labels(
-                    chord_info, start_sec, stretch, shift,
-                    time_interval, n_frames,
-                )
-
-                data['chord']   = ch
-                data['root']    = ro
-                data['quality'] = qu
-                data['bass']    = ba
-
-                torch.save(data, out_song_dir / pt_file.name)
-                updated += 1
-            except Exception as e:
-                print(f"    Error {pt_file.name}: {e}")
-                skipped += 1
-
-    return updated, skipped
+    return total_updated, total_skipped
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +277,8 @@ def main():
     parser.add_argument('--datasets', type=str, nargs='+',
                         default=list(DATASET_MAPPING.keys()),
                         help='Datasets to update (default: all)')
+    parser.add_argument('--num_workers', type=int, default=os.cpu_count(),
+                        help='Parallel workers per dataset (default: all CPUs)')
     parser.add_argument('--skip_decompose', action='store_true',
                         help='Skip Step 2 (decomposition to 9 components)')
 
@@ -261,6 +300,7 @@ def main():
     print("=" * 70)
     print(f"Data root : {data_root}")
     print(f"Datasets  : {args.datasets}")
+    print(f"Workers   : {args.num_workers}")
     print(f"Config    : {mp3_string} / {feature_string}")
     print()
 
@@ -278,6 +318,7 @@ def main():
         up, sk = update_dataset(
             data_root, src, ds, ann_sub, filt,
             mp3_string, feature_string, time_interval,
+            num_workers=args.num_workers,
         )
         print(f"  Updated: {up}  |  Skipped: {sk}")
         total_updated += up
