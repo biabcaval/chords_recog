@@ -85,6 +85,9 @@ class Chords:
             'min9': self.interval_list('(1,b3,5,b7,9)'),
             'sus2': self.interval_list('(1,2,5)'),
             'sus4': self.interval_list('(1,4,5)'),
+            '7sus2': self.interval_list('(1,2,5,b7)'),
+            '7sus4': self.interval_list('(1,4,5,b7)'),
+            '9sus4': self.interval_list('(1,4,5,b7,9)'),
             '11': self.interval_list('(1,3,5,b7,9,11)'),
             'min11': self.interval_list('(1,b3,5,b7,9,11)'),
             '13': self.interval_list('(1,3,5,b7,13)'),
@@ -194,6 +197,7 @@ class Chords:
 
         except Exception as e:
             print(e, label)
+            return NO_CHORD
 
         return root, bass, ivs, is_major
 
@@ -491,7 +495,10 @@ class Chords:
             'hdim7': 11,
             'sus2': 12,
             'sus4': 13,
-            'pedal': 1,  # Pedal/power chords -> major
+            '7sus2': 12,  # sus2 + dom7 -> map to sus2
+            '7sus4': 13,  # sus4 + dom7 -> map to sus4
+            '9sus4': 13,  # sus4 + dom9 -> map to sus4
+            'pedal': 1,   # Pedal/power chords -> major
             '5': 1,      # Power chord -> major
             '1': 1,      # Single note -> major
             'N': 14,     # No chord
@@ -526,9 +533,9 @@ class Chords:
                 return root * 14 + 10
             elif quality == 'hdim7':
                 return root * 14 + 11
-            elif quality == 'sus2':
+            elif quality == 'sus2' or quality == '7sus2':
                 return root * 14 + 12
-            elif quality == 'sus4':
+            elif quality == 'sus4' or quality == '7sus4' or quality == '9sus4':
                 return root * 14 + 13
             elif quality == 'pedal' or quality == '5' or quality == '1':
                 # Pedal/power chords - map to major chord of same root
