@@ -227,10 +227,14 @@
 <div class="sidebar">
   <div class="sidebar-header">
     <h1>ChordMax Visualizer</h1>
+    <select id="datasetSelect">
+      <option value="">Select dataset...</option>
+    </select>
     <select id="inferenceSelect">
       <option value="">Select inference directory...</option>
     </select>
     <input type="text" id="searchInput" placeholder="Search tracks...">
+    <div id="datasetInfo" style="font-size:11px;color:var(--text-muted);margin-top:4px;display:none"></div>
   </div>
   <div class="track-list" id="trackList"></div>
 </div>
@@ -307,6 +311,8 @@ const PLOTLY_CONFIG = {
 };
 
 let currentTrackData = null;
+let currentDataset = null;
+let allDatasets = [];
 let visibleComponents = new Set([
   'root', 'bass', 'triad', 'misc', '6th', '7th', '9th', '11th', '13th'
 ]);
@@ -324,17 +330,58 @@ async function fetchJSON(url) {
 
 async function init() {
   const config = await fetchJSON('/api/config');
+  await loadDatasets();
   await loadInferenceDirs();
-  await loadTracks();
 
-  document.getElementById('inferenceSelect').addEventListener('change', async (e) => {
-    const dir = e.target.value;
-    if (dir) {
-      await loadTracks(null, dir);
-    }
+  document.getElementById('datasetSelect').addEventListener('change', async (e) => {
+    currentDataset = e.target.value || null;
+    updateDatasetInfo();
+    await loadTracks();
+  });
+
+  document.getElementById('inferenceSelect').addEventListener('change', async () => {
+    await loadTracks();
   });
 
   document.getElementById('searchInput').addEventListener('input', filterTracks);
+
+  if (allDatasets.length > 0) {
+    document.getElementById('datasetSelect').value = allDatasets[0].name;
+    currentDataset = allDatasets[0].name;
+    updateDatasetInfo();
+    await loadTracks();
+  }
+}
+
+async function loadDatasets() {
+  try {
+    allDatasets = await fetchJSON('/api/datasets');
+    const sel = document.getElementById('datasetSelect');
+    allDatasets.forEach(ds => {
+      const opt = document.createElement('option');
+      opt.value = ds.name;
+      opt.textContent = `${ds.name} (${ds.track_count} tracks)`;
+      sel.appendChild(opt);
+    });
+  } catch (e) {
+    console.warn('Could not load datasets:', e);
+  }
+}
+
+function updateDatasetInfo() {
+  const infoEl = document.getElementById('datasetInfo');
+  if (!currentDataset) {
+    infoEl.style.display = 'none';
+    return;
+  }
+  const ds = allDatasets.find(d => d.name === currentDataset);
+  if (!ds) {
+    infoEl.style.display = 'none';
+    return;
+  }
+  const durMin = (ds.total_duration_s / 60).toFixed(1);
+  infoEl.innerHTML = `${ds.track_count} tracks &middot; ${durMin} min &middot; ${ds.unique_chords} unique chords`;
+  infoEl.style.display = 'block';
 }
 
 async function loadInferenceDirs() {
@@ -352,9 +399,10 @@ async function loadInferenceDirs() {
   }
 }
 
-async function loadTracks(gtDir, predDir) {
+async function loadTracks() {
   const params = new URLSearchParams();
-  if (gtDir) params.set('gt_dir', gtDir);
+  if (currentDataset) params.set('dataset', currentDataset);
+  const predDir = document.getElementById('inferenceSelect').value;
   if (predDir) params.set('pred_dir', predDir);
 
   try {
@@ -372,6 +420,7 @@ function renderTrackList(tracks) {
     const el = document.createElement('div');
     el.className = 'track-item';
     el.dataset.trackId = t.track_id;
+    if (t.gt_dir) el.dataset.gtDir = t.gt_dir;
 
     let badge = '';
     if (t.has_gt && t.has_pred) {
@@ -402,8 +451,11 @@ async function selectTrack(trackId, el) {
   if (el) el.classList.add('active');
 
   const params = new URLSearchParams();
+  if (currentDataset) params.set('dataset', currentDataset);
   const selVal = document.getElementById('inferenceSelect').value;
   if (selVal) params.set('pred_dir', selVal);
+  const gtDir = el?.dataset?.gtDir;
+  if (gtDir) params.set('gt_dir', gtDir);
 
   try {
     const data = await fetchJSON(`/api/track/${trackId}?${params}`);

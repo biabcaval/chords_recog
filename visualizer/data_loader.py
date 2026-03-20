@@ -19,6 +19,70 @@ from utils.chord_decomposition import ChordDecomposer, COMPONENT_NAMES, CHORD_VO
 
 _decomposer = ChordDecomposer()
 
+KNOWN_DATASETS = [
+    'billboard', 'dj_avan_songbook1', 'dj_avan_songbook2',
+    'jaah', 'queen', 'robbiewilliams', 'rwc',
+]
+
+ANNOTATION_SUBDIRS = ['annotations', 'lab']
+
+
+def scan_datasets(data_root: str) -> List[Dict]:
+    """Discover all datasets under data_root with their annotation directories.
+
+    Looks for ``{data_root}/{dataset}/{annotations|lab}/*.lab`` for each
+    known dataset name, and also discovers any other subdirectory that
+    contains a recognised annotation folder.
+    """
+    if not data_root or not os.path.isdir(data_root):
+        return []
+
+    results = []
+    seen = set()
+
+    for entry in sorted(os.listdir(data_root)):
+        ds_path = os.path.join(data_root, entry)
+        if not os.path.isdir(ds_path):
+            continue
+
+        ann_dir = _find_annotation_dir(ds_path)
+        if ann_dir is None:
+            continue
+
+        lab_files = glob.glob(os.path.join(ann_dir, '*.lab'))
+        if not lab_files:
+            continue
+
+        total_duration = 0.0
+        chord_counts: Dict[str, int] = {}
+        for lf in lab_files:
+            segs = parse_lab_file(lf)
+            for seg in segs:
+                total_duration += seg['end'] - seg['start']
+                chord_counts[seg['chord']] = chord_counts.get(seg['chord'], 0) + 1
+
+        results.append({
+            'name': entry,
+            'annotation_dir': ann_dir,
+            'track_count': len(lab_files),
+            'total_duration_s': round(total_duration, 1),
+            'unique_chords': len(chord_counts),
+        })
+        seen.add(entry)
+
+    return results
+
+
+def _find_annotation_dir(dataset_path: str) -> Optional[str]:
+    """Find the annotation subdirectory within a dataset folder."""
+    for sub in ANNOTATION_SUBDIRS:
+        candidate = os.path.join(dataset_path, sub)
+        if os.path.isdir(candidate):
+            return candidate
+    if glob.glob(os.path.join(dataset_path, '*.lab')):
+        return dataset_path
+    return None
+
 
 def parse_lab_file(filepath: str) -> List[Dict]:
     """Parse a .lab file into a list of segment dicts."""

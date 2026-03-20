@@ -17,6 +17,7 @@ from fastapi.responses import HTMLResponse
 from .data_loader import (
     scan_lab_directory,
     scan_inference_dirs,
+    scan_datasets,
     get_track_data,
     parse_lab_file,
     COMPONENT_NAMES,
@@ -31,15 +32,18 @@ app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 _state = {
     'gt_dir': None,
     'pred_dir': None,
+    'data_root': None,
     'inference_base': None,
 }
 
 
 def configure(gt_dir: Optional[str] = None, pred_dir: Optional[str] = None,
+              data_root: Optional[str] = None,
               inference_base: Optional[str] = None):
     """Set default directories (called from __main__)."""
     _state['gt_dir'] = gt_dir
     _state['pred_dir'] = pred_dir
+    _state['data_root'] = data_root
     _state['inference_base'] = inference_base
 
 
@@ -56,9 +60,16 @@ async def get_config():
     return {
         'gt_dir': _state['gt_dir'],
         'pred_dir': _state['pred_dir'],
+        'data_root': _state['data_root'],
         'component_names': COMPONENT_NAMES,
         'chord_vocab': CHORD_VOCAB,
     }
+
+
+@app.get("/api/datasets")
+async def list_datasets():
+    """Discover all datasets under data_root with annotation counts."""
+    return scan_datasets(_state.get('data_root', ''))
 
 
 @app.get("/api/inference_dirs")
@@ -74,9 +85,21 @@ async def list_inference_dirs():
 async def list_tracks(
     gt_dir: Optional[str] = Query(None),
     pred_dir: Optional[str] = Query(None),
+    dataset: Optional[str] = Query(None),
 ):
-    """List tracks available in GT and/or prediction directories."""
+    """List tracks available in GT and/or prediction directories.
+
+    If *dataset* is provided and data_root is set, gt_dir is resolved
+    automatically to ``{data_root}/{dataset}/annotations``.
+    """
     gd = gt_dir or _state['gt_dir']
+    if dataset and _state.get('data_root'):
+        from .data_loader import _find_annotation_dir
+        ds_path = os.path.join(_state['data_root'], dataset)
+        ann_dir = _find_annotation_dir(ds_path)
+        if ann_dir:
+            gd = ann_dir
+
     pd_ = pred_dir or _state['pred_dir']
 
     gt_tracks = set(scan_lab_directory(gd)) if gd else set()
@@ -88,6 +111,7 @@ async def list_tracks(
             'track_id': t,
             'has_gt': t in gt_tracks,
             'has_pred': t in pred_tracks,
+            'gt_dir': gd if t in gt_tracks else None,
         }
         for t in all_tracks
     ]
@@ -98,15 +122,24 @@ async def get_track(
     track_id: str,
     gt_dir: Optional[str] = Query(None),
     pred_dir: Optional[str] = Query(None),
+    dataset: Optional[str] = Query(None),
 ):
     """Get full track data: segments, decomposition, and diff."""
     gd = gt_dir or _state['gt_dir']
+    if dataset and _state.get('data_root'):
+        from .data_loader import _find_annotation_dir
+        ds_path = os.path.join(_state['data_root'], dataset)
+        ann_dir = _find_annotation_dir(ds_path)
+        if ann_dir:
+            gd = ann_dir
+
     pd_ = pred_dir or _state['pred_dir']
 
     if not gd and not pd_:
         raise HTTPException(400, "No gt_dir or pred_dir configured")
 
     data = get_track_data(track_id, gt_dir=gd, pred_dir=pd_)
+    data['dataset'] = dataset
 
     if 'gt' not in data and 'pred' not in data:
         raise HTTPException(404, f"Track '{track_id}' not found in either directory")
