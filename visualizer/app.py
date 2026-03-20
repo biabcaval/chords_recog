@@ -20,6 +20,7 @@ from .data_loader import (
     scan_datasets,
     get_track_data,
     parse_lab_file,
+    debug_chord_parsing,
     COMPONENT_NAMES,
     CHORD_VOCAB,
 )
@@ -51,6 +52,13 @@ def configure(gt_dir: Optional[str] = None, pred_dir: Optional[str] = None,
 async def index():
     index_path = os.path.join(_static_dir, 'index.html')
     with open(index_path, 'r') as f:
+        return f.read()
+
+
+@app.get("/parser", response_class=HTMLResponse)
+async def parser_page():
+    parser_path = os.path.join(_static_dir, 'parser.html')
+    with open(parser_path, 'r') as f:
         return f.read()
 
 
@@ -145,3 +153,9 @@ async def get_track(
         raise HTTPException(404, f"Track '{track_id}' not found in either directory")
 
     return data
+
+
+@app.get("/api/debug_parse")
+async def debug_parse(chord: str = Query(...)):
+    """Debug the chord parsing pipeline step by step."""
+    return debug_chord_parsing(chord)

@@ -14,10 +14,167 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'BTC-ISMIR19'))
-from utils.chord_decomposition import ChordDecomposer, COMPONENT_NAMES, CHORD_VOCAB
+from utils.chord_decomposition import (
+    ChordDecomposer, ChordReassembler, COMPONENT_NAMES, CHORD_VOCAB, CHORD_VOCAB_IDX,
+)
+import re as _re
+import copy as _copy
 
 
 _decomposer = ChordDecomposer()
+_reassembler = ChordReassembler()
+
+
+def debug_chord_parsing(chord_label: str) -> Dict:
+    """Trace every phase of chord decomposition and reassembly.
+
+    Returns a dict with the output of each pipeline stage so the
+    visualizer can display them interactively.
+    """
+    d = _decomposer
+    result: Dict = {'input': chord_label, 'phases': []}
+
+    # Phase 0: input validation
+    if chord_label in ('N', 'X', '', None):
+        components = {c: 'N' for c in COMPONENT_NAMES}
+        result['phases'].append({
+            'name': 'Input Validation',
+            'description': f'Special token "{chord_label}" — all components set to N',
+            'output': dict(components),
+        })
+        result['final_components'] = components
+        result['indices'] = d.to_indices(components)
+        result['reassembled'] = _reassembler.reassemble(components)
+        result['round_trip_match'] = (result['reassembled'] == chord_label)
+        return result
+
+    result['phases'].append({
+        'name': 'Input Validation',
+        'description': f'Not a special token, proceeding to parse',
+        'output': {'chord_label': chord_label},
+    })
+
+    # Phase 1: _parse_chord
+    try:
+        root, quality, bass = d._parse_chord(chord_label)
+    except Exception as e:
+        result['phases'].append({
+            'name': 'Parse Chord',
+            'description': f'ERROR: {e}',
+            'output': {'error': str(e)},
+        })
+        result['final_components'] = {c: 'N' for c in COMPONENT_NAMES}
+        return result
+
+    result['phases'].append({
+        'name': 'Parse Chord (_parse_chord)',
+        'description': 'Split label into root, quality, bass. Normalize flats → sharps. Resolve degree-bass (e.g. /5 → note).',
+        'output': {'root': root, 'quality': quality, 'bass': bass},
+    })
+
+    components = {c: 'N' for c in COMPONENT_NAMES}
+    if root is not None:
+        components['root'] = root
+    if bass is not None and bass != root:
+        components['bass'] = bass
+
+    if not quality and root is not None:
+        components['triad'] = 'maj'
+        result['phases'].append({
+            'name': 'Default Quality',
+            'description': 'No explicit quality → default to major triad',
+            'output': _copy.deepcopy(components),
+        })
+    elif quality:
+        # Phase 2a: extract paren content
+        paren_extensions, omit_notes = d._extract_paren_content(quality)
+        shorthand = _re.sub(r'\([^)]*\)', '', quality).strip()
+
+        result['phases'].append({
+            'name': 'Phase 1: Extract Parenthetical Content',
+            'description': 'Separate (...) groups into extensions and * omit notes',
+            'output': {
+                'quality': quality,
+                'shorthand_without_parens': shorthand,
+                'paren_extensions': paren_extensions,
+                'omit_notes': omit_notes,
+            },
+        })
+
+        # Phase 2b: process shorthand
+        before = _copy.deepcopy(components)
+        d._process_shorthand(shorthand.lower(), components)
+        result['phases'].append({
+            'name': 'Phase 2: Process Shorthand',
+            'description': f'Process "{shorthand}" — extract triad type and inline extensions',
+            'output': _copy.deepcopy(components),
+            'changes': _diff_components(before, components),
+        })
+
+        # Phase 3: implied tones
+        before = _copy.deepcopy(components)
+        d._add_implied_tones(shorthand, components)
+        result['phases'].append({
+            'name': 'Phase 3: Add Implied Tones',
+            'description': 'Shorthand 9→implies 7th, 11→implies 7th+9th, 13→implies 7th+9th+11th',
+            'output': _copy.deepcopy(components),
+            'changes': _diff_components(before, components),
+        })
+
+        # Phase 4: paren extensions
+        before = _copy.deepcopy(components)
+        d._apply_paren_extensions(paren_extensions, components)
+        result['phases'].append({
+            'name': 'Phase 4: Apply Paren Extensions',
+            'description': f'Apply parenthetical extensions: {paren_extensions}',
+            'output': _copy.deepcopy(components),
+            'changes': _diff_components(before, components),
+        })
+
+        # Phase 5: omit rules
+        before = _copy.deepcopy(components)
+        d._apply_omit_rules(omit_notes, components)
+        result['phases'].append({
+            'name': 'Phase 5: Apply Omit Rules',
+            'description': f'Handle * omit notation: {omit_notes}' if omit_notes else 'No omit rules to apply',
+            'output': _copy.deepcopy(components),
+            'changes': _diff_components(before, components),
+        })
+
+    # Indices
+    indices = d.to_indices(components)
+    result['phases'].append({
+        'name': 'Convert to Indices',
+        'description': 'Map component strings to vocabulary indices',
+        'output': indices,
+    })
+
+    # Reassemble
+    reassembled = _reassembler.reassemble(components)
+    result['phases'].append({
+        'name': 'Reassemble (Round-trip)',
+        'description': 'Reconstruct chord label from components using ChordReassembler',
+        'output': {
+            'reassembled': reassembled,
+            'matches_input': reassembled == chord_label,
+        },
+    })
+
+    result['final_components'] = components
+    result['indices'] = indices
+    result['reassembled'] = reassembled
+    result['round_trip_match'] = (reassembled == chord_label)
+
+    return result
+
+
+def _diff_components(before: Dict[str, str], after: Dict[str, str]) -> Dict[str, Dict]:
+    """Return which components changed between two snapshots."""
+    changes = {}
+    for comp in COMPONENT_NAMES:
+        if before.get(comp) != after.get(comp):
+            changes[comp] = {'from': before.get(comp, 'N'), 'to': after.get(comp, 'N')}
+    return changes
 
 KNOWN_DATASETS = [
     'billboard', 'dj_avan_songbook1', 'dj_avan_songbook2',
