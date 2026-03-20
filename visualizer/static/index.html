@@ -114,6 +114,53 @@
 
   .empty-state { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: 15px; flex-direction: column; gap: 8px; }
   .empty-state .hint { font-size: 13px; opacity: 0.6; }
+  /* Parse comparison popup */
+  .parse-popup-overlay {
+    display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7); z-index: 1100; justify-content: center; align-items: center;
+  }
+  .parse-popup-overlay.active { display: flex; }
+  .parse-popup {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+    width: 90vw; max-width: 1000px; max-height: 85vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+  .parse-popup-header {
+    padding: 14px 20px; display: flex; align-items: center; gap: 12px;
+    border-bottom: 1px solid var(--border); background: var(--surface);
+  }
+  .parse-popup-header h3 { flex: 1; font-size: 15px; font-weight: 600; color: var(--text); }
+  .parse-popup-body { padding: 20px; overflow-y: auto; flex: 1; }
+  .parse-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .parse-col h4 { font-size: 13px; font-weight: 600; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .parse-col-gt h4 { color: var(--match); }
+  .parse-col-pred h4 { color: var(--mismatch); }
+  .parse-comp-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .parse-comp-box {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    background: var(--surface); border-radius: 6px; padding: 6px 10px; min-width: 55px;
+    border: 1px solid var(--border);
+  }
+  .parse-comp-box.diff-highlight { border-color: var(--mismatch); background: #2a1520; }
+  .parse-comp-name { font-size: 9px; color: var(--text-muted); text-transform: uppercase; }
+  .parse-comp-val { font-size: 14px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+  .pcv-active { color: var(--accent); }
+  .pcv-n { color: var(--text-muted); }
+  .parse-phase-list { display: flex; flex-direction: column; gap: 6px; }
+  .parse-phase-item {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 12px; font-size: 12px;
+  }
+  .parse-phase-name { font-weight: 600; margin-bottom: 3px; }
+  .parse-phase-out {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--text-muted); white-space: pre-wrap; word-break: break-all;
+  }
+  .parse-phase-change {
+    margin-top: 4px; font-size: 11px;
+  }
+  .ppc-from { color: var(--mismatch); text-decoration: line-through; }
+  .ppc-to { color: var(--match); font-weight: 600; }
+
   .detail-panel { background: var(--surface); border-top: 1px solid var(--border); padding: 12px 20px; font-size: 13px; display: none; }
   .detail-panel.visible { display: flex; gap: 24px; flex-wrap: wrap; }
   .detail-item { display: flex; gap: 6px; }
@@ -154,6 +201,17 @@
     <div class="detail-item"><span class="detail-label">Time:</span><span class="detail-value" id="detailTime">-</span></div>
     <div class="detail-item"><span class="detail-label">GT:</span><span class="detail-value" id="detailGT">-</span></div>
     <div class="detail-item"><span class="detail-label">Pred:</span><span class="detail-value" id="detailPred">-</span></div>
+  </div>
+</div>
+
+<!-- Parse comparison popup -->
+<div class="parse-popup-overlay" id="parsePopup">
+  <div class="parse-popup">
+    <div class="parse-popup-header">
+      <h3 id="parsePopupTitle">Chord Parse Comparison</h3>
+      <button class="card-btn" onclick="closeParsePopup()">Close (Esc)</button>
+    </div>
+    <div class="parse-popup-body" id="parsePopupBody"></div>
   </div>
 </div>
 
@@ -504,7 +562,7 @@ function addChordTable(container,data){
   const table=document.createElement('table');table.className='chord-table';
   const visComps=COMP_NAMES.filter(c=>visibleComponents.has(c));
   const thead=document.createElement('thead');const hr=document.createElement('tr');
-  const headers=['Time','Duration','GT Chord','Pred Chord',...visComps];
+  const headers=['Time','Duration','GT Chord','Pred Chord',...visComps,''];
   let sortCol=-1,sortAsc=true;
   headers.forEach((h,i)=>{
     const th=document.createElement('th');th.innerHTML=h+'<span class="sort-arrow"></span>';
@@ -525,8 +583,20 @@ function addChordTable(container,data){
       if(seg)cells.push(seg.match?`<span class="comp-pill comp-ok">${seg.gt_value}</span>`:`<span class="comp-pill comp-err">${seg.gt_value}\u2192${seg.pred_value}</span>`);
       else cells.push('-');
     });
+    if(!d.match){
+      cells.push(`<button class="card-btn parse-debug-btn" style="font-size:10px;padding:2px 6px">\u{1F50D} Parse</button>`);
+    } else {
+      cells.push('');
+    }
     cells.forEach(html=>{const td=document.createElement('td');td.innerHTML=html;tr.appendChild(td);});
-    tr.addEventListener('click',()=>scrollTimelineTo(d.start,d.end));
+    tr.addEventListener('click',(e)=>{
+      if(e.target.classList.contains('parse-debug-btn')){
+        e.stopPropagation();
+        showParseComparison(d.gt_chord,d.pred_chord);
+      } else {
+        scrollTimelineTo(d.start,d.end);
+      }
+    });
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);wrap.appendChild(table);body.appendChild(wrap);container.appendChild(card);
@@ -602,8 +672,88 @@ function setupClickHandler(plotDiv,data){
   });
 }
 
+// ── Parse comparison popup ──
+
+function closeParsePopup(){document.getElementById('parsePopup').classList.remove('active');}
+
+async function showParseComparison(gtChord,predChord){
+  const popup=document.getElementById('parsePopup');
+  const body=document.getElementById('parsePopupBody');
+  const title=document.getElementById('parsePopupTitle');
+  title.textContent=`${gtChord}  vs  ${predChord}`;
+  body.innerHTML='<div style="text-align:center;color:var(--text-muted);padding:40px">Loading...</div>';
+  popup.classList.add('active');
+
+  try{
+    const [gtData,predData]=await Promise.all([
+      fetchJSON(`/api/debug_parse?chord=${encodeURIComponent(gtChord)}`),
+      fetchJSON(`/api/debug_parse?chord=${encodeURIComponent(predChord)}`),
+    ]);
+    body.innerHTML='';
+    const cols=document.createElement('div');cols.className='parse-columns';
+    cols.appendChild(buildParseColumn(gtData,'GT','parse-col-gt'));
+    cols.appendChild(buildParseColumn(predData,'Pred','parse-col-pred',gtData));
+    body.appendChild(cols);
+  }catch(e){
+    body.innerHTML=`<div style="color:var(--mismatch)">Error: ${e.message}</div>`;
+  }
+}
+
+function buildParseColumn(data,label,cssClass,compareWith){
+  const col=document.createElement('div');
+  col.className=`parse-col ${cssClass}`;
+
+  const h4=document.createElement('h4');
+  h4.textContent=`${label}: ${data.input}`;
+  if(data.reassembled!==data.input){
+    h4.textContent+=` \u2192 ${data.reassembled}`;
+  }
+  col.appendChild(h4);
+
+  const compGrid=document.createElement('div');compGrid.className='parse-comp-grid';
+  COMP_NAMES.forEach(comp=>{
+    const box=document.createElement('div');box.className='parse-comp-box';
+    const val=data.final_components[comp]||'N';
+    if(compareWith){
+      const otherVal=compareWith.final_components[comp]||'N';
+      if(val!==otherVal)box.classList.add('diff-highlight');
+    }
+    box.innerHTML=`<span class="parse-comp-name">${comp}</span><span class="parse-comp-val ${val!=='N'?'pcv-active':'pcv-n'}">${val}</span>`;
+    compGrid.appendChild(box);
+  });
+  col.appendChild(compGrid);
+
+  const phases=document.createElement('div');phases.className='parse-phase-list';
+  data.phases.forEach((phase,i)=>{
+    const item=document.createElement('div');item.className='parse-phase-item';
+    let html=`<div class="parse-phase-name">${i}. ${phase.name}</div>`;
+    html+=`<div class="parse-phase-out">${formatPhaseOutput(phase.output)}</div>`;
+    if(phase.changes&&Object.keys(phase.changes).length>0){
+      html+='<div class="parse-phase-change">';
+      for(const[comp,ch]of Object.entries(phase.changes)){
+        html+=`${comp}: <span class="ppc-from">${ch.from}</span> \u2192 <span class="ppc-to">${ch.to}</span> &nbsp;`;
+      }
+      html+='</div>';
+    }
+    item.innerHTML=html;
+    phases.appendChild(item);
+  });
+  col.appendChild(phases);
+  return col;
+}
+
+function formatPhaseOutput(obj){
+  if(typeof obj==='string')return obj;
+  return Object.entries(obj).map(([k,v])=>{
+    if(v===null)return `${k}: null`;
+    if(Array.isArray(v))return `${k}: [${v.join(', ')}]`;
+    if(typeof v==='object')return `${k}: {${Object.entries(v).map(([a,b])=>`${a}:${b}`).join(', ')}}`;
+    return `${k}: ${v}`;
+  }).join('\n');
+}
+
 document.addEventListener('keydown',(e)=>{
-  if(e.key==='Escape'){closeFullscreen();return;}
+  if(e.key==='Escape'){closeParsePopup();closeFullscreen();return;}
   if(!currentTrackData||!currentTrackData.diff)return;
   if(e.target.tagName==='INPUT')return;
   const mm=currentTrackData.diff.filter(d=>!d.match);if(!mm.length)return;
