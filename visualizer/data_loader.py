@@ -288,12 +288,80 @@ def scan_inference_dirs(base_dir: str) -> List[Dict]:
     return dirs
 
 
+def compute_segment_stats(segments: List[Dict]) -> Dict:
+    """Compute statistics for a set of chord segments."""
+    if not segments:
+        return {}
+
+    total_dur = sum(s['end'] - s['start'] for s in segments)
+    chords = [s['chord'] for s in segments]
+
+    chord_durations: Dict[str, float] = {}
+    for s in segments:
+        c = s['chord']
+        chord_durations[c] = chord_durations.get(c, 0) + (s['end'] - s['start'])
+
+    top_chords = sorted(chord_durations.items(), key=lambda x: -x[1])[:15]
+
+    decomposed = decompose_segments(segments)
+    comp_distributions: Dict[str, Dict[str, float]] = {}
+    for comp in COMPONENT_NAMES:
+        val_dur: Dict[str, float] = {}
+        for entry in decomposed[comp]:
+            v = entry['value']
+            d = entry['end'] - entry['start']
+            val_dur[v] = val_dur.get(v, 0) + d
+        dist = {v: round(d / total_dur * 100, 2) for v, d in
+                sorted(val_dur.items(), key=lambda x: -x[1]) if d > 0}
+        comp_distributions[comp] = dist
+
+    return {
+        'total_duration_s': round(total_dur, 2),
+        'num_segments': len(segments),
+        'unique_chords': len(set(chords)),
+        'changes_per_min': round(len(segments) / (total_dur / 60), 2) if total_dur > 0 else 0,
+        'top_chords': [{'chord': c, 'duration_s': round(d, 2),
+                        'pct': round(d / total_dur * 100, 1)}
+                       for c, d in top_chords],
+        'component_distributions': comp_distributions,
+    }
+
+
+def compute_head_accuracy(component_diff: Dict[str, List[Dict]]) -> Dict[str, Dict]:
+    """Compute per-head accuracy weighted by duration."""
+    result = {}
+    for comp in COMPONENT_NAMES:
+        segs = component_diff.get(comp, [])
+        if not segs:
+            continue
+        total_dur = sum(s['end'] - s['start'] for s in segs)
+        match_dur = sum(s['end'] - s['start'] for s in segs if s['match'])
+        accuracy = round(match_dur / total_dur * 100, 2) if total_dur > 0 else 0.0
+
+        error_pairs: Dict[str, float] = {}
+        for s in segs:
+            if not s['match']:
+                key = f"{s['gt_value']}\u2192{s['pred_value']}"
+                error_pairs[key] = error_pairs.get(key, 0) + (s['end'] - s['start'])
+        top_errors = sorted(error_pairs.items(), key=lambda x: -x[1])[:5]
+
+        result[comp] = {
+            'accuracy_pct': accuracy,
+            'match_duration_s': round(match_dur, 2),
+            'total_duration_s': round(total_dur, 2),
+            'top_errors': [{'pair': p, 'duration_s': round(d, 2),
+                            'pct': round(d / total_dur * 100, 1)}
+                           for p, d in top_errors],
+        }
+    return result
+
+
 def get_track_data(
     track_id: str,
     gt_dir: Optional[str] = None,
     pred_dir: Optional[str] = None,
 ) -> Dict:
-    """Load full track data including segments, decomposition, and diff."""
+    """Load full track data including segments, decomposition, diff, and stats."""
     data: Dict = {'track_id': track_id}
 
     gt_path = os.path.join(gt_dir, f'{track_id}.lab') if gt_dir else None
@@ -308,6 +376,7 @@ def get_track_data(
             'segments': gt_segments,
             'decomposed': decompose_segments(gt_segments),
         }
+        data['gt_stats'] = compute_segment_stats(gt_segments)
 
     if pred_path and os.path.isfile(pred_path):
         pred_segments = parse_lab_file(pred_path)
@@ -315,6 +384,7 @@ def get_track_data(
             'segments': pred_segments,
             'decomposed': decompose_segments(pred_segments),
         }
+        data['pred_stats'] = compute_segment_stats(pred_segments)
 
     if gt_segments and pred_segments:
         data['diff'] = compute_diff(gt_segments, pred_segments)
@@ -323,5 +393,7 @@ def get_track_data(
         total_dur = sum(d['end'] - d['start'] for d in data['diff'])
         match_dur = sum(d['end'] - d['start'] for d in data['diff'] if d['match'])
         data['match_ratio'] = round(match_dur / total_dur, 4) if total_dur > 0 else 0.0
+
+        data['head_accuracy'] = compute_head_accuracy(data['component_diff'])
 
     return data
