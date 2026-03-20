@@ -179,9 +179,7 @@
     letter-spacing: 0.5px;
   }
 
-  .chart-plot {
-    width: 100%;
-  }
+  .chart-plot { width: 100%; }
 
   .empty-state {
     flex: 1;
@@ -195,6 +193,87 @@
   }
 
   .empty-state .hint { font-size: 13px; opacity: 0.6; }
+
+  /* ── Chord comparison table ── */
+
+  .table-controls {
+    padding: 8px 14px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .table-filter-btn {
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 11px;
+  }
+
+  .table-filter-btn.active {
+    background: var(--mismatch);
+    color: #fff;
+    border-color: var(--mismatch);
+  }
+
+  .table-wrap {
+    max-height: 400px;
+    overflow-y: auto;
+  }
+
+  .chord-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  .chord-table th {
+    position: sticky;
+    top: 0;
+    background: var(--surface2);
+    padding: 6px 10px;
+    text-align: left;
+    font-weight: 600;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  .chord-table th:hover { color: var(--text); }
+  .chord-table th .sort-arrow { margin-left: 4px; font-size: 9px; }
+
+  .chord-table td {
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  .chord-table tr { cursor: pointer; transition: background 0.1s; }
+  .chord-table tbody tr:hover { background: var(--surface2); }
+
+  .chord-table tr.row-match td:first-child { border-left: 3px solid var(--match); }
+  .chord-table tr.row-mismatch td:first-child { border-left: 3px solid var(--mismatch); }
+
+  .cell-match { color: var(--match); }
+  .cell-mismatch { color: var(--mismatch); font-weight: 600; }
+  .cell-chord { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+
+  .comp-pill {
+    display: inline-block;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 10px;
+    margin: 0 1px;
+  }
+
+  .comp-ok { background: #1a3a2a; color: var(--match); }
+  .comp-err { background: #3a1a1a; color: var(--mismatch); }
 
   .detail-panel {
     background: var(--surface);
@@ -211,12 +290,14 @@
   .detail-value { font-weight: 600; }
 
   .track-list::-webkit-scrollbar,
-  .charts-container::-webkit-scrollbar {
+  .charts-container::-webkit-scrollbar,
+  .table-wrap::-webkit-scrollbar {
     width: 6px;
   }
 
   .track-list::-webkit-scrollbar-thumb,
-  .charts-container::-webkit-scrollbar-thumb {
+  .charts-container::-webkit-scrollbar-thumb,
+  .table-wrap::-webkit-scrollbar-thumb {
     background: var(--border);
     border-radius: 3px;
   }
@@ -249,7 +330,7 @@
   <div class="charts-container" id="chartsContainer">
     <div class="empty-state" id="emptyState">
       <span>Select a track to visualize</span>
-      <span class="hint">Choose an inference directory, then click a track</span>
+      <span class="hint">Choose a dataset and inference directory, then click a track</span>
     </div>
   </div>
 
@@ -277,28 +358,17 @@ const ROOT_COLORS = {
   'N': '#636e72',
 };
 
-const TRIAD_COLORS = {
-  'maj': '#3498db', 'min': '#e74c3c', 'dim': '#9b59b6', 'aug': '#e67e22',
-  'sus2': '#1abc9c', 'sus4': '#2ecc71', 'N': '#636e72', '5': '#fdcb6e',
-};
-
 const MATCH_COLOR = 'rgba(45,212,160,0.6)';
 const MISMATCH_COLOR = 'rgba(240,83,106,0.6)';
+const COMPONENT_NAMES = ['root', 'bass', 'triad', 'misc', '6th', '7th', '9th', '11th', '13th'];
 
 const PLOTLY_LAYOUT_BASE = {
   paper_bgcolor: '#1a1d27',
   plot_bgcolor: '#1a1d27',
   font: { color: '#e1e4ed', size: 11 },
   margin: { l: 80, r: 20, t: 10, b: 30 },
-  xaxis: {
-    gridcolor: '#2e3345',
-    zerolinecolor: '#2e3345',
-    title: '',
-  },
-  yaxis: {
-    gridcolor: '#2e3345',
-    zerolinecolor: '#2e3345',
-  },
+  xaxis: { gridcolor: '#2e3345', zerolinecolor: '#2e3345', title: '' },
+  yaxis: { gridcolor: '#2e3345', zerolinecolor: '#2e3345' },
   showlegend: false,
   hovermode: 'closest',
 };
@@ -311,14 +381,15 @@ const PLOTLY_CONFIG = {
 };
 
 let currentTrackData = null;
+let currentTrackId = null;
+let currentGtDir = null;
 let currentDataset = null;
 let allDatasets = [];
-let visibleComponents = new Set([
-  'root', 'bass', 'triad', 'misc', '6th', '7th', '9th', '11th', '13th'
-]);
+let visibleComponents = new Set(COMPONENT_NAMES);
 let allPlotIds = [];
+let tableShowOnlyErrors = false;
 
-// ── API helpers ──
+// ── API ──
 
 async function fetchJSON(url) {
   const resp = await fetch(url);
@@ -326,10 +397,10 @@ async function fetchJSON(url) {
   return resp.json();
 }
 
-// ── Initialization ──
+// ── Init ──
 
 async function init() {
-  const config = await fetchJSON('/api/config');
+  await fetchJSON('/api/config');
   await loadDatasets();
   await loadInferenceDirs();
 
@@ -341,6 +412,7 @@ async function init() {
 
   document.getElementById('inferenceSelect').addEventListener('change', async () => {
     await loadTracks();
+    if (currentTrackId) await reselectCurrentTrack();
   });
 
   document.getElementById('searchInput').addEventListener('input', filterTracks);
@@ -363,25 +435,17 @@ async function loadDatasets() {
       opt.textContent = `${ds.name} (${ds.track_count} tracks)`;
       sel.appendChild(opt);
     });
-  } catch (e) {
-    console.warn('Could not load datasets:', e);
-  }
+  } catch (e) { console.warn('Could not load datasets:', e); }
 }
 
 function updateDatasetInfo() {
-  const infoEl = document.getElementById('datasetInfo');
-  if (!currentDataset) {
-    infoEl.style.display = 'none';
-    return;
-  }
+  const el = document.getElementById('datasetInfo');
+  if (!currentDataset) { el.style.display = 'none'; return; }
   const ds = allDatasets.find(d => d.name === currentDataset);
-  if (!ds) {
-    infoEl.style.display = 'none';
-    return;
-  }
+  if (!ds) { el.style.display = 'none'; return; }
   const durMin = (ds.total_duration_s / 60).toFixed(1);
-  infoEl.innerHTML = `${ds.track_count} tracks &middot; ${durMin} min &middot; ${ds.unique_chords} unique chords`;
-  infoEl.style.display = 'block';
+  el.innerHTML = `${ds.track_count} tracks &middot; ${durMin} min &middot; ${ds.unique_chords} unique chords`;
+  el.style.display = 'block';
 }
 
 async function loadInferenceDirs() {
@@ -394,9 +458,7 @@ async function loadInferenceDirs() {
       opt.textContent = `${d.name} (${d.track_count} tracks)`;
       sel.appendChild(opt);
     });
-  } catch (e) {
-    console.warn('Could not load inference dirs:', e);
-  }
+  } catch (e) { console.warn('Could not load inference dirs:', e); }
 }
 
 async function loadTracks() {
@@ -408,9 +470,7 @@ async function loadTracks() {
   try {
     const tracks = await fetchJSON(`/api/tracks?${params}`);
     renderTrackList(tracks);
-  } catch (e) {
-    console.warn('Could not load tracks:', e);
-  }
+  } catch (e) { console.warn('Could not load tracks:', e); }
 }
 
 function renderTrackList(tracks) {
@@ -419,17 +479,14 @@ function renderTrackList(tracks) {
   tracks.forEach(t => {
     const el = document.createElement('div');
     el.className = 'track-item';
+    if (t.track_id === currentTrackId) el.classList.add('active');
     el.dataset.trackId = t.track_id;
     if (t.gt_dir) el.dataset.gtDir = t.gt_dir;
 
     let badge = '';
-    if (t.has_gt && t.has_pred) {
-      badge = '<span class="track-badge badge-both">GT+Pred</span>';
-    } else if (t.has_gt) {
-      badge = '<span class="track-badge badge-gt">GT</span>';
-    } else {
-      badge = '<span class="track-badge badge-pred">Pred</span>';
-    }
+    if (t.has_gt && t.has_pred) badge = '<span class="track-badge badge-both">GT+Pred</span>';
+    else if (t.has_gt) badge = '<span class="track-badge badge-gt">GT</span>';
+    else badge = '<span class="track-badge badge-pred">Pred</span>';
 
     el.innerHTML = `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.track_id}</span>${badge}`;
     el.addEventListener('click', () => selectTrack(t.track_id, el));
@@ -446,16 +503,24 @@ function filterTracks() {
 
 // ── Track selection ──
 
+async function reselectCurrentTrack() {
+  if (!currentTrackId) return;
+  const el = document.querySelector(`.track-item[data-track-id="${currentTrackId}"]`);
+  if (el) await selectTrack(currentTrackId, el);
+}
+
 async function selectTrack(trackId, el) {
   document.querySelectorAll('.track-item.active').forEach(e => e.classList.remove('active'));
   if (el) el.classList.add('active');
+
+  currentTrackId = trackId;
+  currentGtDir = el?.dataset?.gtDir || null;
 
   const params = new URLSearchParams();
   if (currentDataset) params.set('dataset', currentDataset);
   const selVal = document.getElementById('inferenceSelect').value;
   if (selVal) params.set('pred_dir', selVal);
-  const gtDir = el?.dataset?.gtDir;
-  if (gtDir) params.set('gt_dir', gtDir);
+  if (currentGtDir) params.set('gt_dir', currentGtDir);
 
   try {
     const data = await fetchJSON(`/api/track/${trackId}?${params}`);
@@ -469,9 +534,7 @@ async function selectTrack(trackId, el) {
 // ── Rendering ──
 
 function renderVisualization(data) {
-  const toolbar = document.getElementById('toolbar');
-  toolbar.style.display = 'flex';
-
+  document.getElementById('toolbar').style.display = 'flex';
   document.getElementById('trackTitle').textContent = data.track_id;
 
   const badge = document.getElementById('matchBadge');
@@ -490,81 +553,39 @@ function renderVisualization(data) {
   container.innerHTML = '';
   allPlotIds = [];
 
-  document.getElementById('emptyState')?.remove();
-
-  if (data.gt || data.pred) {
-    addChordTimeline(container, data);
-  }
-
-  if (data.diff) {
-    addDiffTimeline(container, data);
-  }
-
-  if (data.component_diff) {
-    addComponentView(container, data);
-  }
+  if (data.gt || data.pred) addChordTimeline(container, data);
+  if (data.diff) addDiffTimeline(container, data);
+  if (data.diff) addChordTable(container, data);
+  if (data.component_diff) addComponentView(container, data);
 }
 
 function renderComponentToggles() {
   const group = document.getElementById('componentToggles');
   group.innerHTML = '';
-
-  const comps = ['root', 'bass', 'triad', 'misc', '6th', '7th', '9th', '11th', '13th'];
-  comps.forEach(comp => {
+  COMPONENT_NAMES.forEach(comp => {
     const btn = document.createElement('button');
     btn.className = `toggle-btn ${visibleComponents.has(comp) ? 'active' : ''}`;
     btn.textContent = comp;
     btn.addEventListener('click', () => {
-      if (visibleComponents.has(comp)) {
-        visibleComponents.delete(comp);
-        btn.classList.remove('active');
-      } else {
-        visibleComponents.add(comp);
-        btn.classList.add('active');
-      }
+      visibleComponents.has(comp) ? visibleComponents.delete(comp) : visibleComponents.add(comp);
+      btn.classList.toggle('active');
       if (currentTrackData) renderVisualization(currentTrackData);
     });
     group.appendChild(btn);
   });
 }
 
-// ── Chart builders ──
-
-function makeShapes(segments, y0, y1, colorFn) {
-  return segments.map(seg => ({
-    type: 'rect',
-    x0: seg.start, x1: seg.end,
-    y0, y1,
-    fillcolor: colorFn(seg),
-    line: { width: 0.5, color: '#1a1d27' },
-    layer: 'below',
-  }));
-}
-
-function makeAnnotations(segments, y, labelFn) {
-  const minDuration = 0.5;
-  return segments
-    .filter(seg => (seg.end - seg.start) >= minDuration)
-    .map(seg => ({
-      x: (seg.start + seg.end) / 2,
-      y: y,
-      text: labelFn(seg),
-      showarrow: false,
-      font: { size: 10, color: '#fff' },
-    }));
-}
+// ── Chord Timeline ──
 
 function chordColor(chord) {
   if (!chord || chord === 'N' || chord === 'X') return ROOT_COLORS['N'];
-  const root = chord.split(':')[0];
-  return ROOT_COLORS[root] || ROOT_COLORS['N'];
+  return ROOT_COLORS[chord.split(':')[0]] || ROOT_COLORS['N'];
 }
 
 function addChordTimeline(container, data) {
   const card = document.createElement('div');
   card.className = 'chart-card';
   card.innerHTML = '<h3>Chord Timeline</h3>';
-
   const plotDiv = document.createElement('div');
   plotDiv.className = 'chart-plot';
   plotDiv.id = 'chordTimeline';
@@ -572,79 +593,62 @@ function addChordTimeline(container, data) {
   container.appendChild(card);
   allPlotIds.push(plotDiv.id);
 
-  const shapes = [];
-  const annotations = [];
-  const yLabels = [];
-  const tickVals = [];
-
-  if (data.gt) {
-    shapes.push(...makeShapes(data.gt.segments, 0.6, 1.0, seg => chordColor(seg.chord)));
-    annotations.push(...makeAnnotations(data.gt.segments, 0.8, seg => seg.chord));
-    yLabels.push('GT');
-    tickVals.push(0.8);
-  }
-
-  if (data.pred) {
-    shapes.push(...makeShapes(data.pred.segments, 0.0, 0.4, seg => chordColor(seg.chord)));
-    annotations.push(...makeAnnotations(data.pred.segments, 0.2, seg => seg.chord));
-    yLabels.push('Pred');
-    tickVals.push(0.2);
-  }
-
+  const traces = [];
   const maxTime = Math.max(
     ...(data.gt?.segments || []).map(s => s.end),
-    ...(data.pred?.segments || []).map(s => s.end),
-    1
+    ...(data.pred?.segments || []).map(s => s.end), 1
   );
 
-  const hoverTraces = [];
   if (data.gt) {
-    hoverTraces.push({
-      x: data.gt.segments.map(s => (s.start + s.end) / 2),
-      y: data.gt.segments.map(() => 0.8),
-      text: data.gt.segments.map(s => `${s.chord}<br>${s.start.toFixed(2)}s - ${s.end.toFixed(2)}s`),
+    traces.push({
+      type: 'bar',
+      orientation: 'h',
+      y: data.gt.segments.map(() => 'GT'),
+      x: data.gt.segments.map(s => s.end - s.start),
+      base: data.gt.segments.map(s => s.start),
+      marker: { color: data.gt.segments.map(s => chordColor(s.chord)), line: { width: 0.5, color: '#1a1d27' } },
+      text: data.gt.segments.map(s => s.chord),
+      textposition: 'inside',
+      textfont: { size: 10, color: '#fff' },
+      hovertext: data.gt.segments.map(s => `${s.chord}<br>${s.start.toFixed(2)}s - ${s.end.toFixed(2)}s`),
       hoverinfo: 'text',
-      mode: 'markers',
-      marker: { size: 0.1, opacity: 0 },
-      showlegend: false,
     });
   }
+
   if (data.pred) {
-    hoverTraces.push({
-      x: data.pred.segments.map(s => (s.start + s.end) / 2),
-      y: data.pred.segments.map(() => 0.2),
-      text: data.pred.segments.map(s => `${s.chord}<br>${s.start.toFixed(2)}s - ${s.end.toFixed(2)}s`),
+    traces.push({
+      type: 'bar',
+      orientation: 'h',
+      y: data.pred.segments.map(() => 'Pred'),
+      x: data.pred.segments.map(s => s.end - s.start),
+      base: data.pred.segments.map(s => s.start),
+      marker: { color: data.pred.segments.map(s => chordColor(s.chord)), line: { width: 0.5, color: '#1a1d27' } },
+      text: data.pred.segments.map(s => s.chord),
+      textposition: 'inside',
+      textfont: { size: 10, color: '#fff' },
+      hovertext: data.pred.segments.map(s => `${s.chord}<br>${s.start.toFixed(2)}s - ${s.end.toFixed(2)}s`),
       hoverinfo: 'text',
-      mode: 'markers',
-      marker: { size: 0.1, opacity: 0 },
-      showlegend: false,
     });
   }
 
   const layout = {
     ...PLOTLY_LAYOUT_BASE,
-    height: 140,
-    shapes,
-    annotations,
+    height: 130,
+    barmode: 'stack',
     xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, range: [0, maxTime], title: 'Time (s)' },
-    yaxis: {
-      ...PLOTLY_LAYOUT_BASE.yaxis,
-      range: [-0.05, 1.05],
-      tickvals: tickVals,
-      ticktext: yLabels,
-      fixedrange: true,
-    },
+    yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, fixedrange: true, autorange: 'reversed' },
   };
 
-  Plotly.newPlot(plotDiv, hoverTraces, layout, PLOTLY_CONFIG);
+  Plotly.newPlot(plotDiv, traces, layout, PLOTLY_CONFIG);
   setupClickHandler(plotDiv, data);
 }
+
+// ── Diff Timeline ──
 
 function addDiffTimeline(container, data) {
   const card = document.createElement('div');
   card.className = 'chart-card';
   card.innerHTML = '<h3>Match / Mismatch</h3>';
-
   const plotDiv = document.createElement('div');
   plotDiv.className = 'chart-plot';
   plotDiv.id = 'diffTimeline';
@@ -652,65 +656,182 @@ function addDiffTimeline(container, data) {
   container.appendChild(card);
   allPlotIds.push(plotDiv.id);
 
-  const shapes = data.diff.map(d => ({
-    type: 'rect',
-    x0: d.start, x1: d.end,
-    y0: 0, y1: 1,
-    fillcolor: d.match ? MATCH_COLOR : MISMATCH_COLOR,
-    line: { width: 0.5, color: '#1a1d27' },
-    layer: 'below',
-  }));
-
-  const mismatches = data.diff.filter(d => !d.match);
-  const annotations = mismatches
-    .filter(d => (d.end - d.start) >= 0.4)
-    .map(d => ({
-      x: (d.start + d.end) / 2,
-      y: 0.5,
-      text: `${d.gt_chord} → ${d.pred_chord}`,
-      showarrow: false,
-      font: { size: 9, color: '#fff' },
-    }));
-
   const maxTime = Math.max(...data.diff.map(d => d.end), 1);
 
-  const hoverTrace = {
-    x: data.diff.map(d => (d.start + d.end) / 2),
-    y: data.diff.map(() => 0.5),
-    text: data.diff.map(d =>
+  const trace = {
+    type: 'bar',
+    orientation: 'h',
+    y: data.diff.map(() => 'Diff'),
+    x: data.diff.map(d => d.end - d.start),
+    base: data.diff.map(d => d.start),
+    marker: { color: data.diff.map(d => d.match ? MATCH_COLOR : MISMATCH_COLOR), line: { width: 0.3, color: '#1a1d27' } },
+    text: data.diff.map(d => d.match ? '' : `${d.gt_chord} \u2192 ${d.pred_chord}`),
+    textposition: 'inside',
+    textfont: { size: 9, color: '#fff' },
+    hovertext: data.diff.map(d =>
       d.match
         ? `${d.gt_chord} (match)<br>${d.start.toFixed(2)}s - ${d.end.toFixed(2)}s`
         : `GT: ${d.gt_chord}<br>Pred: ${d.pred_chord}<br>${d.start.toFixed(2)}s - ${d.end.toFixed(2)}s`
     ),
     hoverinfo: 'text',
-    mode: 'markers',
-    marker: { size: 0.1, opacity: 0 },
-    showlegend: false,
   };
 
   const layout = {
     ...PLOTLY_LAYOUT_BASE,
-    height: 80,
-    shapes,
-    annotations,
+    height: 70,
     xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, range: [0, maxTime] },
-    yaxis: {
-      ...PLOTLY_LAYOUT_BASE.yaxis,
-      range: [-0.05, 1.05],
-      tickvals: [0.5],
-      ticktext: ['Diff'],
-      fixedrange: true,
-    },
+    yaxis: { ...PLOTLY_LAYOUT_BASE.yaxis, fixedrange: true },
   };
 
-  Plotly.newPlot(plotDiv, [hoverTrace], layout, PLOTLY_CONFIG);
+  Plotly.newPlot(plotDiv, [trace], layout, PLOTLY_CONFIG);
 }
+
+// ── Chord Comparison Table ──
+
+function addChordTable(container, data) {
+  const card = document.createElement('div');
+  card.className = 'chart-card';
+  card.innerHTML = '<h3>Segment Comparison (GT vs Pred)</h3>';
+
+  const controls = document.createElement('div');
+  controls.className = 'table-controls';
+  const filterBtn = document.createElement('button');
+  filterBtn.className = 'table-filter-btn';
+  filterBtn.textContent = 'Show only errors';
+  filterBtn.addEventListener('click', () => {
+    tableShowOnlyErrors = !tableShowOnlyErrors;
+    filterBtn.classList.toggle('active', tableShowOnlyErrors);
+    applyTableFilter(card);
+  });
+  const countInfo = document.createElement('span');
+  countInfo.style.cssText = 'font-size:11px;color:var(--text-muted);margin-left:auto';
+  const errors = data.diff.filter(d => !d.match).length;
+  const total = data.diff.length;
+  countInfo.textContent = `${errors} errors / ${total} segments`;
+  controls.appendChild(filterBtn);
+  controls.appendChild(countInfo);
+  card.appendChild(controls);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'table-wrap';
+
+  const table = document.createElement('table');
+  table.className = 'chord-table';
+
+  const visComps = COMPONENT_NAMES.filter(c => visibleComponents.has(c));
+
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  const headers = ['Time', 'Duration', 'GT Chord', 'Pred Chord', ...visComps.map(c => c)];
+  let sortCol = -1, sortAsc = true;
+
+  headers.forEach((h, i) => {
+    const th = document.createElement('th');
+    th.innerHTML = h + '<span class="sort-arrow"></span>';
+    th.addEventListener('click', () => {
+      if (sortCol === i) sortAsc = !sortAsc;
+      else { sortCol = i; sortAsc = true; }
+      sortTable(table, sortCol, sortAsc);
+      thead.querySelectorAll('.sort-arrow').forEach(s => s.textContent = '');
+      th.querySelector('.sort-arrow').textContent = sortAsc ? ' \u25B2' : ' \u25BC';
+    });
+    headerRow.appendChild(th);
+  });
+  thead.appendChild(headerRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+
+  const gtDecomp = data.gt?.decomposed || {};
+  const predDecomp = data.pred?.decomposed || {};
+
+  data.diff.forEach((d, idx) => {
+    const tr = document.createElement('tr');
+    tr.className = d.match ? 'row-match' : 'row-mismatch';
+    tr.dataset.match = d.match ? '1' : '0';
+
+    const dur = (d.end - d.start).toFixed(2);
+
+    const cells = [
+      `${d.start.toFixed(2)}s`,
+      `${dur}s`,
+      `<span class="cell-chord">${d.gt_chord}</span>`,
+      `<span class="cell-chord ${d.match ? 'cell-match' : 'cell-mismatch'}">${d.pred_chord}</span>`,
+    ];
+
+    const compDiff = data.component_diff || {};
+    visComps.forEach(comp => {
+      const compSegs = compDiff[comp] || [];
+      const mid = (d.start + d.end) / 2;
+      const seg = compSegs.find(s => s.start <= mid && mid < s.end);
+      if (seg) {
+        if (seg.match) {
+          cells.push(`<span class="comp-pill comp-ok">${seg.gt_value}</span>`);
+        } else {
+          cells.push(`<span class="comp-pill comp-err">${seg.gt_value}\u2192${seg.pred_value}</span>`);
+        }
+      } else {
+        cells.push('-');
+      }
+    });
+
+    cells.forEach(html => {
+      const td = document.createElement('td');
+      td.innerHTML = html;
+      tr.appendChild(td);
+    });
+
+    tr.addEventListener('click', () => scrollTimelineTo(d.start, d.end));
+    tbody.appendChild(tr);
+  });
+
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  card.appendChild(wrap);
+  container.appendChild(card);
+}
+
+function applyTableFilter(card) {
+  const rows = card.querySelectorAll('tbody tr');
+  rows.forEach(tr => {
+    if (tableShowOnlyErrors) {
+      tr.style.display = tr.dataset.match === '1' ? 'none' : '';
+    } else {
+      tr.style.display = '';
+    }
+  });
+}
+
+function sortTable(table, colIdx, asc) {
+  const tbody = table.querySelector('tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  rows.sort((a, b) => {
+    const aText = a.children[colIdx]?.textContent || '';
+    const bText = b.children[colIdx]?.textContent || '';
+    const aNum = parseFloat(aText);
+    const bNum = parseFloat(bText);
+    if (!isNaN(aNum) && !isNaN(bNum)) return asc ? aNum - bNum : bNum - aNum;
+    return asc ? aText.localeCompare(bText) : bText.localeCompare(aText);
+  });
+  rows.forEach(r => tbody.appendChild(r));
+}
+
+function scrollTimelineTo(start, end) {
+  const mid = (start + end) / 2;
+  const span = 20;
+  const newRange = [mid - span / 2, mid + span / 2];
+  allPlotIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) Plotly.relayout(el, { 'xaxis.range[0]': newRange[0], 'xaxis.range[1]': newRange[1] });
+  });
+}
+
+// ── Decomposed Components ──
 
 function addComponentView(container, data) {
   const card = document.createElement('div');
   card.className = 'chart-card';
   card.innerHTML = '<h3>Decomposed Components (GT vs Pred)</h3>';
-
   const plotDiv = document.createElement('div');
   plotDiv.className = 'chart-plot';
   plotDiv.id = 'componentView';
@@ -718,95 +839,68 @@ function addComponentView(container, data) {
   container.appendChild(card);
   allPlotIds.push(plotDiv.id);
 
-  const comps = ['root', 'bass', 'triad', 'misc', '6th', '7th', '9th', '11th', '13th']
-    .filter(c => visibleComponents.has(c));
-
+  const comps = COMPONENT_NAMES.filter(c => visibleComponents.has(c));
   if (comps.length === 0) return;
 
-  const rowH = 1.0 / comps.length;
-  const shapes = [];
-  const annotations = [];
-  const tickVals = [];
-  const tickText = [];
-  const hoverTraces = [];
+  const yLabels = comps.slice().reverse();
+  const traces = [];
+  const maxTime = Math.max(
+    ...Object.values(data.component_diff).flatMap(segs => segs.map(s => s.end)), 1
+  );
 
-  comps.forEach((comp, idx) => {
-    const yBase = 1.0 - (idx + 1) * rowH;
-    const yTop = yBase + rowH;
-    const yMid = (yBase + yTop) / 2;
-    tickVals.push(yMid);
-    tickText.push(comp);
-
+  comps.forEach(comp => {
     const segments = data.component_diff[comp] || [];
+    if (segments.length === 0) return;
 
-    segments.forEach(seg => {
-      const isRootOrBass = comp === 'root' || comp === 'bass';
-      const colorVal = seg.match
-        ? (isRootOrBass ? (ROOT_COLORS[seg.gt_value] || '#636e72') + '99' : MATCH_COLOR)
-        : MISMATCH_COLOR;
+    const isRootOrBass = comp === 'root' || comp === 'bass';
 
-      shapes.push({
-        type: 'rect',
-        x0: seg.start, x1: seg.end,
-        y0: yBase + 0.02, y1: yTop - 0.02,
-        fillcolor: colorVal,
+    traces.push({
+      type: 'bar',
+      orientation: 'h',
+      y: segments.map(() => comp),
+      x: segments.map(s => s.end - s.start),
+      base: segments.map(s => s.start),
+      marker: {
+        color: segments.map(s => {
+          if (s.match) {
+            return isRootOrBass ? (ROOT_COLORS[s.gt_value] || '#636e72') : MATCH_COLOR;
+          }
+          return MISMATCH_COLOR;
+        }),
         line: { width: 0.3, color: '#1a1d27' },
-        layer: 'below',
-      });
-    });
-
-    const labeled = segments.filter(s => (s.end - s.start) >= 0.8);
-    labeled.forEach(seg => {
-      const label = seg.match ? seg.gt_value : `${seg.gt_value}→${seg.pred_value}`;
-      if (label !== 'N') {
-        annotations.push({
-          x: (seg.start + seg.end) / 2,
-          y: yMid,
-          text: label,
-          showarrow: false,
-          font: { size: 9, color: '#fff' },
-        });
-      }
-    });
-
-    hoverTraces.push({
-      x: segments.map(s => (s.start + s.end) / 2),
-      y: segments.map(() => yMid),
-      text: segments.map(s =>
+      },
+      text: segments.map(s => {
+        if (s.end - s.start < 1.0) return '';
+        return s.match ? s.gt_value : `${s.gt_value}\u2192${s.pred_value}`;
+      }),
+      textposition: 'inside',
+      textfont: { size: 9, color: '#fff' },
+      hovertext: segments.map(s =>
         s.match
           ? `${comp}: ${s.gt_value}<br>${s.start.toFixed(2)}s - ${s.end.toFixed(2)}s`
-          : `${comp}: GT=${s.gt_value} Pred=${s.pred_value}<br>${s.start.toFixed(2)}s - ${s.end.toFixed(2)}s`
+          : `${comp}: ${s.gt_value} \u2192 ${s.pred_value}<br>${s.start.toFixed(2)}s - ${s.end.toFixed(2)}s`
       ),
       hoverinfo: 'text',
-      mode: 'markers',
-      marker: { size: 0.1, opacity: 0 },
       showlegend: false,
     });
   });
 
-  const maxTime = Math.max(
-    ...Object.values(data.component_diff).flatMap(segs => segs.map(s => s.end)),
-    1
-  );
-
-  const height = Math.max(comps.length * 40, 160);
+  const height = Math.max(comps.length * 35, 140);
 
   const layout = {
     ...PLOTLY_LAYOUT_BASE,
     height,
-    shapes,
-    annotations,
+    barmode: 'stack',
     xaxis: { ...PLOTLY_LAYOUT_BASE.xaxis, range: [0, maxTime], title: 'Time (s)' },
     yaxis: {
       ...PLOTLY_LAYOUT_BASE.yaxis,
-      range: [-0.02, 1.02],
-      tickvals,
-      ticktext: tickText,
       fixedrange: true,
+      categoryorder: 'array',
+      categoryarray: yLabels,
     },
   };
 
-  Plotly.newPlot(plotDiv, hoverTraces, layout, PLOTLY_CONFIG);
+  Plotly.newPlot(plotDiv, traces, layout, PLOTLY_CONFIG);
   syncZoom();
 }
 
@@ -814,35 +908,27 @@ function addComponentView(container, data) {
 
 function syncZoom() {
   if (allPlotIds.length < 2) return;
-
   const primary = document.getElementById(allPlotIds[0]);
   if (!primary) return;
 
-  primary.on('plotly_relayout', (eventData) => {
-    const x0 = eventData['xaxis.range[0]'];
-    const x1 = eventData['xaxis.range[1]'];
+  primary.on('plotly_relayout', (ev) => {
+    const x0 = ev['xaxis.range[0]'];
+    const x1 = ev['xaxis.range[1]'];
     if (x0 === undefined || x1 === undefined) return;
-
     allPlotIds.slice(1).forEach(id => {
       const el = document.getElementById(id);
-      if (el) {
-        Plotly.relayout(el, { 'xaxis.range[0]': x0, 'xaxis.range[1]': x1 });
-      }
+      if (el) Plotly.relayout(el, { 'xaxis.range[0]': x0, 'xaxis.range[1]': x1 });
     });
   });
 }
 
 function setupClickHandler(plotDiv, data) {
-  plotDiv.on('plotly_click', (eventData) => {
-    if (!eventData.points || eventData.points.length === 0) return;
-    const pt = eventData.points[0];
-    const time = pt.x;
-
+  plotDiv.on('plotly_click', (ev) => {
+    if (!ev.points || ev.points.length === 0) return;
+    const time = ev.points[0].x + (ev.points[0].base || 0);
     const panel = document.getElementById('detailPanel');
     panel.classList.add('visible');
-
     document.getElementById('detailTime').textContent = `${time.toFixed(2)}s`;
-
     if (data.gt) {
       const seg = data.gt.segments.find(s => s.start <= time && time < s.end);
       document.getElementById('detailGT').textContent = seg ? seg.chord : '-';
@@ -858,6 +944,7 @@ function setupClickHandler(plotDiv, data) {
 
 document.addEventListener('keydown', (e) => {
   if (!currentTrackData || !currentTrackData.diff) return;
+  if (e.target.tagName === 'INPUT') return;
 
   const mismatches = currentTrackData.diff.filter(d => !d.match);
   if (mismatches.length === 0) return;
@@ -865,30 +952,19 @@ document.addEventListener('keydown', (e) => {
   const plotEl = document.getElementById('chordTimeline');
   if (!plotEl || !plotEl.layout) return;
 
-  const currentRange = plotEl.layout.xaxis.range;
-  const center = (currentRange[0] + currentRange[1]) / 2;
-
+  const range = plotEl.layout.xaxis.range;
+  const center = (range[0] + range[1]) / 2;
   let target = null;
 
   if (e.key === 'ArrowRight' || e.key === 'n') {
-    target = mismatches.find(m => m.start > center);
-    if (!target) target = mismatches[0];
+    target = mismatches.find(m => m.start > center) || mismatches[0];
   } else if (e.key === 'ArrowLeft' || e.key === 'p') {
-    const reversed = [...mismatches].reverse();
-    target = reversed.find(m => m.end < center);
-    if (!target) target = mismatches[mismatches.length - 1];
+    target = [...mismatches].reverse().find(m => m.end < center) || mismatches[mismatches.length - 1];
+  } else {
+    return;
   }
 
-  if (target) {
-    const span = currentRange[1] - currentRange[0];
-    const mid = (target.start + target.end) / 2;
-    const newRange = [mid - span / 2, mid + span / 2];
-
-    allPlotIds.forEach(id => {
-      const el = document.getElementById(id);
-      if (el) Plotly.relayout(el, { 'xaxis.range[0]': newRange[0], 'xaxis.range[1]': newRange[1] });
-    });
-  }
+  if (target) scrollTimelineTo(target.start, target.end);
 });
 
 init();
