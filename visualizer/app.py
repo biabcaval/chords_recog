@@ -21,6 +21,7 @@ from .data_loader import (
     get_track_data,
     parse_lab_file,
     debug_chord_parsing,
+    search_chord_in_datasets,
     COMPONENT_NAMES,
     CHORD_VOCAB,
 )
@@ -159,3 +160,22 @@ async def get_track(
 async def debug_parse(chord: str = Query(...)):
     """Debug the chord parsing pipeline step by step."""
     return debug_chord_parsing(chord)
+
+
+@app.get("/search", response_class=HTMLResponse)
+async def search_page():
+    search_path = os.path.join(_static_dir, 'search.html')
+    with open(search_path, 'r') as f:
+        return f.read()
+
+
+@app.get("/api/search")
+async def search_chords(
+    q: str = Query(..., min_length=1),
+    exact: bool = Query(False),
+):
+    """Search for a chord string across all GT datasets."""
+    data_root = _state.get('data_root', '')
+    if not data_root:
+        raise HTTPException(400, "No data_root configured")
+    return search_chord_in_datasets(data_root, q, exact=exact)

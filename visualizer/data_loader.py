@@ -241,6 +241,62 @@ def _find_annotation_dir(dataset_path: str) -> Optional[str]:
     return None
 
 
+def search_chord_in_datasets(data_root: str, query: str, exact: bool = False) -> Dict:
+    """Search for a chord string across all GT datasets.
+
+    Args:
+        data_root: Root directory containing dataset folders.
+        query: Chord string to search for.
+        exact: If True, match exactly. Otherwise substring (case-insensitive).
+
+    Returns:
+        Dict with 'results' list and 'summary' aggregate info.
+    """
+    datasets = scan_datasets(data_root)
+    results: List[Dict] = []
+    dataset_counts: Dict[str, int] = {}
+    track_set: set = set()
+
+    for ds in datasets:
+        ann_dir = ds['annotation_dir']
+        lab_files = sorted(glob.glob(os.path.join(ann_dir, '*.lab')))
+
+        for lab_path in lab_files:
+            track_name = Path(lab_path).stem
+            segments = parse_lab_file(lab_path)
+
+            for i, seg in enumerate(segments):
+                chord = seg['chord']
+                matched = (chord == query) if exact else (query.lower() in chord.lower())
+                if not matched:
+                    continue
+
+                results.append({
+                    'dataset': ds['name'],
+                    'track': track_name,
+                    'chord': chord,
+                    'start': round(seg['start'], 3),
+                    'end': round(seg['end'], 3),
+                    'duration': round(seg['end'] - seg['start'], 3),
+                    'context_before': segments[i - 1]['chord'] if i > 0 else None,
+                    'context_after': segments[i + 1]['chord'] if i < len(segments) - 1 else None,
+                })
+
+                dataset_counts[ds['name']] = dataset_counts.get(ds['name'], 0) + 1
+                track_set.add(f"{ds['name']}/{track_name}")
+
+    return {
+        'query': query,
+        'exact': exact,
+        'total_occurrences': len(results),
+        'datasets_matched': len(dataset_counts),
+        'tracks_matched': len(track_set),
+        'per_dataset': [{'dataset': k, 'count': v}
+                        for k, v in sorted(dataset_counts.items(), key=lambda x: -x[1])],
+        'results': results,
+    }
+
+
 def parse_lab_file(filepath: str) -> List[Dict]:
     """Parse a .lab file into a list of segment dicts."""
     segments = []

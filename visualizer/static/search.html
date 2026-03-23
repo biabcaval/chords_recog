@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ChordMax — Chord Search</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #242834;
+    --border: #2e3345; --text: #e1e4ed; --text-muted: #8b90a0;
+    --accent: #6c8cff; --match: #2dd4a0; --mismatch: #f0536a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg); color: var(--text);
+    min-height: 100vh; padding: 24px 32px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .top-bar { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+  .top-bar h1 { font-size: 20px; font-weight: 600; color: var(--accent); }
+  .nav-links { display: flex; gap: 12px; font-size: 13px; margin-left: auto; }
+
+  .search-section {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px; margin-bottom: 20px;
+  }
+  .search-row { display: flex; gap: 12px; align-items: center; }
+  .search-input {
+    flex: 1; padding: 12px 16px; background: var(--surface2); border: 2px solid var(--border);
+    border-radius: 8px; color: var(--text); font-size: 18px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace; outline: none;
+  }
+  .search-input:focus { border-color: var(--accent); }
+  .search-input::placeholder { color: var(--text-muted); }
+  .search-btn {
+    padding: 12px 24px; background: var(--accent); border: none; border-radius: 8px;
+    color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  .search-btn:hover { opacity: 0.85; }
+  .exact-toggle { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted); cursor: pointer; user-select: none; }
+  .exact-toggle input { accent-color: var(--accent); }
+
+  .summary-bar {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 18px; margin-bottom: 16px; display: none;
+    font-size: 14px; color: var(--text-muted);
+  }
+  .summary-bar strong { color: var(--text); }
+  .summary-bar .query-echo {
+    font-family: 'JetBrains Mono', monospace; color: var(--accent); font-weight: 600;
+  }
+
+  .results-grid { display: grid; grid-template-columns: 1fr 280px; gap: 16px; }
+  @media (max-width: 900px) { .results-grid { grid-template-columns: 1fr; } }
+
+  .results-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden;
+  }
+  .results-card h3 {
+    padding: 10px 14px; font-size: 13px; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border);
+  }
+
+  .table-wrap { max-height: 65vh; overflow-y: auto; }
+  .search-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .search-table th {
+    position: sticky; top: 0; background: var(--surface2); padding: 7px 10px;
+    text-align: left; font-weight: 600; color: var(--text-muted);
+    border-bottom: 1px solid var(--border); cursor: pointer; white-space: nowrap; user-select: none;
+  }
+  .search-table th:hover { color: var(--text); }
+  .search-table th .sort-arrow { margin-left: 4px; font-size: 9px; }
+  .search-table td {
+    padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap;
+  }
+  .search-table tbody tr { cursor: pointer; transition: background 0.1s; }
+  .search-table tbody tr:hover { background: var(--surface2); }
+  .cell-chord { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-weight: 600; }
+  .cell-context { font-family: 'JetBrains Mono', monospace; color: var(--text-muted); font-size: 11px; }
+  .cell-dataset { color: var(--accent); font-weight: 600; }
+
+  .dataset-breakdown { padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+  .ds-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .ds-name { min-width: 100px; font-weight: 600; color: var(--text); }
+  .ds-bar-track { flex: 1; height: 18px; background: var(--surface2); border-radius: 4px; overflow: hidden; }
+  .ds-bar-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s; }
+  .ds-count { min-width: 50px; text-align: right; font-size: 12px; color: var(--text-muted); }
+
+  .empty-msg { padding: 40px; text-align: center; color: var(--text-muted); font-size: 14px; }
+
+  .table-wrap::-webkit-scrollbar { width: 6px; }
+  .table-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="top-bar">
+  <h1>Chord Search</h1>
+  <div class="nav-links">
+    <a href="/">&larr; Visualizer</a>
+    <a href="/parser">Parser Debugger</a>
+  </div>
+</div>
+
+<div class="search-section">
+  <div class="search-row">
+    <input type="text" class="search-input" id="searchInput" placeholder="Search chords... e.g. min7, C:maj, sus4(b7)">
+    <label class="exact-toggle"><input type="checkbox" id="exactToggle"> Exact match</label>
+    <button class="search-btn" id="searchBtn" onclick="doSearch()">Search</button>
+  </div>
+</div>
+
+<div class="summary-bar" id="summaryBar"></div>
+
+<div class="results-grid" id="resultsGrid" style="display:none">
+  <div class="results-card">
+    <h3>Results</h3>
+    <div class="table-wrap" id="tableWrap"></div>
+  </div>
+  <div class="results-card">
+    <h3>Per Dataset</h3>
+    <div class="dataset-breakdown" id="datasetBreakdown"></div>
+  </div>
+</div>
+
+<div class="empty-msg" id="emptyMsg" style="display:none"></div>
+
+<script>
+document.getElementById('searchInput').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+
+async function doSearch() {
+  const q = document.getElementById('searchInput').value.trim();
+  if (!q) return;
+  const exact = document.getElementById('exactToggle').checked;
+  const btn = document.getElementById('searchBtn');
+  btn.textContent = 'Searching...';
+
+  try {
+    const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}&exact=${exact}`);
+    if (!resp.ok) throw new Error(`${resp.status}`);
+    const data = await resp.json();
+    renderResults(data);
+  } catch (e) {
+    document.getElementById('emptyMsg').style.display = 'block';
+    document.getElementById('emptyMsg').textContent = `Error: ${e.message}`;
+    document.getElementById('resultsGrid').style.display = 'none';
+    document.getElementById('summaryBar').style.display = 'none';
+  } finally {
+    btn.textContent = 'Search';
+  }
+}
+
+function renderResults(data) {
+  const summary = document.getElementById('summaryBar');
+  const grid = document.getElementById('resultsGrid');
+  const emptyMsg = document.getElementById('emptyMsg');
+
+  if (data.total_occurrences === 0) {
+    summary.style.display = 'none';
+    grid.style.display = 'none';
+    emptyMsg.style.display = 'block';
+    emptyMsg.textContent = `No occurrences of "${data.query}" found in any dataset.`;
+    return;
+  }
+
+  emptyMsg.style.display = 'none';
+  summary.style.display = 'block';
+  grid.style.display = 'grid';
+
+  summary.innerHTML = `Found <strong>${data.total_occurrences}</strong> occurrences of <span class="query-echo">${escHtml(data.query)}</span> across <strong>${data.datasets_matched}</strong> datasets, <strong>${data.tracks_matched}</strong> tracks` + (data.exact ? ' (exact match)' : ' (contains)');
+
+  renderTable(data);
+  renderBreakdown(data);
+}
+
+function renderTable(data) {
+  const wrap = document.getElementById('tableWrap');
+  wrap.innerHTML = '';
+
+  const table = document.createElement('table');
+  table.className = 'search-table';
+
+  const thead = document.createElement('thead');
+  const hr = document.createElement('tr');
+  const headers = ['Dataset', 'Track', 'Time', 'Duration', 'Chord', 'Before', 'After'];
+  let sortCol = -1, sortAsc = true;
+
+  headers.forEach((h, i) => {
+    const th = document.createElement('th');
+    th.innerHTML = h + '<span class="sort-arrow"></span>';
+    th.addEventListener('click', () => {
+      if (sortCol === i) sortAsc = !sortAsc; else { sortCol = i; sortAsc = true; }
+      sortTable(table, sortCol, sortAsc);
+      thead.querySelectorAll('.sort-arrow').forEach(s => s.textContent = '');
+      th.querySelector('.sort-arrow').textContent = sortAsc ? ' \u25B2' : ' \u25BC';
+    });
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  data.results.forEach(r => {
+    const tr = document.createElement('tr');
+    const cells = [
+      `<span class="cell-dataset">${escHtml(r.dataset)}</span>`,
+      escHtml(r.track),
+      `${r.start.toFixed(2)}s`,
+      `${r.duration.toFixed(2)}s`,
+      `<span class="cell-chord">${escHtml(r.chord)}</span>`,
+      `<span class="cell-context">${r.context_before ? escHtml(r.context_before) : '-'}</span>`,
+      `<span class="cell-context">${r.context_after ? escHtml(r.context_after) : '-'}</span>`,
+    ];
+    cells.forEach(html => {
+      const td = document.createElement('td');
+      td.innerHTML = html;
+      tr.appendChild(td);
+    });
+    tr.addEventListener('click', () => {
+      window.open(`/?dataset=${encodeURIComponent(r.dataset)}#track=${encodeURIComponent(r.track)}`, '_blank');
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+}
+
+function renderBreakdown(data) {
+  const container = document.getElementById('datasetBreakdown');
+  container.innerHTML = '';
+
+  if (!data.per_dataset || data.per_dataset.length === 0) return;
+
+  const maxCount = data.per_dataset[0].count;
+
+  data.per_dataset.forEach(d => {
+    const row = document.createElement('div');
+    row.className = 'ds-row';
+    const pct = (d.count / maxCount * 100).toFixed(0);
+    row.innerHTML = `
+      <span class="ds-name">${escHtml(d.dataset)}</span>
+      <div class="ds-bar-track"><div class="ds-bar-fill" style="width:${pct}%"></div></div>
+      <span class="ds-count">${d.count}</span>
+    `;
+    container.appendChild(row);
+  });
+}
+
+function sortTable(table, ci, asc) {
+  const tbody = table.querySelector('tbody');
+  const rows = Array.from(tbody.querySelectorAll('tr'));
+  rows.sort((a, b) => {
+    const at = a.children[ci]?.textContent || '';
+    const bt = b.children[ci]?.textContent || '';
+    const an = parseFloat(at), bn = parseFloat(bt);
+    if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
+    return asc ? at.localeCompare(bt) : bt.localeCompare(at);
+  });
+  rows.forEach(r => tbody.appendChild(r));
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+</script>
+</body>
+</html>
