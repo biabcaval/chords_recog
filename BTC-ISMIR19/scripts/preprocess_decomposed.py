@@ -59,7 +59,7 @@ def decompose_preprocessed_data(data_dir, output_dir, force=False):
     for pt_file in tqdm(pt_files, desc="Converting to decomposed format"):
         try:
             # Load original data
-            data = torch.load(pt_file, map_location='cpu')
+            data = torch.load(pt_file, map_location='cpu', weights_only=False)
             
             # Extract components
             if isinstance(data, dict):
