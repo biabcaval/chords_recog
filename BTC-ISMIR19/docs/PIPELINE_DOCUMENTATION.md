@@ -1629,6 +1629,119 @@ BTC-ISMIR19/
 
 ---
 
+## Anexo C: Fluxo Completo — Do Treino à Avaliação
+
+Exemplo prático de ponta a ponta, treinando nos datasets billboard, queen, robbiewilliams, rwc, jaah e dj_avan_songbook2, testando no dj_avan_songbook1.
+
+### Passo 1: Treinar o ChordFormer
+
+```bash
+cd /home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19
+
+python train_decomposed.py \
+    --config run_config.yaml \
+    --backbone chordformer \
+    --kfold 0 \
+    --run_name BiQuRoRwJaDj2_8heads_testDj1_k0 \
+    --num_epochs 100 \
+    --batch_size 128 \
+    --learning_rate 0.0001 \
+    --weight_decay 0.001 \
+    --no_class_weights \
+    --use_gradnorm \
+    --gradnorm_alpha 0.7 \
+    --gradnorm_lr 0.005 \
+    --wandb_project runs \
+    --train_datasets billboard queen robbiewilliams rwc jaah dj_avan_songbook2
+```
+
+Resultado: `checkpoints/BiQuRoRwJaDj2_8heads_testDj1_k0/model_best.pt`
+
+### Passo 2: Treinar o HarmonicCRF
+
+Após o ChordFormer terminar, treinar o CRF em cima dos logits congelados (~minutos):
+
+```bash
+python train_harmonic_crf.py \
+    --checkpoint checkpoints/BiQuRoRwJaDj2_8heads_testDj1_k0/model_best.pt \
+    --config run_config.yaml \
+    --train_datasets billboard queen robbiewilliams rwc jaah dj_avan_songbook2 \
+    --crf_run_name harmonic_crf_BiQuRoRwJaDj2 \
+    --num_epochs 50 \
+    --learning_rate 0.01
+```
+
+O script loga a cada época a accuracy do CRF vs argmax (baseline), mostrando o ganho:
+
+```
+Epoch 15/50 | Train loss: 2.31 acc: 0.82 | Val loss: 2.45
+  CRF     root: 0.8534  triad: 0.7892  both: 0.7123
+  Argmax  root: 0.8401  triad: 0.7756  both: 0.6945
+  Delta   root: +0.0133  triad: +0.0136  both: +0.0178
+```
+
+Resultado: `checkpoints/harmonic_crf_BiQuRoRwJaDj2/crf_best.pt`
+
+### Passo 3: Inferência no dataset de teste
+
+Rodar duas inferências (com e sem CRF) para comparar o impacto:
+
+```bash
+# SEM CRF (baseline — argmax por frame)
+python run_inference_batch_decomposed.py \
+    --checkpoint checkpoints/BiQuRoRwJaDj2_8heads_testDj1_k0/model_best.pt \
+    --test_dataset dj_avan_songbook1 \
+    --backbone chordformer \
+    --exp_name BiQuRoRwJaDj2_no_crf
+
+# COM CRF (Viterbi temporal)
+python run_inference_batch_decomposed.py \
+    --checkpoint checkpoints/BiQuRoRwJaDj2_8heads_testDj1_k0/model_best.pt \
+    --harmonic_crf checkpoints/harmonic_crf_BiQuRoRwJaDj2/crf_best.pt \
+    --test_dataset dj_avan_songbook1 \
+    --backbone chordformer \
+    --exp_name BiQuRoRwJaDj2_with_crf
+```
+
+Resultado: duas pastas em `inferences_decomposed/` com arquivos `.lab`.
+
+### Passo 4: Gerar métricas comparativas
+
+```bash
+# Métricas SEM CRF
+python generate_metrics_csv.py \
+    --inference_dir ./inferences_decomposed/inference_BiQuRoRwJaDj2_no_crf_test_Dj1 \
+    --gt_dir /home/daniel.melo/datasets/dj_avan_songbook1/annotations \
+    --prefix no_crf_Dj1
+
+# Métricas COM CRF
+python generate_metrics_csv.py \
+    --inference_dir ./inferences_decomposed/inference_BiQuRoRwJaDj2_with_crf_test_Dj1 \
+    --gt_dir /home/daniel.melo/datasets/dj_avan_songbook1/annotations \
+    --prefix with_crf_Dj1
+```
+
+Resultado: CSVs em `metrics_results/` com métricas por track e agregadas (WCSR, root, triads, etc.).
+
+### Passo 5: Análise visual
+
+Subir o visualizador para analisar as predições qualitativamente:
+
+```bash
+ssh -i ~/chave_gcp -L 8050:localhost:8050 daniel.melo@34.55.222.142
+# Na VM:
+cd /home/daniel.melo/BTC_ORIGINAL/chords_recog
+python -m visualizer
+```
+
+No browser (`http://localhost:8050`):
+1. Selecionar o dataset `dj_avan_songbook1`
+2. Alternar entre as pastas de inferência (com/sem CRF) no dropdown
+3. Comparar os erros no timeline e na tabela de segmentos
+4. Usar a Chord Search (`/search`) para encontrar acordes específicos nos dados GT
+
+---
+
 ## Referências
 
 1. **ChordMax (ChordFormer)**: Conformer encoder + decomposição multi-tarefa em 9 componentes
