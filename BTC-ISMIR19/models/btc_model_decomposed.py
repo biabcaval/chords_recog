@@ -215,6 +215,7 @@ class BTC_model_decomposed(nn.Module):
             gradnorm_lr=cfg.get('gradnorm_lr', 0.025),
             gradnorm_eps=cfg.get('gradnorm_eps', 1e-8),
             gradnorm_w_min=cfg.get('gradnorm_w_min', 1e-3),
+            gradnorm_w_max=cfg.get('gradnorm_w_max', 10.0),
         )
         
         # Store component names for reference
@@ -357,6 +358,7 @@ class ChordFormer_model_decomposed(nn.Module):
             gradnorm_lr=cfg.get('gradnorm_lr', 0.025),
             gradnorm_eps=cfg.get('gradnorm_eps', 1e-8),
             gradnorm_w_min=cfg.get('gradnorm_w_min', 1e-3),
+            gradnorm_w_max=cfg.get('gradnorm_w_max', 10.0),
         )
 
         self.component_names = COMPONENT_NAMES
@@ -460,6 +462,7 @@ class MultiTaskLoss(nn.Module):
         gradnorm_lr=0.025,
         gradnorm_eps=1e-8,
         gradnorm_w_min=1e-3,
+        gradnorm_w_max=10.0,
     ):
         super().__init__()
         
@@ -495,6 +498,7 @@ class MultiTaskLoss(nn.Module):
         self.gradnorm_lr = float(gradnorm_lr)
         self.gradnorm_eps = float(gradnorm_eps)
         self.gradnorm_w_min = float(gradnorm_w_min)
+        self.gradnorm_w_max = float(gradnorm_w_max)
         self.gradnorm_initial_losses = None
         self.last_gradnorm_info = {}
 

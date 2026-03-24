@@ -46,6 +46,7 @@ gradnorm:
   lr: 0.005
   eps: 1.0e-8
   w_min: 1.0e-3
+  w_max: 10.0
 
 curriculum:
   enabled: False

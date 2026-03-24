@@ -577,6 +577,7 @@ O GradNorm ajusta dinamicamente os pesos `w_i` de cada componente durante o trei
 | `lr` | 0.025 | Learning rate dos pesos GradNorm |
 | `eps` | 1e-8 | Estabilidade numérica |
 | `w_min` | 1e-3 | Peso mínimo por tarefa |
+| `w_max` | 10.0 | Peso máximo por tarefa |
 
 **Uso via CLI:**
 
@@ -596,6 +597,7 @@ gradnorm:
   lr: 0.025
   eps: 1.0e-8
   w_min: 1.0e-3
+  w_max: 10.0
 ```
 
 ---
@@ -846,6 +848,7 @@ gradnorm:
   lr: 0.025
   eps: 1.0e-8
   w_min: 1.0e-3
+  w_max: 10.0
 ```
 
 ### 7.7.1 Cache de Class Weights (novo fluxo recomendado)

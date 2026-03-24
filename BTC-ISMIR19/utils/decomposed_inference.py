@@ -241,7 +241,10 @@ class DecomposedChordTrainer:
             grad = criterion.gradnorm_weights.grad
             if grad is not None:
                 criterion.gradnorm_weights.data -= float(criterion.gradnorm_lr) * grad
-            criterion.gradnorm_weights.data.clamp_(min=float(criterion.gradnorm_w_min))
+            criterion.gradnorm_weights.data.clamp_(
+                min=float(criterion.gradnorm_w_min),
+                max=float(getattr(criterion, 'gradnorm_w_max', 10.0)),
+            )
             criterion.gradnorm_weights.data.mul_(
                 len(criterion.component_names) / criterion.gradnorm_weights.data.sum().clamp_min(eps)
             )

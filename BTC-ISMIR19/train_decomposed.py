@@ -243,6 +243,8 @@ def main():
                        help='Numerical epsilon for GradNorm')
     parser.add_argument('--gradnorm_w_min', type=float, default=None,
                        help='Minimum allowed GradNorm task weight before renormalization')
+    parser.add_argument('--gradnorm_w_max', type=float, default=None,
+                       help='Maximum allowed GradNorm task weight before renormalization')
     parser.add_argument(
         '--class_weights_mode',
         type=str,
@@ -340,19 +342,22 @@ def main():
     gradnorm_lr = float(args.gradnorm_lr) if args.gradnorm_lr is not None else float(gradnorm_cfg.get('lr', 0.025))
     gradnorm_eps = float(args.gradnorm_eps) if args.gradnorm_eps is not None else float(gradnorm_cfg.get('eps', 1e-8))
     gradnorm_w_min = float(args.gradnorm_w_min) if args.gradnorm_w_min is not None else float(gradnorm_cfg.get('w_min', 1e-3))
+    gradnorm_w_max = float(args.gradnorm_w_max) if args.gradnorm_w_max is not None else float(gradnorm_cfg.get('w_max', 10.0))
 
     config.model['gradnorm_enabled'] = gradnorm_enabled
     config.model['gradnorm_alpha'] = gradnorm_alpha
     config.model['gradnorm_lr'] = gradnorm_lr
     config.model['gradnorm_eps'] = gradnorm_eps
     config.model['gradnorm_w_min'] = gradnorm_w_min
+    config.model['gradnorm_w_max'] = gradnorm_w_max
     logger.info(
-        "GradNorm: enabled=%s alpha=%.4f lr=%.5f eps=%g w_min=%g",
+        "GradNorm: enabled=%s alpha=%.4f lr=%.5f eps=%g w_min=%g w_max=%g",
         gradnorm_enabled,
         gradnorm_alpha,
         gradnorm_lr,
         gradnorm_eps,
         gradnorm_w_min,
+        gradnorm_w_max,
     )
 
     # Resolve output-head FFN settings (CLI override > config).
@@ -713,6 +718,7 @@ def main():
             'lr': gradnorm_lr,
             'eps': gradnorm_eps,
             'w_min': gradnorm_w_min,
+            'w_max': gradnorm_w_max,
         },
         'model_config': {
             'hidden_size': config.model.get('hidden_size', 128),
@@ -731,6 +737,7 @@ def main():
             'gradnorm_lr': config.model.get('gradnorm_lr', 0.025),
             'gradnorm_eps': config.model.get('gradnorm_eps', 1e-8),
             'gradnorm_w_min': config.model.get('gradnorm_w_min', 1e-3),
+            'gradnorm_w_max': config.model.get('gradnorm_w_max', 10.0),
             'use_head_ffn': config.model.get('use_head_ffn', False),
             'head_ffn_dim': config.model.get('head_ffn_dim', None),
         },
