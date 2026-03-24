@@ -33,6 +33,7 @@ import logging
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models.btc_model_decomposed import BTC_model_decomposed, ChordFormer_model_decomposed
+from models.harmonic_crf import HarmonicCRF
 from utils.chord_decomposition import ChordReassembler, COMPONENT_NAMES
 from utils.hparams import HParams
 
@@ -157,8 +158,14 @@ def get_audio_paths(audio_dir):
     return sorted(paths)
 
 
-def run_inference(model, audio_dir, output_dir, config, device, normalization=None):
-    """Run inference on every audio file and write .lab outputs."""
+def run_inference(model, audio_dir, output_dir, config, device,
+                  normalization=None, harmonic_crf=None):
+    """Run inference on every audio file and write .lab outputs.
+
+    When harmonic_crf is provided, the model runs in logits mode
+    (probs_out=True) and Viterbi decoding refines root+triad predictions
+    for temporal coherence. Otherwise, per-frame argmax is used (default).
+    """
     reassembler = ChordReassembler()
     os.makedirs(output_dir, exist_ok=True)
 
@@ -166,6 +173,10 @@ def run_inference(model, audio_dir, output_dir, config, device, normalization=No
     if not audio_paths:
         logger.warning(f"No audio files found in {audio_dir}")
         return
+
+    use_crf = harmonic_crf is not None
+    if use_crf:
+        logger.info("HarmonicCRF enabled — using Viterbi decoding for root+triad")
 
     logger.info(f"Found {len(audio_paths)} audio files in {audio_dir}")
     n_timestep = config.model["timestep"]
@@ -184,6 +195,7 @@ def run_inference(model, audio_dir, output_dir, config, device, normalization=No
                 num_pad = 0
             feature = np.pad(feature, ((0, num_pad), (0, 0)), mode="constant", constant_values=0)
             num_instance = feature.shape[0] // n_timestep
+            total_frames = num_instance * n_timestep - num_pad
 
             lines = []
             start_time = 0.0
@@ -192,16 +204,27 @@ def run_inference(model, audio_dir, output_dir, config, device, normalization=No
             with torch.no_grad():
                 feat_tensor = torch.tensor(feature, dtype=torch.float32).unsqueeze(0).to(device)
 
-                for t in range(num_instance):
-                    segment = feat_tensor[:, n_timestep * t : n_timestep * (t + 1), :]
-                    predictions, _, _, _ = model(segment)
+                if use_crf:
+                    # Collect logits for all segments, then run Viterbi over the full song.
+                    # This gives the CRF a global view for temporal smoothing.
+                    all_logits = {comp: [] for comp in COMPONENT_NAMES}
 
-                    for i in range(n_timestep):
-                        global_frame = n_timestep * t + i
+                    for t in range(num_instance):
+                        segment = feat_tensor[:, n_timestep * t : n_timestep * (t + 1), :]
+                        logits = model(segment)  # probs_out=True -> dict of logits
+                        for comp in COMPONENT_NAMES:
+                            all_logits[comp].append(logits[comp])
 
-                        if t == num_instance - 1 and i + num_pad >= n_timestep:
-                            break
+                    # Concatenate along time: (1, total_padded_frames, vocab)
+                    full_logits = {
+                        comp: torch.cat(all_logits[comp], dim=1)
+                        for comp in COMPONENT_NAMES
+                    }
 
+                    # Viterbi decoding (root+triad from CRF, rest from argmax)
+                    predictions = harmonic_crf(full_logits)
+
+                    for i in range(total_frames):
                         indices = {
                             comp: int(predictions[comp][0, i].item())
                             for comp in COMPONENT_NAMES
@@ -214,13 +237,41 @@ def run_inference(model, audio_dir, output_dir, config, device, normalization=No
 
                         if chord != prev_chord:
                             lines.append(
-                                f"{start_time:.3f} {time_unit * global_frame:.3f} {prev_chord}\n"
+                                f"{start_time:.3f} {time_unit * i:.3f} {prev_chord}\n"
                             )
-                            start_time = time_unit * global_frame
+                            start_time = time_unit * i
                             prev_chord = chord
 
+                else:
+                    # Standard per-frame argmax (no CRF)
+                    for t in range(num_instance):
+                        segment = feat_tensor[:, n_timestep * t : n_timestep * (t + 1), :]
+                        predictions, _, _, _ = model(segment)
+
+                        for i in range(n_timestep):
+                            global_frame = n_timestep * t + i
+
+                            if t == num_instance - 1 and i + num_pad >= n_timestep:
+                                break
+
+                            indices = {
+                                comp: int(predictions[comp][0, i].item())
+                                for comp in COMPONENT_NAMES
+                            }
+                            chord = reassembler.reassemble_from_indices(indices)
+
+                            if prev_chord is None:
+                                prev_chord = chord
+                                continue
+
+                            if chord != prev_chord:
+                                lines.append(
+                                    f"{start_time:.3f} {time_unit * global_frame:.3f} {prev_chord}\n"
+                                )
+                                start_time = time_unit * global_frame
+                                prev_chord = chord
+
                 if prev_chord is not None:
-                    total_frames = num_instance * n_timestep - num_pad
                     end_time = time_unit * total_frames
                     if start_time < end_time:
                         lines.append(f"{start_time:.3f} {end_time:.3f} {prev_chord}\n")
@@ -283,6 +334,12 @@ def parse_args():
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Device (default: cuda if available)",
     )
+    parser.add_argument(
+        "--harmonic_crf", type=str, default=None,
+        help="Path to HarmonicCRF checkpoint (.pt) for Viterbi sequence decoding. "
+             "When provided, root+triad predictions use CRF temporal smoothing "
+             "instead of per-frame argmax.",
+    )
     return parser.parse_args()
 
 
@@ -317,11 +374,30 @@ def main():
         exp = args.exp_name or Path(args.checkpoint).parent.name
         output_dir = os.path.join(args.output_base, f"inference_{exp}_test_{ds_tag}")
 
+    # Load HarmonicCRF if provided
+    harmonic_crf = None
+    if args.harmonic_crf:
+        logger.info(f"Loading HarmonicCRF from {args.harmonic_crf}")
+        crf_ckpt = torch.load(args.harmonic_crf, map_location=device, weights_only=False)
+        n_roots = crf_ckpt.get('n_roots', 13)
+        n_triads = crf_ckpt.get('n_triads', 7)
+        harmonic_crf = HarmonicCRF(n_roots=n_roots, n_triads=n_triads).to(device)
+        harmonic_crf.load_state_dict(crf_ckpt['harmonic_crf_state_dict'])
+        harmonic_crf.eval()
+        logger.info(f"HarmonicCRF loaded ({n_roots}x{n_triads}={n_roots*n_triads} tags)")
+
+        # Model must return logits for CRF observation potential
+        config.model['probs_out'] = True
+        model, normalization = load_checkpoint(args.checkpoint, config, args.backbone, device)
+
     logger.info(f"Checkpoint : {args.checkpoint}")
     logger.info(f"Audio dir  : {audio_dir}")
     logger.info(f"Output dir : {output_dir}")
+    if args.harmonic_crf:
+        logger.info(f"CRF        : {args.harmonic_crf}")
 
-    run_inference(model, audio_dir, output_dir, config, device, normalization)
+    run_inference(model, audio_dir, output_dir, config, device, normalization,
+                  harmonic_crf=harmonic_crf)
 
 
 if __name__ == "__main__":
