@@ -48,6 +48,9 @@ gradnorm:
   w_min: 1.0e-3
   w_max: 10.0
 
+focal:
+  gamma: 0.0
+
 curriculum:
   enabled: False
   strategy: 'mixed'

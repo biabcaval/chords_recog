@@ -132,12 +132,13 @@ ChordMax model (Conformer encoder) with 9 parallel output heads.
   predictions, loss, weights, component_losses = model(features, labels=labels_dict)
   ```
 
-- `MultiTaskLoss`: Multi-task loss with class re-weighting and GradNorm support
-  - Computes separate CrossEntropyLoss for each component
+- `MultiTaskLoss`: Multi-task loss with class re-weighting, Focal Loss and GradNorm support
+  - Computes separate CrossEntropyLoss (or Focal Loss) for each component
   - Applies class weighting: $w_m^{(j)} = \min\left((\frac{n_m^{(j)}}{\max n_{m'}^{(j)}})^{-\gamma}, w_{max}\right)$
+  - Supports **Focal Loss** modulation `(1-pt)^γ` for difficulty-based sample weighting
   - Supports static `component_weights` (per-component loss multiplier)
   - Supports **GradNorm** adaptive task balancing (dynamically learned `w_i`)
-  - Parameters: γ = 0.5, w_max = 10.0 (configurable)
+  - Parameters: γ = 0.5, w_max = 10.0, focal_gamma = 0.0 (configurable)
   
   ```python
   loss_fn = MultiTaskLoss(
@@ -150,6 +151,7 @@ ChordMax model (Conformer encoder) with 9 parallel output heads.
       gradnorm_lr=0.025,
       gradnorm_w_min=1e-3,
       gradnorm_w_max=10.0,
+      focal_gamma=2.0,
   )
   
   # Compute class weights from training data
@@ -181,6 +183,24 @@ python train_decomposed.py --use_gradnorm --gradnorm_alpha 1.5 --gradnorm_lr 0.0
 #   lr: 0.025
 #   w_min: 1.0e-3
 #   w_max: 10.0
+```
+
+#### Focal Loss Integration
+
+When `focal_gamma > 0`, `MultiTaskLoss` replaces standard CrossEntropyLoss with
+Focal Loss (Lin et al., 2017): `FL(pt) = -αt · (1 - pt)^γ · log(pt)`.
+
+This down-weights well-classified samples, focusing training on hard examples.
+Class weights are applied as `alpha` (per-sample) rather than inside `F.cross_entropy`
+to preserve correct `pt` computation.
+
+```bash
+# Enable Focal Loss from CLI
+python train_decomposed.py --focal_gamma 2.0
+
+# Or configure in run_config.yaml
+# focal:
+#   gamma: 2.0
 ```
 
 ---

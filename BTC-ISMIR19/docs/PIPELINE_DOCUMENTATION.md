@@ -600,6 +600,44 @@ gradnorm:
   w_max: 10.0
 ```
 
+### 6.6.1 Focal Loss
+
+A Focal Loss (Lin et al., 2017) adiciona modulação por dificuldade de amostra sobre o CrossEntropyLoss. O fator `(1 - pt)^γ` reduz a contribuição de amostras que o modelo já classifica com alta confiança, focando o treinamento em amostras difíceis.
+
+**Fórmula:**
+
+```
+FL(pt) = -αt · (1 - pt)^γ · log(pt)
+```
+
+onde `pt` é a probabilidade softmax atribuída à classe correta, `γ` controla a intensidade da modulação e `αt` são os class weights (mesmos já usados pelo sistema de class re-weighting).
+
+**Complementaridade com os outros mecanismos:**
+
+| Nível | Mecanismo | O que balanceia |
+|-------|-----------|-----------------|
+| Classe | Class weights (`αt`) | Frequência (classes raras vs comuns) |
+| Amostra | Focal Loss `(1-pt)^γ` | Dificuldade (amostras fáceis vs difíceis) |
+| Tarefa | GradNorm | Ritmo de aprendizado entre os 9 componentes |
+
+Quando `focal_gamma=0.0`, o comportamento é idêntico ao CrossEntropyLoss padrão (backward compatible).
+
+**Cuidado de implementação:** quando focal está ativo, os class weights são aplicados como `alpha` (gathered per-sample) e **não** passados ao `weight` do `F.cross_entropy`, pois isso distorceria o cálculo de `pt`.
+
+**Uso via CLI:**
+
+```bash
+python train_decomposed.py \
+    --focal_gamma 2.0
+```
+
+**Configuração em `run_config.yaml`:**
+
+```yaml
+focal:
+  gamma: 0.0
+```
+
 ---
 
 ## 7. Treinamento
@@ -709,6 +747,7 @@ python quick_test_decomposed.py --backbone chordformer
 | `--gradnorm_lr` | 0.025 | Learning rate dos pesos GradNorm |
 | `--gradnorm_w_min` | 1e-3 | Peso mínimo por tarefa GradNorm |
 | `--gradnorm_w_max` | 10.0 | Peso máximo por tarefa GradNorm |
+| `--focal_gamma` | 0.0 | Focal loss gamma (0=CE padrão, 2=recomendado) |
 | `--component_weights` | None | Pesos estáticos por componente (`root=1,11th=0.3,...`) |
 | `--use_class_weights` | - | Forçar rebalanceamento por classe |
 | `--no_class_weights` | - | Desativar rebalanceamento por classe |
@@ -851,6 +890,9 @@ gradnorm:
   eps: 1.0e-8
   w_min: 1.0e-3
   w_max: 10.0
+
+focal:
+  gamma: 0.0
 ```
 
 ### 7.7.1 Cache de Class Weights (novo fluxo recomendado)

@@ -245,6 +245,8 @@ def main():
                        help='Minimum allowed GradNorm task weight before renormalization')
     parser.add_argument('--gradnorm_w_max', type=float, default=None,
                        help='Maximum allowed GradNorm task weight before renormalization')
+    parser.add_argument('--focal_gamma', type=float, default=None,
+                       help='Focal loss focusing parameter (0=standard CE, 2=recommended). Default: 0.0')
     parser.add_argument(
         '--class_weights_mode',
         type=str,
@@ -359,6 +361,12 @@ def main():
         gradnorm_w_min,
         gradnorm_w_max,
     )
+
+    # Resolve Focal Loss settings (CLI override > config > defaults).
+    focal_cfg = config.get('focal', {}) if hasattr(config, 'get') else {}
+    focal_gamma = float(args.focal_gamma) if args.focal_gamma is not None else float(focal_cfg.get('gamma', 0.0))
+    config.model['focal_gamma'] = focal_gamma
+    logger.info("Focal Loss: gamma=%.2f%s", focal_gamma, " (disabled)" if focal_gamma == 0.0 else "")
 
     # Resolve output-head FFN settings (CLI override > config).
     if args.use_head_ffn:
@@ -720,6 +728,7 @@ def main():
             'w_min': gradnorm_w_min,
             'w_max': gradnorm_w_max,
         },
+        'focal_gamma': focal_gamma,
         'model_config': {
             'hidden_size': config.model.get('hidden_size', 128),
             'num_layers': config.model.get('num_layers', 8),
@@ -738,6 +747,7 @@ def main():
             'gradnorm_eps': config.model.get('gradnorm_eps', 1e-8),
             'gradnorm_w_min': config.model.get('gradnorm_w_min', 1e-3),
             'gradnorm_w_max': config.model.get('gradnorm_w_max', 10.0),
+            'focal_gamma': config.model.get('focal_gamma', 0.0),
             'use_head_ffn': config.model.get('use_head_ffn', False),
             'head_ffn_dim': config.model.get('head_ffn_dim', None),
         },

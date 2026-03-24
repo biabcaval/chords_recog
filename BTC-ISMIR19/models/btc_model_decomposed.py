@@ -359,6 +359,7 @@ class ChordFormer_model_decomposed(nn.Module):
             gradnorm_eps=cfg.get('gradnorm_eps', 1e-8),
             gradnorm_w_min=cfg.get('gradnorm_w_min', 1e-3),
             gradnorm_w_max=cfg.get('gradnorm_w_max', 10.0),
+            focal_gamma=cfg.get('focal_gamma', 0.0),
         )
 
         self.component_names = COMPONENT_NAMES
@@ -463,15 +464,20 @@ class MultiTaskLoss(nn.Module):
         gradnorm_eps=1e-8,
         gradnorm_w_min=1e-3,
         gradnorm_w_max=10.0,
+        focal_gamma=0.0,
     ):
         super().__init__()
         
         self.vocab_sizes = vocab_sizes
         self.gamma = gamma
         self.w_max = w_max
+        self.focal_gamma = float(focal_gamma)
         self.component_names = list(vocab_sizes.keys())
         
-        # Initialize loss functions for each component
+        # Initialize loss functions for each component.
+        # When focal loss is active, class weights are applied as alpha
+        # (gathered per-sample) instead of being baked into CrossEntropyLoss,
+        # because weight inside F.cross_entropy would distort pt = exp(-ce).
         self.losses = nn.ModuleDict()
         
         for component in self.component_names:
@@ -479,10 +485,15 @@ class MultiTaskLoss(nn.Module):
             if class_weights is not None and component in class_weights:
                 weight = class_weights[component]
             
-            self.losses[component] = nn.CrossEntropyLoss(
-                weight=weight,
-                reduction='mean'
-            )
+            if self.focal_gamma > 0.0:
+                self.losses[component] = nn.CrossEntropyLoss(reduction='none')
+                if weight is not None:
+                    self.register_buffer(f'focal_alpha_{component}', weight)
+            else:
+                self.losses[component] = nn.CrossEntropyLoss(
+                    weight=weight,
+                    reduction='mean'
+                )
         
         # Component-level loss weights (for weighted combination)
         if component_weights is None:
@@ -565,7 +576,18 @@ class MultiTaskLoss(nn.Module):
             labels_flat = labels_c.reshape(-1)
             
             # Calculate loss for this component
-            component_loss = self.losses[component](logits_flat, labels_flat)
+            if self.focal_gamma > 0.0:
+                ce_per_sample = self.losses[component](logits_flat, labels_flat)
+                pt = torch.exp(-ce_per_sample)
+                focal_term = (1 - pt) ** self.focal_gamma
+                alpha_buf = getattr(self, f'focal_alpha_{component}', None)
+                if alpha_buf is not None:
+                    alpha_t = alpha_buf.to(labels_flat.device).gather(0, labels_flat)
+                    component_loss = (alpha_t * focal_term * ce_per_sample).mean()
+                else:
+                    component_loss = (focal_term * ce_per_sample).mean()
+            else:
+                component_loss = self.losses[component](logits_flat, labels_flat)
             self.last_raw_loss_tensors[component] = component_loss
             
             # Apply component weight
