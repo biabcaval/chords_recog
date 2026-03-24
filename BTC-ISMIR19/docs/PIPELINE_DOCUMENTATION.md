@@ -707,6 +707,8 @@ python quick_test_decomposed.py --backbone chordformer
 | `--no_gradnorm` | - | Desativar GradNorm |
 | `--gradnorm_alpha` | 1.5 | Força de balanceamento GradNorm |
 | `--gradnorm_lr` | 0.025 | Learning rate dos pesos GradNorm |
+| `--gradnorm_w_min` | 1e-3 | Peso mínimo por tarefa GradNorm |
+| `--gradnorm_w_max` | 10.0 | Peso máximo por tarefa GradNorm |
 | `--component_weights` | None | Pesos estáticos por componente (`root=1,11th=0.3,...`) |
 | `--use_class_weights` | - | Forçar rebalanceamento por classe |
 | `--no_class_weights` | - | Desativar rebalanceamento por classe |

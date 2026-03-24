@@ -148,6 +148,8 @@ ChordMax model (Conformer encoder) with 9 parallel output heads.
       gradnorm_enabled=True,
       gradnorm_alpha=1.5,
       gradnorm_lr=0.025,
+      gradnorm_w_min=1e-3,
+      gradnorm_w_max=10.0,
   )
   
   # Compute class weights from training data
@@ -165,7 +167,8 @@ happens in `DecomposedChordTrainer._apply_gradnorm_update()` each training batch
 1. Measures gradient norms per task at the shared encoder output.
 2. Computes relative inverse training rates.
 3. Updates `w_i` to balance gradient contributions across tasks.
-4. Renormalizes so `Σw_i = T` (9 tasks).
+4. Clamps each `w_i` to `[w_min, w_max]` (default `[1e-3, 10.0]`).
+5. Renormalizes so `Σw_i = T` (9 tasks).
 
 ```bash
 # Enable GradNorm from CLI
@@ -176,6 +179,8 @@ python train_decomposed.py --use_gradnorm --gradnorm_alpha 1.5 --gradnorm_lr 0.0
 #   enabled: True
 #   alpha: 1.5
 #   lr: 0.025
+#   w_min: 1.0e-3
+#   w_max: 10.0
 ```
 
 ---
