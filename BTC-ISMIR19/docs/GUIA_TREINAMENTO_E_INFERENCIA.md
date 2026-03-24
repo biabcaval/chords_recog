@@ -540,7 +540,33 @@ python infer_full_audio.py \
 5.000	7.500	G:maj9
 ```
 
+### HarmonicCRF (Decodificação Temporal)
+
+Após treinar o ChordFormer, pode-se treinar um CRF para suavizar a sequência temporal de root+triad:
+
+```bash
+# Treino do CRF (~minutos, só ~8k parâmetros)
+python train_harmonic_crf.py \
+    --checkpoint checkpoints/meu_run/model_best.pt \
+    --config run_config.yaml \
+    --train_datasets billboard queen robbiewilliams rwc jaah dj_avan_songbook2 \
+    --crf_run_name harmonic_crf_meu_run \
+    --num_epochs 50
+```
+
+Uso na inferência com flag `--harmonic_crf`:
+
+```bash
+python run_inference_batch_decomposed.py \
+    --checkpoint checkpoints/meu_run/model_best.pt \
+    --harmonic_crf checkpoints/harmonic_crf_meu_run/crf_best.pt \
+    --test_dataset rwc \
+    --backbone chordformer
+```
+
+Sem o flag, o comportamento é idêntico ao anterior (argmax por frame). Veja detalhes completos em [PIPELINE_DOCUMENTATION.md](PIPELINE_DOCUMENTATION.md#85-harmoniccrf-decodificação-temporal-com-crf).
+
 ---
 
-**Última atualização:** Fevereiro 2026
+**Última atualização:** Março 2026
 

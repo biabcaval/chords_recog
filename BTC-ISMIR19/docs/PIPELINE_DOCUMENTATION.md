@@ -1124,7 +1124,83 @@ for t in range(10):  # Primeiros 10 frames
     print(f"{time_sec:.2f}s: {chord}")
 ```
 
-### 8.5 Avaliação em Batch: Inferência + Métricas
+### 8.5 HarmonicCRF: Decodificação Temporal com CRF
+
+O **HarmonicCRF** é um módulo opcional de pós-processamento que aplica um Campo Aleatório Condicional (CRF) sobre as predições de root e triad para suavizar a sequência temporal, evitando transições de acordes implausíveis.
+
+#### Conceito
+
+Em vez de fazer argmax frame a frame (que pode oscilar entre acordes semelhantes), o CRF combina os logits de root (13 classes) e triad (7 classes) em 91 tags conjuntas (root × triad) e aplica o algoritmo de Viterbi para encontrar a sequência globalmente ótima.
+
+```
+ChordFormer (congelado) → 9 head logits
+    → HarmonicCRF:
+        1. Potencial de observação: log P(root) + log P(triad) = (B, T, 91)
+        2. Viterbi com transições aprendidas (91×91)
+        3. Decodifica tag → root + triad
+    → Extensões (bass, 7th, 9th, etc.) resolvidas por argmax
+    → ChordReassembler → acorde final
+```
+
+A matriz de transição (~8k parâmetros) é treinada em cima dos logits do ChordFormer congelado, aprendendo quais progressões harmônicas o modelo tende a produzir (ex: `C:maj → G:7` é comum, `C:maj → C#:dim` é raro).
+
+#### Treino do HarmonicCRF
+
+Após treinar o ChordFormer, treina-se o CRF separadamente (~minutos):
+
+```bash
+python train_harmonic_crf.py \
+    --checkpoint checkpoints/meu_run/model_best.pt \
+    --config run_config.yaml \
+    --train_datasets billboard queen robbiewilliams rwc jaah dj_avan_songbook2 \
+    --crf_run_name harmonic_crf_BiQuRoRwJaDj2 \
+    --num_epochs 50
+```
+
+O script:
+1. Carrega o ChordFormer e congela todos os parâmetros
+2. Instancia o HarmonicCRF (91 tags, ~8k params treináveis)
+3. Loop de treino: logits congelados → CRF loss (NLL) → backprop só nos params do CRF
+4. Loga accuracy do CRF vs argmax (baseline) para medir o ganho
+5. Early stopping, salva `crf_best.pt`
+
+| Parâmetro | Default | Descrição |
+|---|---|---|
+| `--checkpoint` | (obrigatório) | Checkpoint do ChordFormer treinado |
+| `--train_datasets` | config | Datasets para treino/validação |
+| `--num_epochs` | 50 | Épocas de treino do CRF |
+| `--learning_rate` | 0.01 | LR para parâmetros do CRF |
+| `--crf_run_name` | auto | Nome da run |
+| `--early_stop_patience` | 10 | Paciência para early stopping |
+
+#### Inferência com HarmonicCRF
+
+```bash
+python run_inference_batch_decomposed.py \
+    --checkpoint checkpoints/meu_run/model_best.pt \
+    --harmonic_crf checkpoints/harmonic_crf_BiQuRoRwJaDj2/crf_best.pt \
+    --test_dataset dj_avan_songbook1 \
+    --backbone chordformer
+```
+
+O flag `--harmonic_crf` ativa a decodificação Viterbi. Sem o flag, o comportamento é idêntico ao anterior (argmax por frame).
+
+#### Arquivos
+
+- `models/harmonic_crf.py` — Módulo `HarmonicCRF` (potencial de observação, CRF, Viterbi, loss)
+- `models/crf_model.py` — CRF core reutilizado (transições, forward algorithm, Viterbi) — **legado, não modificado**
+- `train_harmonic_crf.py` — Script de treino do CRF
+
+#### Extensibilidade futura
+
+- Expandir para root × triad × 7th (91 × 4 = 364 tags)
+- Adicionar outros heads ao potencial de observação (bass, 7th)
+- Treinar end-to-end (descongelar ChordFormer)
+- Substituir transições aprendidas por penalidade fixa (comparação com baseline)
+
+---
+
+### 8.6 Avaliação em Batch: Inferência + Métricas
 
 Para avaliar o modelo treinado em um dataset de teste completo e gerar relatórios CSV com métricas, o fluxo é dividido em dois passos:
 
@@ -1497,7 +1573,19 @@ Isso permite identificar:
 
 ---
 
-## Anexo: Estrutura de Arquivos
+## Anexo A: Nota sobre PyTorch 2.6+ e `weights_only`
+
+A partir do PyTorch 2.6, o default de `torch.load()` mudou para `weights_only=True`, que bloqueia a deserialização de numpy arrays nos `.pt`. Todos os scripts que leem `.pt` com arrays numpy devem usar:
+
+```python
+data = torch.load(path, map_location='cpu', weights_only=False)
+```
+
+Scripts já corrigidos: `preprocess_decomposed.py`, `add_original_labels.py`, `train_decomposed.py`, `train_harmonic_crf.py`.
+
+---
+
+## Anexo B: Estrutura de Arquivos
 
 ```
 BTC-ISMIR19/
@@ -1507,8 +1595,10 @@ BTC-ISMIR19/
 │   └── curriculum_learning.py        # Curriculum learning
 ├── models/
 │   ├── btc_model_decomposed.py       # ChordFormer decomposed + MultiTaskLoss + GradNorm
+│   ├── harmonic_crf.py               # HarmonicCRF — CRF root×triad para decodificação temporal
+│   ├── crf_model.py                  # CRF core (transições, Viterbi, forward alg.) — legado, reutilizado
 │   ├── btc_model.py                  # Modelos legado (BTC, baselines)
-│   └── baseline_models.py            # CNN, CRNN (legado)
+│   └── baseline_models.py            # CNN, CRNN, Crf wrapper (legado)
 ├── utils/
 │   ├── chord_decomposition.py        # ChordDecomposer & Reassembler (9 componentes)
 │   ├── decomposed_inference.py       # DecomposedChordTrainer, Inference, Metrics, GradNorm update
@@ -1526,10 +1616,11 @@ BTC-ISMIR19/
 │   ├── diagnose_decomposition_mismatch.py      # Diagnóstico train/val
 │   └── convert_to_decomposed.py      # Converte .pt 170-class → decomposed
 ├── train_decomposed.py               # Treino ChordMax (ChordFormer + GradNorm + wandb)
+├── train_harmonic_crf.py             # Treino do HarmonicCRF (CRF sobre ChordFormer congelado)
 ├── train_curriculum.py               # Treino legado
 ├── infer_decomposed.py               # Inferência janela única
 ├── infer_full_audio.py               # Inferência áudio completo (chunks)
-├── run_inference_batch_decomposed.py # Inferência batch em dataset completo → .lab
+├── run_inference_batch_decomposed.py # Inferência batch → .lab (suporta --harmonic_crf)
 ├── generate_metrics_csv.py           # Compara .lab preditos vs ground truth → CSVs de métricas
 ├── debug_model.py                    # Debug e testes do modelo
 ├── quick_test_decomposed.py          # Smoke test rápido
@@ -1546,4 +1637,4 @@ BTC-ISMIR19/
 
 ---
 
-**Última atualização:** Fevereiro 2026
+**Última atualização:** Março 2026

@@ -446,6 +446,16 @@ For the decomposition to work seamlessly, ensure:
 
 ---
 
+## Post-Processing: HarmonicCRF (Sequence Decoding)
+
+After the 9-head model produces per-frame predictions, an optional **HarmonicCRF** module can refine the root and triad sequence for temporal coherence.
+
+The CRF operates on the joint root × triad space (13 × 7 = 91 tags), learning which harmonic transitions are plausible from the model's own logits. Extensions (bass, 7th, 9th, 11th, 13th) remain resolved by per-frame argmax.
+
+See `models/harmonic_crf.py` and `train_harmonic_crf.py` for implementation. Full documentation in [PIPELINE_DOCUMENTATION.md](PIPELINE_DOCUMENTATION.md#85-harmoniccrf-decodificação-temporal-com-crf).
+
+---
+
 ## Performance Notes
 
 ### Memory Usage
