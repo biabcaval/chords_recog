@@ -28,12 +28,41 @@ warnings.filterwarnings('ignore')
 # Chord label normalization (mir_eval compatibility)
 # ---------------------------------------------------------------------------
 
+_NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+_NOTE_TO_IDX = {n: i for i, n in enumerate(_NOTE_NAMES)}
+_FLAT_TO_SHARP = {
+    'Cb': 'B', 'Db': 'C#', 'Eb': 'D#', 'Fb': 'E',
+    'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#',
+}
+_SEMITONE_TO_DEGREE = {
+    0: '1', 1: 'b2', 2: '2', 3: 'b3', 4: '3', 5: '4',
+    6: 'b5', 7: '5', 8: 'b6', 9: '6', 10: 'b7', 11: '7',
+}
+
+
+def _absolute_bass_to_degree(root_str, bass_str):
+    """Convert an absolute bass note name to a scale degree relative to root.
+
+    Returns the degree string (e.g. 'b7') or None if either note is
+    unrecognised.
+    """
+    r = _FLAT_TO_SHARP.get(root_str, root_str)
+    b = _FLAT_TO_SHARP.get(bass_str, bass_str)
+    r_idx = _NOTE_TO_IDX.get(r)
+    b_idx = _NOTE_TO_IDX.get(b)
+    if r_idx is None or b_idx is None:
+        return None
+    interval = (b_idx - r_idx) % 12
+    return _SEMITONE_TO_DEGREE.get(interval)
+
+
 def normalize_chord_for_mir_eval(label):
     """Rewrite a chord label so that mir_eval.chord can parse it.
 
-    Fixes two classes of issues produced by ChordReassembler:
+    Fixes three classes of issues produced by ChordReassembler:
       1. Multiple parenthetical groups  e.g. sus4(b7)(9) -> sus4(b7,9)
       2. Unrecognised shorthands        e.g. aug7        -> aug(b7)
+      3. Absolute bass note names       e.g. A:maj/G     -> A:maj/b7
     """
     if label in ('N', 'X', '') or ':' not in label:
         return label
@@ -55,6 +84,15 @@ def normalize_chord_for_mir_eval(label):
     if len(groups) > 1:
         base = re.sub(r'\([^)]+\)', '', main)
         main = f"{base}({','.join(groups)})"
+
+    # Convert absolute bass note to relative degree for mir_eval.
+    # e.g. A:maj/G -> A:maj/b7,  E:7/D -> E:7/b7
+    if bass_suffix:
+        bass_note = bass_suffix[1:]  # strip leading '/'
+        root_str = main.split(':')[0]
+        degree = _absolute_bass_to_degree(root_str, bass_note)
+        if degree is not None:
+            bass_suffix = f"/{degree}"
 
     return main + bass_suffix
 
