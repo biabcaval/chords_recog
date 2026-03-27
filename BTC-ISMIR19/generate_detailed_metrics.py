@@ -1,18 +1,59 @@
 #!/usr/bin/env python
 """
-Detailed frame-level evaluation: Accuracy, Precision, Recall, F1 and
-Confusion Matrices for chord recognition, at Root and Quality granularity.
+generate_detailed_metrics.py
+============================
 
-Compares inference .lab files against ground-truth .lab files by sampling
-at a fixed frame rate (default 100 fps = 10 ms) and computing standard
-classification metrics via scikit-learn.
+Avaliacao detalhada frame-a-frame de reconhecimento de acordes, calculando
+Accuracy, Precision, Recall, F1 e Matrizes de Confusao em duas granularidades:
 
-Usage:
-    python generate_detailed_metrics.py \
-        --inference_dir ./inferences_decomposed/inference_chordformer_test_Dj2 \
-        --gt_dir /home/daniel.melo/datasets/dj_avan_songbook2/annotations \
-        --output_dir ./detailed_metrics \
+  * **Root**    – nota fundamental (13 classes: N, C, C#, ..., B)
+  * **Quality** – tipo de acorde   (maj, min, 7, min7, dim, aug, ...)
+
+Metodologia
+-----------
+1. Lê pares de arquivos .lab (inferência vs ground truth), fazendo match
+   por nome de arquivo (case-insensitive, espaços e hifens normalizados).
+2. Amostra ambos os .lab numa grade temporal fixa (default 100 fps = 10 ms).
+3. De cada chord label (ex: "A:min7") extrai root ("A") e quality ("min7").
+4. Agrega os frames de todas as tracks e calcula métricas via scikit-learn.
+
+Saídas geradas
+--------------
+CSVs:
+  {prefix}_per_track.csv                – accuracy root/quality por track
+  {prefix}_root_per_class.csv           – P / R / F1 / support por root
+  {prefix}_quality_per_class.csv        – P / R / F1 / support por quality
+  {prefix}_root_confusion_matrix.csv    – matriz de confusão (root)
+  {prefix}_quality_confusion_matrix.csv – matriz de confusão (quality)
+  {prefix}_summary.csv                  – resumo geral (accuracy, macro/micro/
+                                          weighted P/R/F1 para root e quality)
+
+PNGs (desativável com --no_plots):
+  {prefix}_root_confusion_matrix.png    – heatmap da matriz de confusão (root)
+  {prefix}_quality_confusion_matrix.png – heatmap da matriz de confusão (quality)
+  {prefix}_root_f1_bar.png              – gráfico de barras F1 por root
+  {prefix}_quality_f1_bar.png           – gráfico de barras F1 por quality
+
+Dependências
+------------
+numpy, pandas, matplotlib, seaborn, scikit-learn
+
+Uso
+---
+    python generate_detailed_metrics.py \\
+        --inference_dir ./inferences_decomposed/inference_chordformer_test_Dj2 \\
+        --gt_dir /home/daniel.melo/datasets/dj_avan_songbook2/annotations \\
+        --output_dir ./detailed_metrics \\
         --prefix BiQuRoRwJaDj1_testDj2
+
+Argumentos
+----------
+--inference_dir   Diretório com os .lab preditos pelo modelo.
+--gt_dir          Diretório com os .lab de ground truth.
+--output_dir      Diretório de saída (default: ./detailed_metrics).
+--prefix          Prefixo dos arquivos gerados (default: detailed).
+--fps             Taxa de amostragem em frames/segundo (default: 100 = 10 ms).
+--no_plots        Se presente, não gera os PNGs (apenas CSVs).
 """
 
 import os
@@ -46,6 +87,8 @@ _FLAT_TO_SHARP = {
     "Gb": "F#", "Ab": "G#", "Bb": "A#",
 }
 
+# Mapeamento de shorthands mir_eval → quality canônica.
+# Shorthands não listadas aqui são mantidas como estão; string vazia → "maj".
 QUALITY_CANON = {
     "maj": "maj", "min": "min", "dim": "dim", "aug": "aug",
     "sus2": "sus2", "sus4": "sus4",
@@ -57,6 +100,7 @@ QUALITY_CANON = {
     "": "maj",
 }
 
+# Ordem fixa das classes de root para a matriz de confusão (N primeiro, depois cromático)
 ROOT_ORDER = ["N"] + _NOTE_NAMES
 
 # ───────────────────────────────────────────────────────────────────────
@@ -64,7 +108,17 @@ ROOT_ORDER = ["N"] + _NOTE_NAMES
 # ───────────────────────────────────────────────────────────────────────
 
 def parse_lab_file(filepath):
-    """Return (intervals np.array, labels list) from a .lab file."""
+    """Lê um arquivo .lab e retorna (intervals, labels).
+
+    Formato esperado de cada linha: ``start_time  end_time  chord_label``
+
+    Returns
+    -------
+    intervals : np.ndarray, shape (N, 2)
+        Pares [início, fim] em segundos.
+    labels : list[str]
+        Chord labels correspondentes (ex: "A:min7", "N").
+    """
     intervals, labels = [], []
     with open(filepath, "r") as f:
         for line in f:
@@ -79,10 +133,12 @@ def parse_lab_file(filepath):
 
 
 def normalize_filename(filename):
+    """Normaliza nome de arquivo para matching flexível (lowercase, _ no lugar de espaço/hífen)."""
     return filename.lower().replace(" ", "_").replace("-", "_")
 
 
 def build_gt_filename_map(gt_dir):
+    """Constrói mapa {nome_normalizado → caminho_completo} para todos os .lab no diretório GT."""
     gt_map = {}
     for f in glob.glob(os.path.join(gt_dir, "*.lab")):
         gt_map[normalize_filename(os.path.basename(f))] = f
@@ -94,7 +150,7 @@ def build_gt_filename_map(gt_dir):
 # ───────────────────────────────────────────────────────────────────────
 
 def _normalize_root(root_str):
-    """Normalize flats to sharps and validate."""
+    """Converte bemóis para sustenidos (ex: Bb → A#) e valida contra _NOTE_NAMES."""
     root = _FLAT_TO_SHARP.get(root_str, root_str)
     if root in _NOTE_NAMES:
         return root
@@ -102,9 +158,13 @@ def _normalize_root(root_str):
 
 
 def _extract_quality(shorthand):
-    """Map a mir_eval-style shorthand string to a canonical quality label."""
-    sh = shorthand.split("/")[0]  # strip bass
-    sh = re.sub(r"\([^)]*\)", "", sh)  # strip degree extensions in parens
+    """Extrai a quality canônica de um shorthand mir_eval.
+
+    Remove inversão (/bass) e extensões entre parênteses antes de mapear
+    via QUALITY_CANON. Ex: "min7/b7" → "min7", "sus4(b7,9)" → "sus4".
+    """
+    sh = shorthand.split("/")[0]
+    sh = re.sub(r"\([^)]*\)", "", sh)
     sh = sh.strip()
     if sh in QUALITY_CANON:
         return QUALITY_CANON[sh]
@@ -115,9 +175,14 @@ def _extract_quality(shorthand):
 
 
 def chord_to_root_quality(label):
-    """Parse a chord label into (root, quality).
+    """Decompõe um chord label em (root, quality).
 
-    Returns ("N", "N") for no-chord / unknown.
+    Exemplos::
+
+        "A:min7"   → ("A",  "min7")
+        "Bb:maj"   → ("A#", "maj")
+        "N"        → ("N",  "N")
+        "G"        → ("G",  "maj")   # sem ":" assume major
     """
     if label in ("N", "X", ""):
         return "N", "N"
@@ -137,7 +202,24 @@ def chord_to_root_quality(label):
 # ───────────────────────────────────────────────────────────────────────
 
 def sample_labels_at_frames(intervals, labels, fps):
-    """Sample chord labels at fixed frame rate across the annotation span."""
+    """Amostra chord labels numa grade temporal fixa.
+
+    Para cada instante t = 0, 1/fps, 2/fps, ... até o fim da última anotação,
+    retorna o chord label ativo naquele instante. Frames fora de qualquer
+    intervalo recebem "N" (no chord).
+
+    Parameters
+    ----------
+    intervals : np.ndarray, shape (N, 2)
+    labels : list[str]
+    fps : int
+        Frames por segundo (100 = resolução de 10 ms).
+
+    Returns
+    -------
+    times : np.ndarray
+    sampled : list[str]
+    """
     if len(intervals) == 0:
         return np.array([]), []
     end_time = intervals[-1, 1]
@@ -162,10 +244,20 @@ def sample_labels_at_frames(intervals, labels, fps):
 # ───────────────────────────────────────────────────────────────────────
 
 def compute_frame_metrics(inference_dir, gt_dir, fps=100):
-    """Collect frame-level root and quality labels across all matched tracks.
+    """Coleta labels de root e quality frame-a-frame de todas as tracks casadas.
 
-    Returns (all_ref_roots, all_est_roots, all_ref_quals, all_est_quals,
-             track_stats) or Nones if no tracks matched.
+    Para cada par (inferência, GT) com mesmo nome de arquivo:
+      1. Parseia ambos os .lab
+      2. Amostra na resolução ``fps``
+      3. Trunca ao menor comprimento comum
+      4. Extrai root e quality de cada frame
+
+    Returns
+    -------
+    tuple ou None
+        (all_ref_roots, all_est_roots, all_ref_quals, all_est_quals,
+         track_stats) — listas globais de labels + estatísticas por track.
+        Retorna None se nenhuma track foi casada.
     """
     inference_files = glob.glob(os.path.join(inference_dir, "*.lab"))
     if not inference_files:
@@ -239,10 +331,22 @@ def compute_frame_metrics(inference_dir, gt_dir, fps=100):
 
 
 def classification_metrics(y_true, y_pred, class_order=None):
-    """Compute accuracy + per-class and averaged P/R/F1.
+    """Calcula accuracy + Precision/Recall/F1 por classe e agregados.
 
-    Returns (accuracy, df_per_class, macro, micro, weighted) where
-    macro/micro/weighted are dicts with keys precision, recall, f1.
+    Parameters
+    ----------
+    y_true, y_pred : list[str]
+        Labels de referência e estimados.
+    class_order : list[str], optional
+        Ordem das classes (filtra apenas as presentes nos dados).
+
+    Returns
+    -------
+    accuracy : float
+    df_per_class : pd.DataFrame
+        Colunas: precision, recall, f1, support — indexado por classe.
+    macro, micro, weighted : dict
+        Cada um com chaves "precision", "recall", "f1".
     """
     labels = class_order
     if labels is None:
@@ -275,7 +379,7 @@ def classification_metrics(y_true, y_pred, class_order=None):
 
 
 def build_confusion(y_true, y_pred, class_order=None):
-    """Return a labeled confusion-matrix DataFrame."""
+    """Constrói uma matriz de confusão como DataFrame rotulado (linhas=GT, colunas=pred)."""
     labels = class_order
     if labels is None:
         labels = sorted(set(y_true) | set(y_pred))
@@ -290,7 +394,7 @@ def build_confusion(y_true, y_pred, class_order=None):
 # ───────────────────────────────────────────────────────────────────────
 
 def plot_confusion_matrix(cm_df, title, output_path, figsize=None, annot=True):
-    """Save a confusion-matrix heatmap as PNG."""
+    """Salva um heatmap da matriz de confusão como PNG (anotações desativadas se > 40 classes)."""
     n = len(cm_df)
     if figsize is None:
         side = max(6, n * 0.55)
@@ -315,7 +419,7 @@ def plot_confusion_matrix(cm_df, title, output_path, figsize=None, annot=True):
 
 
 def plot_per_class_f1(df_per_class, title, output_path):
-    """Horizontal bar chart of per-class F1 scores."""
+    """Gráfico de barras horizontal do F1 por classe, colorido de vermelho (0) a verde (1)."""
     df_sorted = df_per_class.sort_values("f1", ascending=True)
     fig, ax = plt.subplots(figsize=(8, max(4, len(df_sorted) * 0.35)))
     colors = plt.cm.RdYlGn(df_sorted["f1"].values)
