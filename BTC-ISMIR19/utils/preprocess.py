@@ -31,10 +31,19 @@ class Preprocess():
 
         # Generic dataset support (billboard, jaah, rwc)
         # These datasets follow a standard structure: annotations/ and audio/ directories
-        self.generic_datasets = ['billboard', 'jaah', 'rwc', 'dj_avan_songbook1', 'dj_avan_songbook2', 'robbiewilliams', 'queen']
+        self.generic_datasets = ['billboard', 'jaah', 'rwc', 'dj_avan_songbook1', 'dj_avan_songbook2', 'robbiewilliams', 'queen',
+                                 'balanced_v1_train', 'balanced_v1_test']
+
+        # Datasets under a subfolder of root_path
+        self._dataset_subdir = {
+            'balanced_v1_train': 'personalized_datasets/balanced_v1_train',
+            'balanced_v1_test': 'personalized_datasets/balanced_v1_test',
+        }
+
         for dataset_name in self.generic_datasets:
             if dataset_name in self.dataset_names:
-                setattr(self, f'{dataset_name}_directory', self.root_path + f'{dataset_name}/')
+                rel_path = self._dataset_subdir.get(dataset_name, dataset_name)
+                setattr(self, f'{dataset_name}_directory', self.root_path + f'{rel_path}/')
                 setattr(self, f'{dataset_name}_audio_path', 'audio/')
                 setattr(self, f'{dataset_name}_lab_path', 'annotations/')
 

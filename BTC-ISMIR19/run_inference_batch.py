@@ -250,6 +250,7 @@ DATASET_SHORT = {
     'queen': 'Qu',
     'robbiewilliams': 'Ro',
     'robbie': 'Ro',
+    'balanced_v1_test': 'Bal',
 }
 
 DATASET_AUDIO_DIRS = {
@@ -260,6 +261,7 @@ DATASET_AUDIO_DIRS = {
     'dj_avan_songbook2': '/home/daniel.melo/datasets/dj_avan_songbook2/audio',
     'queen': '/home/daniel.melo/datasets/queen/audio',
     'robbiewilliams': '/home/daniel.melo/datasets/robbiewilliams/audio',
+    'balanced_v1_test': '/home/daniel.melo/datasets/personalized_datasets/balanced_v1_test/audio',
 }
 
 
