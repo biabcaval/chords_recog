@@ -57,7 +57,6 @@ Argumentos
 """
 
 import os
-import re
 import argparse
 import glob
 import warnings
@@ -74,6 +73,7 @@ from sklearn.metrics import (
     confusion_matrix,
     classification_report,
 )
+from utils.chord_decomposition import ChordDecomposer
 
 warnings.filterwarnings("ignore")
 
@@ -87,21 +87,89 @@ _FLAT_TO_SHARP = {
     "Gb": "F#", "Ab": "G#", "Bb": "A#",
 }
 
-# Mapeamento de shorthands mir_eval → quality canônica.
-# Shorthands não listadas aqui são mantidas como estão; string vazia → "maj".
+# Mapeamento de shorthands → quality canônica.
+# Cobre todos os shorthands definidos em utils/chords.py e
+# utils/chord_decomposition.py. Shorthands não listadas aqui são mantidas
+# como estão; string vazia → "maj".
 QUALITY_CANON = {
-    "maj": "maj", "min": "min", "dim": "dim", "aug": "aug",
-    "sus2": "sus2", "sus4": "sus4",
-    "7": "7", "maj7": "maj7", "min7": "min7", "dim7": "dim7",
-    "hdim7": "hdim7", "minmaj7": "minmaj7", "aug7": "aug7",
-    "maj6": "maj6", "min6": "min6",
-    "9": "9", "maj9": "maj9", "min9": "min9",
+    # --- tríades básicas ---
+    "maj": "maj",
+    "min": "min",
+    "dim": "dim",
+    "aug": "aug",
+    "sus2": "sus2",
+    "sus4": "sus4",
     "sus": "sus4",
+
+    # --- power chords ---
+    "5": "5",
+    "1": "5",
+    "pedal": "5",
+    "power": "5",
+
+    # --- acordes com 6ª ---
+    "maj6": "maj6",
+    "min6": "min6",
+
+    # --- acordes com 7ª ---
+    "7": "7",
+    "maj7": "maj7",
+    "min7": "min7",
+    "dim7": "dim7",
+    "hdim7": "hdim7",
+    "hdim": "hdim7",
+    "minmaj7": "minmaj7",
+    "minmaj": "minmaj7",
+    "aug7": "aug7",
+
+    # --- 7ª + suspensão ---
+    "7sus2": "7sus2",
+    "7sus4": "7sus4",
+
+    # --- acordes com 9ª ---
+    "9": "9",
+    "maj9": "maj9",
+    "min9": "min9",
+    "9sus4": "9sus4",
+
+    # --- acordes com 11ª ---
+    "11": "11",
+    "min11": "min11",
+    "maj11": "maj11",
+
+    # --- acordes com 13ª ---
+    "13": "13",
+    "maj13": "maj13",
+    "min13": "min13",
+
+    # --- sem quality explícita → major ---
     "": "maj",
 }
 
 # Ordem fixa das classes de root para a matriz de confusão (N primeiro, depois cromático)
 ROOT_ORDER = ["N"] + _NOTE_NAMES
+
+# Ordem fixa das classes de quality para a matriz de confusão.
+# Agrupa por família (tríades, power, 6ª, 7ª, 9ª, 11ª, 13ª).
+QUALITY_ORDER = [
+    "N",
+    # tríades
+    "maj", "min", "dim", "aug", "sus2", "sus4",
+    # power
+    "5",
+    # 6ª
+    "maj6", "min6",
+    # 7ª
+    "7", "maj7", "min7", "dim7", "hdim7", "minmaj7", "aug7",
+    # 7ª + suspensão
+    "7sus2", "7sus4",
+    # 9ª
+    "9", "maj9", "min9", "9sus4",
+    # 11ª
+    "11", "min11", "maj11",
+    # 13ª
+    "13", "maj13", "min13",
+]
 
 # ───────────────────────────────────────────────────────────────────────
 # .lab parsing (shared logic with generate_metrics_csv.py)
@@ -146,54 +214,127 @@ def build_gt_filename_map(gt_dir):
 
 
 # ───────────────────────────────────────────────────────────────────────
-# Chord label → (root, quality)
+# Chord label → (root, quality)  via ChordDecomposer
 # ───────────────────────────────────────────────────────────────────────
 
-def _normalize_root(root_str):
-    """Converte bemóis para sustenidos (ex: Bb → A#) e valida contra _NOTE_NAMES."""
-    root = _FLAT_TO_SHARP.get(root_str, root_str)
-    if root in _NOTE_NAMES:
-        return root
-    return None
+_DECOMPOSER = ChordDecomposer()
 
 
-def _extract_quality(shorthand):
-    """Extrai a quality canônica de um shorthand mir_eval.
+def _components_to_quality(comp):
+    """Mapeia os componentes decompostos para uma quality canônica.
 
-    Remove inversão (/bass) e extensões entre parênteses antes de mapear
-    via QUALITY_CANON. Ex: "min7/b7" → "min7", "sus4(b7,9)" → "sus4".
+    Usa triad, misc, 6th e 7th (+ presença de 9th/11th/13th) para
+    determinar a classe de quality, seguindo a mesma hierarquia de
+    shorthands dos datasets padrão (Harte notation).
+
+    Exemplos de mapeamento via componentes::
+
+        triad=dim,  7th=b7         → "hdim7"
+        triad=aug,  7th=b7         → "aug7"
+        triad=sus4, 7th=b7         → "7sus4"
+        triad=maj,  7th=b7, 9th=9  → "9"
+        triad=min,  7th=b7, 9th=9  → "min9"
+        misc=5                      → "5"
     """
-    sh = shorthand.split("/")[0]
-    sh = re.sub(r"\([^)]*\)", "", sh)
-    sh = sh.strip()
-    if sh in QUALITY_CANON:
-        return QUALITY_CANON[sh]
-    for key in sorted(QUALITY_CANON, key=len, reverse=True):
-        if sh.startswith(key) and key:
-            return QUALITY_CANON[key]
-    return sh if sh else "maj"
+    if comp.get("root", "N") == "N":
+        return "N"
+
+    misc = comp.get("misc", "N")
+    if misc == "5":
+        return "5"
+
+    triad = comp.get("triad", "N")
+    if triad == "N":
+        return "N"
+
+    ext_6 = comp.get("6th", "N")
+    ext_7 = comp.get("7th", "N")
+    has_7 = ext_7 != "N"
+    has_9 = comp.get("9th", "N") != "N"
+    has_11 = comp.get("11th", "N") != "N"
+    has_13 = comp.get("13th", "N") != "N"
+
+    # --- 13ª (requer 7ª) ---
+    if has_13 and has_7:
+        if triad == "maj" and ext_7 == "7":
+            return "maj13"
+        if triad == "min" and ext_7 == "b7":
+            return "min13"
+        if triad == "maj" and ext_7 == "b7":
+            return "13"
+
+    # --- 11ª (requer 7ª) ---
+    if has_11 and has_7:
+        if triad == "maj" and ext_7 == "7":
+            return "maj11"
+        if triad == "min" and ext_7 == "b7":
+            return "min11"
+        if triad == "maj" and ext_7 == "b7":
+            return "11"
+
+    # --- 9ª (requer 7ª) ---
+    if has_9 and has_7:
+        if triad == "sus4" and ext_7 == "b7":
+            return "9sus4"
+        if triad == "maj" and ext_7 == "7":
+            return "maj9"
+        if triad == "min" and ext_7 == "b7":
+            return "min9"
+        if triad == "maj" and ext_7 == "b7":
+            return "9"
+
+    # --- 7ª ---
+    if has_7:
+        if triad == "sus2":
+            return "7sus2"
+        if triad == "sus4":
+            return "7sus4"
+        if ext_7 == "7":
+            if triad == "min":
+                return "minmaj7"
+            return "maj7"
+        if ext_7 == "b7":
+            if triad == "dim":
+                return "hdim7"
+            if triad == "aug":
+                return "aug7"
+            if triad == "min":
+                return "min7"
+            return "7"
+        if ext_7 == "bb7":
+            if triad == "dim":
+                return "dim7"
+
+    # --- 6ª (sem 7ª) ---
+    if ext_6 != "N":
+        if triad == "min":
+            return "min6"
+        return "maj6"
+
+    # --- tríade pura ---
+    return triad
 
 
 def chord_to_root_quality(label):
-    """Decompõe um chord label em (root, quality).
+    """Decompõe um chord label em (root, quality) usando o ChordDecomposer.
+
+    Delega a análise completa do shorthand (parênteses, omissões,
+    extensões implícitas, alterações de 5ª, etc.) ao ChordDecomposer
+    e depois mapeia os componentes para uma classe de quality canônica.
 
     Exemplos::
 
-        "A:min7"   → ("A",  "min7")
-        "Bb:maj"   → ("A#", "maj")
-        "N"        → ("N",  "N")
-        "G"        → ("G",  "maj")   # sem ":" assume major
+        "A:min7"      → ("A",  "min7")
+        "Bb:maj"      → ("A#", "maj")
+        "N"           → ("N",  "N")
+        "G"           → ("G",  "maj")
+        "C:min7(b5)"  → ("C",  "hdim7")   # corretamente identificado
+        "C:sus4(b7)"  → ("C",  "7sus4")   # extensão capturada
+        "C:maj(#5)"   → ("C",  "aug")     # alteração de 5ª reconhecida
     """
-    if label in ("N", "X", ""):
-        return "N", "N"
-    if ":" not in label:
-        root = _normalize_root(label.split("/")[0])
-        return (root, "maj") if root else ("N", "N")
-    root_str, rest = label.split(":", 1)
-    root = _normalize_root(root_str)
-    if root is None:
-        return "N", "N"
-    quality = _extract_quality(rest)
+    comp = _DECOMPOSER.decompose(label)
+    root = comp["root"]
+    quality = _components_to_quality(comp)
     return root, quality
 
 
@@ -516,13 +657,13 @@ def main():
 
     # ── QUALITY metrics ──────────────────────────────────────────────
     qual_acc, qual_cls, qual_macro, qual_micro, qual_wtd = classification_metrics(
-        ref_quals, est_quals
+        ref_quals, est_quals, class_order=QUALITY_ORDER
     )
     qual_cls_path = os.path.join(args.output_dir, f"{args.prefix}_quality_per_class.csv")
     qual_cls.to_csv(qual_cls_path)
     print(f"  Quality per-class   : {qual_cls_path}")
 
-    qual_cm = build_confusion(ref_quals, est_quals)
+    qual_cm = build_confusion(ref_quals, est_quals, class_order=QUALITY_ORDER)
     qual_cm_path = os.path.join(args.output_dir, f"{args.prefix}_quality_confusion_matrix.csv")
     qual_cm.to_csv(qual_cm_path)
     print(f"  Quality confusion   : {qual_cm_path}")
