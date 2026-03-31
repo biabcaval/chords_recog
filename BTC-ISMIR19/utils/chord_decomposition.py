@@ -716,7 +716,7 @@ class ChordReassembler:
         else:
             chord = f"{root}:{triad}"
 
-        if ext_6th != 'N' and has_ext:
+        if ext_6th != 'N' and has_ext_7plus:
             paren_exts.append('6')
         if ext_9th != 'N':
             paren_exts.append(ext_9th)
