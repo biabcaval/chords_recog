@@ -4,56 +4,50 @@ generate_detailed_metrics.py
 ============================
 
 Avaliacao detalhada frame-a-frame de reconhecimento de acordes, calculando
-Accuracy, Precision, Recall, F1 e Matrizes de Confusao em duas granularidades:
+Accuracy, Precision, Recall, F1 e Matrizes de Confusao para cada um dos
+9 componentes do ChordDecomposer (mesmos do pipeline de treino/inferencia):
 
-  * **Root**    – nota fundamental (13 classes: N, C, C#, ..., B)
-  * **Quality** – tipo de acorde   (maj, min, 7, min7, dim, aug, ...)
+  * **root**  (13 classes)  – nota fundamental
+  * **bass**  (13 classes)  – nota do baixo
+  * **triad** (7 classes)   – tríade (maj, min, dim, aug, sus2, sus4)
+  * **misc**  (2 classes)   – power chord
+  * **6th**   (2 classes)   – extensão de 6ª
+  * **7th**   (4 classes)   – tipo de 7ª (maj7, dom7, dim7)
+  * **9th**   (4 classes)   – extensão de 9ª
+  * **11th**  (3 classes)   – extensão de 11ª
+  * **13th**  (3 classes)   – extensão de 13ª
+
+Adicionalmente, calcula uma **quality derivada** (31 classes) que combina
+triad + extensões numa classe de shorthand canônica (e.g. "min7", "hdim7").
 
 Metodologia
 -----------
 1. Lê pares de arquivos .lab (inferência vs ground truth), fazendo match
    por nome de arquivo (case-insensitive, espaços e hifens normalizados).
 2. Amostra ambos os .lab numa grade temporal fixa (default 100 fps = 10 ms).
-3. De cada chord label (ex: "A:min7") extrai root ("A") e quality ("min7").
+3. Decompõe cada chord label nos 9 componentes via ChordDecomposer
+   (mesmo usado no treino), usando exatamente o CHORD_VOCAB do modelo.
 4. Agrega os frames de todas as tracks e calcula métricas via scikit-learn.
 
 Saídas geradas
 --------------
-CSVs:
-  {prefix}_per_track.csv                – accuracy root/quality por track
-  {prefix}_root_per_class.csv           – P / R / F1 / support por root
-  {prefix}_quality_per_class.csv        – P / R / F1 / support por quality
-  {prefix}_root_confusion_matrix.csv    – matriz de confusão (root)
-  {prefix}_quality_confusion_matrix.csv – matriz de confusão (quality)
-  {prefix}_summary.csv                  – resumo geral (accuracy, macro/micro/
-                                          weighted P/R/F1 para root e quality)
+CSVs (por componente, 9x):
+  {prefix}_{comp}_per_class.csv           – P / R / F1 / support por classe
+  {prefix}_{comp}_confusion_matrix.csv    – matriz de confusão
+
+CSVs (quality derivada, 1x):
+  {prefix}_quality_per_class.csv          – P / R / F1 / support
+  {prefix}_quality_confusion_matrix.csv   – matriz de confusão
+
+Resumo:
+  {prefix}_per_track.csv                  – accuracy por componente por track
+  {prefix}_summary.csv                    – accuracy + P/R/F1 para tudo
 
 PNGs (desativável com --no_plots):
-  {prefix}_root_confusion_matrix.png    – heatmap da matriz de confusão (root)
-  {prefix}_quality_confusion_matrix.png – heatmap da matriz de confusão (quality)
-  {prefix}_root_f1_bar.png              – gráfico de barras F1 por root
-  {prefix}_quality_f1_bar.png           – gráfico de barras F1 por quality
-
-Dependências
-------------
-numpy, pandas, matplotlib, seaborn, scikit-learn
-
-Uso
----
-    python generate_detailed_metrics.py \\
-        --inference_dir ./inferences_decomposed/inference_chordformer_test_Dj2 \\
-        --gt_dir /home/daniel.melo/datasets/dj_avan_songbook2/annotations \\
-        --output_dir ./detailed_metrics \\
-        --prefix BiQuRoRwJaDj1_testDj2
-
-Argumentos
-----------
---inference_dir   Diretório com os .lab preditos pelo modelo.
---gt_dir          Diretório com os .lab de ground truth.
---output_dir      Diretório de saída (default: ./detailed_metrics).
---prefix          Prefixo dos arquivos gerados (default: detailed).
---fps             Taxa de amostragem em frames/segundo (default: 100 = 10 ms).
---no_plots        Se presente, não gera os PNGs (apenas CSVs).
+  {prefix}_{comp}_confusion_matrix.png    – heatmap por componente
+  {prefix}_{comp}_f1_bar.png              – barras F1 por componente
+  {prefix}_quality_confusion_matrix.png   – heatmap quality derivada
+  {prefix}_quality_f1_bar.png             – barras F1 quality derivada
 """
 
 import os
@@ -71,9 +65,8 @@ from sklearn.metrics import (
     accuracy_score,
     precision_recall_fscore_support,
     confusion_matrix,
-    classification_report,
 )
-from utils.chord_decomposition import ChordDecomposer
+from utils.chord_decomposition import ChordDecomposer, CHORD_VOCAB, COMPONENT_NAMES
 
 warnings.filterwarnings("ignore")
 
@@ -384,20 +377,42 @@ def sample_labels_at_frames(intervals, labels, fps):
 # Metrics computation
 # ───────────────────────────────────────────────────────────────────────
 
+def _decompose_labels(sampled_labels):
+    """Decompõe uma lista de chord labels em componentes + quality derivada.
+
+    Returns
+    -------
+    components : dict[str, list[str]]
+        Mapa {component_name: [label_por_frame]} para cada um dos 9 componentes.
+    qualities : list[str]
+        Quality derivada (via _components_to_quality) por frame.
+    """
+    components = {comp: [] for comp in COMPONENT_NAMES}
+    qualities = []
+    for label in sampled_labels:
+        comp = _DECOMPOSER.decompose(label)
+        for name in COMPONENT_NAMES:
+            components[name].append(comp[name])
+        qualities.append(_components_to_quality(comp))
+    return components, qualities
+
+
 def compute_frame_metrics(inference_dir, gt_dir, fps=100):
-    """Coleta labels de root e quality frame-a-frame de todas as tracks casadas.
+    """Coleta os 9 componentes + quality derivada frame-a-frame de todas as tracks.
 
     Para cada par (inferência, GT) com mesmo nome de arquivo:
       1. Parseia ambos os .lab
       2. Amostra na resolução ``fps``
       3. Trunca ao menor comprimento comum
-      4. Extrai root e quality de cada frame
+      4. Decompõe cada frame nos 9 componentes do ChordDecomposer
+         (root, bass, triad, misc, 6th, 7th, 9th, 11th, 13th)
+         + quality derivada
 
     Returns
     -------
     tuple ou None
-        (all_ref_roots, all_est_roots, all_ref_quals, all_est_quals,
-         track_stats) — listas globais de labels + estatísticas por track.
+        (all_ref_comp, all_est_comp, all_ref_quals, all_est_quals, track_stats)
+        onde all_ref_comp / all_est_comp são dicts {component: list[str]}.
         Retorna None se nenhuma track foi casada.
     """
     inference_files = glob.glob(os.path.join(inference_dir, "*.lab"))
@@ -406,7 +421,8 @@ def compute_frame_metrics(inference_dir, gt_dir, fps=100):
 
     gt_map = build_gt_filename_map(gt_dir)
 
-    all_ref_roots, all_est_roots = [], []
+    all_ref_comp = {comp: [] for comp in COMPONENT_NAMES}
+    all_est_comp = {comp: [] for comp in COMPONENT_NAMES}
     all_ref_quals, all_est_quals = [], []
     track_stats = []
 
@@ -438,37 +454,35 @@ def compute_frame_metrics(inference_dir, gt_dir, fps=100):
             ref_sampled = ref_sampled[:n]
             est_sampled = est_sampled[:n]
 
-            ref_rq = [chord_to_root_quality(l) for l in ref_sampled]
-            est_rq = [chord_to_root_quality(l) for l in est_sampled]
+            ref_comp, ref_q = _decompose_labels(ref_sampled)
+            est_comp, est_q = _decompose_labels(est_sampled)
 
-            ref_r = [r for r, _ in ref_rq]
-            est_r = [r for r, _ in est_rq]
-            ref_q = [q for _, q in ref_rq]
-            est_q = [q for _, q in est_rq]
-
-            all_ref_roots.extend(ref_r)
-            all_est_roots.extend(est_r)
+            for comp in COMPONENT_NAMES:
+                all_ref_comp[comp].extend(ref_comp[comp])
+                all_est_comp[comp].extend(est_comp[comp])
             all_ref_quals.extend(ref_q)
             all_est_quals.extend(est_q)
 
-            root_acc = accuracy_score(ref_r, est_r)
-            qual_acc = accuracy_score(ref_q, est_q)
-            track_stats.append({
+            stat = {
                 "track": os.path.splitext(track_id)[0],
                 "frames": n,
                 "duration_s": n / fps,
-                "root_accuracy": root_acc,
-                "quality_accuracy": qual_acc,
-            })
+            }
+            for comp in COMPONENT_NAMES:
+                stat[f"{comp}_accuracy"] = accuracy_score(
+                    ref_comp[comp], est_comp[comp]
+                )
+            stat["quality_accuracy"] = accuracy_score(ref_q, est_q)
+            track_stats.append(stat)
 
         except Exception as e:
             print(f"  [error] {track_id}: {e}")
             continue
 
-    if not all_ref_roots:
+    if not track_stats:
         return None
 
-    return all_ref_roots, all_est_roots, all_ref_quals, all_est_quals, track_stats
+    return all_ref_comp, all_est_comp, all_ref_quals, all_est_quals, track_stats
 
 
 def classification_metrics(y_true, y_pred, class_order=None):
@@ -619,8 +633,8 @@ def main():
         print("\nNo tracks matched.")
         return
 
-    ref_roots, est_roots, ref_quals, est_quals, track_stats = result
-    total_frames = len(ref_roots)
+    all_ref_comp, all_est_comp, ref_quals, est_quals, track_stats = result
+    total_frames = len(all_ref_comp["root"])
     n_tracks = len(track_stats)
 
     print(f"\nMatched {n_tracks} tracks  |  {total_frames:,} frames "
@@ -632,50 +646,76 @@ def main():
     df_tracks.to_csv(track_path)
     print(f"  Per-track stats     : {track_path}")
 
-    # ── ROOT metrics ─────────────────────────────────────────────────
-    root_acc, root_cls, root_macro, root_micro, root_wtd = classification_metrics(
-        ref_roots, est_roots, class_order=ROOT_ORDER
-    )
-    root_cls_path = os.path.join(args.output_dir, f"{args.prefix}_root_per_class.csv")
-    root_cls.to_csv(root_cls_path)
-    print(f"  Root per-class      : {root_cls_path}")
+    # ── Per-component metrics (9 components from CHORD_VOCAB) ────────
+    comp_results = {}
 
-    root_cm = build_confusion(ref_roots, est_roots, class_order=ROOT_ORDER)
-    root_cm_path = os.path.join(args.output_dir, f"{args.prefix}_root_confusion_matrix.csv")
-    root_cm.to_csv(root_cm_path)
-    print(f"  Root confusion mat  : {root_cm_path}")
-
-    if not args.no_plots:
-        plot_confusion_matrix(
-            root_cm, "Confusion Matrix — Root",
-            os.path.join(args.output_dir, f"{args.prefix}_root_confusion_matrix.png"),
+    for comp in COMPONENT_NAMES:
+        class_order = CHORD_VOCAB[comp]
+        acc, cls_df, macro, micro, wtd = classification_metrics(
+            all_ref_comp[comp], all_est_comp[comp], class_order=class_order
         )
-        plot_per_class_f1(
-            root_cls, "Per-class F1 — Root",
-            os.path.join(args.output_dir, f"{args.prefix}_root_f1_bar.png"),
-        )
+        comp_results[comp] = {
+            "acc": acc, "macro": macro, "micro": micro, "weighted": wtd,
+        }
 
-    # ── QUALITY metrics ──────────────────────────────────────────────
+        cls_path = os.path.join(
+            args.output_dir, f"{args.prefix}_{comp}_per_class.csv"
+        )
+        cls_df.to_csv(cls_path)
+        print(f"  {comp:>5s} per-class    : {cls_path}")
+
+        cm_df = build_confusion(
+            all_ref_comp[comp], all_est_comp[comp], class_order=class_order
+        )
+        cm_path = os.path.join(
+            args.output_dir, f"{args.prefix}_{comp}_confusion_matrix.csv"
+        )
+        cm_df.to_csv(cm_path)
+
+        if not args.no_plots:
+            plot_confusion_matrix(
+                cm_df, f"Confusion Matrix — {comp}",
+                os.path.join(
+                    args.output_dir,
+                    f"{args.prefix}_{comp}_confusion_matrix.png",
+                ),
+            )
+            plot_per_class_f1(
+                cls_df, f"Per-class F1 — {comp}",
+                os.path.join(
+                    args.output_dir, f"{args.prefix}_{comp}_f1_bar.png"
+                ),
+            )
+
+    # ── Quality derivada (retrocompatível) ───────────────────────────
     qual_acc, qual_cls, qual_macro, qual_micro, qual_wtd = classification_metrics(
         ref_quals, est_quals, class_order=QUALITY_ORDER
     )
-    qual_cls_path = os.path.join(args.output_dir, f"{args.prefix}_quality_per_class.csv")
+    qual_cls_path = os.path.join(
+        args.output_dir, f"{args.prefix}_quality_per_class.csv"
+    )
     qual_cls.to_csv(qual_cls_path)
-    print(f"  Quality per-class   : {qual_cls_path}")
+    print(f"  quality per-class   : {qual_cls_path}")
 
     qual_cm = build_confusion(ref_quals, est_quals, class_order=QUALITY_ORDER)
-    qual_cm_path = os.path.join(args.output_dir, f"{args.prefix}_quality_confusion_matrix.csv")
+    qual_cm_path = os.path.join(
+        args.output_dir, f"{args.prefix}_quality_confusion_matrix.csv"
+    )
     qual_cm.to_csv(qual_cm_path)
-    print(f"  Quality confusion   : {qual_cm_path}")
 
     if not args.no_plots:
         plot_confusion_matrix(
-            qual_cm, "Confusion Matrix — Quality",
-            os.path.join(args.output_dir, f"{args.prefix}_quality_confusion_matrix.png"),
+            qual_cm, "Confusion Matrix — Quality (derived)",
+            os.path.join(
+                args.output_dir,
+                f"{args.prefix}_quality_confusion_matrix.png",
+            ),
         )
         plot_per_class_f1(
-            qual_cls, "Per-class F1 — Quality",
-            os.path.join(args.output_dir, f"{args.prefix}_quality_f1_bar.png"),
+            qual_cls, "Per-class F1 — Quality (derived)",
+            os.path.join(
+                args.output_dir, f"{args.prefix}_quality_f1_bar.png"
+            ),
         )
 
     # ── Summary ──────────────────────────────────────────────────────
@@ -683,27 +723,25 @@ def main():
         "num_tracks": n_tracks,
         "total_frames": total_frames,
         "total_duration_s": total_frames / args.fps,
-        "root_accuracy": root_acc,
-        "root_precision_macro": root_macro["precision"],
-        "root_recall_macro": root_macro["recall"],
-        "root_f1_macro": root_macro["f1"],
-        "root_precision_micro": root_micro["precision"],
-        "root_recall_micro": root_micro["recall"],
-        "root_f1_micro": root_micro["f1"],
-        "root_precision_weighted": root_wtd["precision"],
-        "root_recall_weighted": root_wtd["recall"],
-        "root_f1_weighted": root_wtd["f1"],
-        "quality_accuracy": qual_acc,
-        "quality_precision_macro": qual_macro["precision"],
-        "quality_recall_macro": qual_macro["recall"],
-        "quality_f1_macro": qual_macro["f1"],
-        "quality_precision_micro": qual_micro["precision"],
-        "quality_recall_micro": qual_micro["recall"],
-        "quality_f1_micro": qual_micro["f1"],
-        "quality_precision_weighted": qual_wtd["precision"],
-        "quality_recall_weighted": qual_wtd["recall"],
-        "quality_f1_weighted": qual_wtd["f1"],
     }
+    for comp in COMPONENT_NAMES:
+        cr = comp_results[comp]
+        summary[f"{comp}_accuracy"] = cr["acc"]
+        summary[f"{comp}_f1_macro"] = cr["macro"]["f1"]
+        summary[f"{comp}_f1_weighted"] = cr["weighted"]["f1"]
+        summary[f"{comp}_precision_macro"] = cr["macro"]["precision"]
+        summary[f"{comp}_recall_macro"] = cr["macro"]["recall"]
+        summary[f"{comp}_precision_weighted"] = cr["weighted"]["precision"]
+        summary[f"{comp}_recall_weighted"] = cr["weighted"]["recall"]
+
+    summary["quality_accuracy"] = qual_acc
+    summary["quality_f1_macro"] = qual_macro["f1"]
+    summary["quality_f1_weighted"] = qual_wtd["f1"]
+    summary["quality_precision_macro"] = qual_macro["precision"]
+    summary["quality_recall_macro"] = qual_macro["recall"]
+    summary["quality_precision_weighted"] = qual_wtd["precision"]
+    summary["quality_recall_weighted"] = qual_wtd["recall"]
+
     df_summary = pd.DataFrame([summary])
     summary_path = os.path.join(args.output_dir, f"{args.prefix}_summary.csv")
     df_summary.to_csv(summary_path, index=False)
@@ -711,14 +749,18 @@ def main():
 
     # ── Console output ───────────────────────────────────────────────
     print("\n" + "=" * 70)
-    print("  ROOT")
-    print(f"    Accuracy : {root_acc:.4f}")
-    print(f"    Macro    : P={root_macro['precision']:.4f}  "
-          f"R={root_macro['recall']:.4f}  F1={root_macro['f1']:.4f}")
-    print(f"    Weighted : P={root_wtd['precision']:.4f}  "
-          f"R={root_wtd['recall']:.4f}  F1={root_wtd['f1']:.4f}")
-    print()
-    print("  QUALITY")
+    for comp in COMPONENT_NAMES:
+        cr = comp_results[comp]
+        print(f"  {comp.upper()}")
+        print(f"    Accuracy : {cr['acc']:.4f}")
+        print(f"    Macro    : P={cr['macro']['precision']:.4f}  "
+              f"R={cr['macro']['recall']:.4f}  F1={cr['macro']['f1']:.4f}")
+        print(f"    Weighted : P={cr['weighted']['precision']:.4f}  "
+              f"R={cr['weighted']['recall']:.4f}  "
+              f"F1={cr['weighted']['f1']:.4f}")
+        print()
+
+    print("  QUALITY (derived)")
     print(f"    Accuracy : {qual_acc:.4f}")
     print(f"    Macro    : P={qual_macro['precision']:.4f}  "
           f"R={qual_macro['recall']:.4f}  F1={qual_macro['f1']:.4f}")
