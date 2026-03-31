@@ -66,7 +66,9 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     confusion_matrix,
 )
-from utils.chord_decomposition import ChordDecomposer, CHORD_VOCAB, COMPONENT_NAMES
+from utils.chord_decomposition import (
+    ChordDecomposer, ChordReassembler, CHORD_VOCAB, COMPONENT_NAMES,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -211,6 +213,7 @@ def build_gt_filename_map(gt_dir):
 # ───────────────────────────────────────────────────────────────────────
 
 _DECOMPOSER = ChordDecomposer()
+_REASSEMBLER = ChordReassembler()
 
 
 def _components_to_quality(comp):
@@ -378,7 +381,10 @@ def sample_labels_at_frames(intervals, labels, fps):
 # ───────────────────────────────────────────────────────────────────────
 
 def _decompose_labels(sampled_labels):
-    """Decompõe uma lista de chord labels em componentes + quality derivada.
+    """Decompõe uma lista de chord labels em componentes + quality + chord canônico.
+
+    Cada label passa por decompose → reassemble para produzir uma forma
+    canônica (bemóis → sustenidos, bass normalizado, sem redundâncias).
 
     Returns
     -------
@@ -386,15 +392,19 @@ def _decompose_labels(sampled_labels):
         Mapa {component_name: [label_por_frame]} para cada um dos 9 componentes.
     qualities : list[str]
         Quality derivada (via _components_to_quality) por frame.
+    canonical : list[str]
+        Chord label canônico (via decompose+reassemble) por frame.
     """
     components = {comp: [] for comp in COMPONENT_NAMES}
     qualities = []
+    canonical = []
     for label in sampled_labels:
         comp = _DECOMPOSER.decompose(label)
         for name in COMPONENT_NAMES:
             components[name].append(comp[name])
         qualities.append(_components_to_quality(comp))
-    return components, qualities
+        canonical.append(_REASSEMBLER.reassemble(comp))
+    return components, qualities, canonical
 
 
 def compute_frame_metrics(inference_dir, gt_dir, fps=100):
@@ -457,16 +467,16 @@ def compute_frame_metrics(inference_dir, gt_dir, fps=100):
             ref_sampled = ref_sampled[:n]
             est_sampled = est_sampled[:n]
 
-            ref_comp, ref_q = _decompose_labels(ref_sampled)
-            est_comp, est_q = _decompose_labels(est_sampled)
+            ref_comp, ref_q, ref_canon = _decompose_labels(ref_sampled)
+            est_comp, est_q, est_canon = _decompose_labels(est_sampled)
 
             for comp in COMPONENT_NAMES:
                 all_ref_comp[comp].extend(ref_comp[comp])
                 all_est_comp[comp].extend(est_comp[comp])
             all_ref_quals.extend(ref_q)
             all_est_quals.extend(est_q)
-            all_ref_chords.extend(ref_sampled)
-            all_est_chords.extend(est_sampled)
+            all_ref_chords.extend(ref_canon)
+            all_est_chords.extend(est_canon)
 
             stat = {
                 "track": os.path.splitext(track_id)[0],
