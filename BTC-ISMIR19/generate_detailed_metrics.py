@@ -411,8 +411,10 @@ def compute_frame_metrics(inference_dir, gt_dir, fps=100):
     Returns
     -------
     tuple ou None
-        (all_ref_comp, all_est_comp, all_ref_quals, all_est_quals, track_stats)
-        onde all_ref_comp / all_est_comp são dicts {component: list[str]}.
+        (all_ref_comp, all_est_comp, all_ref_quals, all_est_quals,
+         all_ref_chords, all_est_chords, track_stats)
+        onde all_ref_comp / all_est_comp são dicts {component: list[str]}
+        e all_ref_chords / all_est_chords são os chord labels originais.
         Retorna None se nenhuma track foi casada.
     """
     inference_files = glob.glob(os.path.join(inference_dir, "*.lab"))
@@ -424,6 +426,7 @@ def compute_frame_metrics(inference_dir, gt_dir, fps=100):
     all_ref_comp = {comp: [] for comp in COMPONENT_NAMES}
     all_est_comp = {comp: [] for comp in COMPONENT_NAMES}
     all_ref_quals, all_est_quals = [], []
+    all_ref_chords, all_est_chords = [], []
     track_stats = []
 
     for inf_file in sorted(inference_files):
@@ -462,6 +465,8 @@ def compute_frame_metrics(inference_dir, gt_dir, fps=100):
                 all_est_comp[comp].extend(est_comp[comp])
             all_ref_quals.extend(ref_q)
             all_est_quals.extend(est_q)
+            all_ref_chords.extend(ref_sampled)
+            all_est_chords.extend(est_sampled)
 
             stat = {
                 "track": os.path.splitext(track_id)[0],
@@ -482,7 +487,8 @@ def compute_frame_metrics(inference_dir, gt_dir, fps=100):
     if not track_stats:
         return None
 
-    return all_ref_comp, all_est_comp, all_ref_quals, all_est_quals, track_stats
+    return (all_ref_comp, all_est_comp, all_ref_quals, all_est_quals,
+            all_ref_chords, all_est_chords, track_stats)
 
 
 def classification_metrics(y_true, y_pred, class_order=None):
@@ -633,7 +639,8 @@ def main():
         print("\nNo tracks matched.")
         return
 
-    all_ref_comp, all_est_comp, ref_quals, est_quals, track_stats = result
+    (all_ref_comp, all_est_comp, ref_quals, est_quals,
+     ref_chords, est_chords, track_stats) = result
     total_frames = len(all_ref_comp["root"])
     n_tracks = len(track_stats)
 
@@ -718,6 +725,23 @@ def main():
             ),
         )
 
+    # ── Full chord analysis (acorde completo, sem PNG) ─────────────
+    fc_acc, fc_cls, fc_macro, fc_micro, fc_wtd = classification_metrics(
+        ref_chords, est_chords
+    )
+    fc_cls_path = os.path.join(
+        args.output_dir, f"{args.prefix}_full_chord_per_class.csv"
+    )
+    fc_cls.to_csv(fc_cls_path)
+    print(f"  full chord per-class: {fc_cls_path}")
+
+    fc_cm = build_confusion(ref_chords, est_chords)
+    fc_cm_path = os.path.join(
+        args.output_dir, f"{args.prefix}_full_chord_confusion_matrix.csv"
+    )
+    fc_cm.to_csv(fc_cm_path)
+    print(f"  full chord conf mat : {fc_cm_path}")
+
     # ── Summary ──────────────────────────────────────────────────────
     summary = {
         "num_tracks": n_tracks,
@@ -741,6 +765,13 @@ def main():
     summary["quality_recall_macro"] = qual_macro["recall"]
     summary["quality_precision_weighted"] = qual_wtd["precision"]
     summary["quality_recall_weighted"] = qual_wtd["recall"]
+
+    summary["full_chord_accuracy"] = fc_acc
+    summary["full_chord_f1_macro"] = fc_macro["f1"]
+    summary["full_chord_f1_weighted"] = fc_wtd["f1"]
+    summary["full_chord_precision_weighted"] = fc_wtd["precision"]
+    summary["full_chord_recall_weighted"] = fc_wtd["recall"]
+    summary["full_chord_num_classes"] = len(fc_cls)
 
     df_summary = pd.DataFrame([summary])
     summary_path = os.path.join(args.output_dir, f"{args.prefix}_summary.csv")
@@ -766,6 +797,13 @@ def main():
           f"R={qual_macro['recall']:.4f}  F1={qual_macro['f1']:.4f}")
     print(f"    Weighted : P={qual_wtd['precision']:.4f}  "
           f"R={qual_wtd['recall']:.4f}  F1={qual_wtd['f1']:.4f}")
+    print()
+    print(f"  FULL CHORD ({len(fc_cls)} distinct classes)")
+    print(f"    Accuracy : {fc_acc:.4f}")
+    print(f"    Macro    : P={fc_macro['precision']:.4f}  "
+          f"R={fc_macro['recall']:.4f}  F1={fc_macro['f1']:.4f}")
+    print(f"    Weighted : P={fc_wtd['precision']:.4f}  "
+          f"R={fc_wtd['recall']:.4f}  F1={fc_wtd['f1']:.4f}")
     print("=" * 70)
 
 
