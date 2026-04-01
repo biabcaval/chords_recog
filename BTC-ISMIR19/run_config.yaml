@@ -34,7 +34,7 @@ experiment:
     - queen
     - robbiewilliams
     - rwc
-    - balanced_v1_train
+    - balanced_v1_full
 
 class_weights:
   enabled: True

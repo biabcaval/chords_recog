@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.preprocess import Preprocess, FeatureTypes
 from utils.hparams import HParams
 from utils.chord_decomposition import ChordDecomposer
+from utils.mir_eval_modules import idx2voca_chord
 
 
 def decompose_preprocessed_data(data_dir, output_dir, force=False):
@@ -41,8 +42,9 @@ def decompose_preprocessed_data(data_dir, output_dir, force=False):
     # Create output directory
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Initialize decomposer
+    # Initialize decomposer and index-to-chord mapping
     decomposer = ChordDecomposer()
+    idx2chord = idx2voca_chord()
     
     # Find all .pt files recursively
     pt_files = list(data_path.rglob('*.pt'))
@@ -77,17 +79,16 @@ def decompose_preprocessed_data(data_dir, output_dir, force=False):
             # Convert chords to strings if needed
             if isinstance(chords, torch.Tensor):
                 if chords.dtype in [torch.long, torch.int]:
-                    failed.append((pt_file.name, "Index-based labels"))
-                    continue
-                chord_list = [str(c) for c in chords]
+                    chord_list = [idx2chord.get(int(c), 'N') for c in chords]
+                else:
+                    chord_list = [str(c) for c in chords]
             elif isinstance(chords, np.ndarray):
                 if chords.dtype in (np.int64, np.int32, np.int16):
-                    failed.append((pt_file.name, "Index-based labels"))
-                    continue
-                chord_list = [str(c) for c in chords]
-            elif isinstance(chords, list) and chords and hasattr(chords[0], '__int__'):
-                failed.append((pt_file.name, "Index-based labels"))
-                continue
+                    chord_list = [idx2chord.get(int(c), 'N') for c in chords]
+                else:
+                    chord_list = [str(c) for c in chords]
+            elif isinstance(chords, list) and chords and isinstance(chords[0], int):
+                chord_list = [idx2chord.get(c, 'N') for c in chords]
             else:
                 chord_list = list(chords)
             
@@ -139,11 +140,17 @@ def decompose_preprocessed_data(data_dir, output_dir, force=False):
     print(f"Successfully converted: {successful}/{len(pt_files)}")
     print(f"Output directory: {output_dir}")
     
-    if failed and len(failed) <= 10:
+    if failed:
+        from collections import Counter
+        reason_counts = Counter(reason for _, reason in failed)
         print(f"Failed: {len(failed)}")
-        print("\nFailed files:")
-        for filename, reason in failed:
-            print(f"  - {filename}: {reason}")
+        print("\nFailure breakdown:")
+        for reason, count in reason_counts.most_common():
+            print(f"  - {reason}: {count} files")
+        if len(failed) <= 10:
+            print("\nFailed files:")
+            for filename, reason in failed:
+                print(f"  - {filename}: {reason}")
     
     return successful > 0
 

@@ -51,6 +51,8 @@ DATASET_AUDIO_SUBDIR = {
     "dj_avan_songbook2": "dj_avan_songbook2/audio",
     "queen": "queen/audio",
     "robbiewilliams": "robbiewilliams/audio",
+    "balanced_v1_test": "personalized_datasets/balanced_v1_test/audio",
+    "balanced_v1_full": "personalized_datasets/balanced_v1_full/audio",
 }
 
 DATASET_SHORT = {
@@ -61,6 +63,8 @@ DATASET_SHORT = {
     "dj_avan_songbook2": "Dj2",
     "queen": "Qu",
     "robbiewilliams": "Ro",
+    "balanced_v1_test": "Bal",
+    "balanced_v1_full": "BalF",
 }
 
 

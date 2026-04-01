@@ -251,6 +251,7 @@ DATASET_SHORT = {
     'robbiewilliams': 'Ro',
     'robbie': 'Ro',
     'balanced_v1_test': 'Bal',
+    'balanced_v1_full': 'BalF',
 }
 
 DATASET_AUDIO_DIRS = {
@@ -262,6 +263,7 @@ DATASET_AUDIO_DIRS = {
     'queen': '/home/daniel.melo/datasets/queen/audio',
     'robbiewilliams': '/home/daniel.melo/datasets/robbiewilliams/audio',
     'balanced_v1_test': '/home/daniel.melo/datasets/personalized_datasets/balanced_v1_test/audio',
+    'balanced_v1_full': '/home/daniel.melo/datasets/personalized_datasets/balanced_v1_full/audio',
 }
 
 
