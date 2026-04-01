@@ -409,7 +409,7 @@ class Preprocess():
                     idx = 0
 
                     try:
-                        chord_info = self.Chord_class.get_converted_chord_voca(os.path.join(lab_path))
+                        chord_info = self.Chord_class.get_converted_chord_full(os.path.join(lab_path))
                     except Exception as e:
                         print(e)
                         print(pid, " chord lab file error : %s" % song_name)
@@ -451,6 +451,7 @@ class Preprocess():
                         root_list = []
                         quality_list = []
                         bass_list = []
+                        chord_label_list = []
                         
                         # extract chord per 1/self.time_interval
                         while curSec < inst_start_sec + mp3_config['inst_len']:
@@ -464,6 +465,7 @@ class Preprocess():
                                     root = available_chords['root'].iloc[0]
                                     quality = available_chords['quality'].iloc[0]
                                     bass = available_chords['bass'].iloc[0]
+                                    chord_label = available_chords['chord_label'].iloc[0]
                                 elif len(available_chords) > 1:
                                     max_starts = available_chords.apply(lambda row: max(row['start'], curSec),axis=1)
                                     available_chords['max_start'] = max_starts
@@ -476,16 +478,19 @@ class Preprocess():
                                     root = available_chords.loc[max_idx, 'root']
                                     quality = available_chords.loc[max_idx, 'quality']
                                     bass = available_chords.loc[max_idx, 'bass']
+                                    chord_label = available_chords.loc[max_idx, 'chord_label']
                                 else:
                                     chord = 169
                                     root = 12  # No chord
                                     quality = 14  # No chord quality
                                     bass = 12  # No bass
+                                    chord_label = 'N'
                             except Exception as e:
                                 chord = 169
                                 root = 12
                                 quality = 14
                                 bass = 12
+                                chord_label = 'N'
                                 print(e)
                                 print(pid, "no chord")
                                 raise RuntimeError()
@@ -501,10 +506,15 @@ class Preprocess():
                                 if bass != 12:  # If not "no bass"
                                     bass = (bass + shift_factor) % 12
 
+                                # Transpose the full chord label string
+                                chord_label = self.Chord_class.transpose_chord_label(
+                                    chord_label, shift_factor)
+
                                 chord_list.append(chord)
                                 root_list.append(root)
                                 quality_list.append(quality)
                                 bass_list.append(bass)
+                                chord_label_list.append(chord_label)
                                 curSec += self.time_interval
 
                         if len(chord_list) == self.no_of_chord_datapoints_per_sequence:
@@ -551,6 +561,7 @@ class Preprocess():
                                         'root': root_list,
                                         'quality': quality_list,
                                         'bass': bass_list,
+                                        'original_chord_labels': chord_label_list,
                                         'etc': etc
                                     }
 

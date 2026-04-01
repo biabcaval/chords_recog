@@ -615,3 +615,107 @@ class Chords:
                     ref_labels[i] = ref_labels[i][:ref_labels[i].find('min')] + ':' + ref_labels[i][ref_labels[i].find('min'):]
         return ref_labels
 
+    def get_converted_chord_full(self, filename):
+        """Like get_converted_chord_voca but also preserves the full chord label
+        string (with extensions) in a ``chord_label`` column.
+
+        The ``chord_id``, ``root``, ``quality``, and ``bass`` columns are
+        computed the same way as in ``get_converted_chord_voca`` for backward
+        compatibility.  The additional ``chord_label`` column contains the
+        original label after ``lab_file_error_modify`` -- crucially, *without*
+        ``reduce_extended_chords``, so 9th/11th/13th and bass inversions are
+        kept.
+        """
+        loaded_chord = self.load_chords(filename)
+        triads = self.reduce_to_triads(loaded_chord['chord'])
+        df = pd.DataFrame(data=triads[['root', 'is_major']])
+
+        (ref_intervals, ref_labels) = mir_eval.io.load_labeled_intervals(filename)
+        ref_labels = self.lab_file_error_modify(ref_labels)
+
+        idxs, roots, qualities, basses, chord_labels = [], [], [], [], []
+
+        for label in ref_labels:
+            chord_labels.append(label)
+
+            chord_root, quality, scale_degrees, bass = mir_eval.chord.split(
+                label, reduce_extended_chords=True)
+            if '6' in scale_degrees:
+                if quality == 'maj':
+                    quality = 'maj6'
+                elif quality == 'min':
+                    quality = 'min6'
+            root, bass_note, ivs, is_major = self.chord(label)
+
+            idxs.append(self.convert_to_id_voca(root=root, quality=quality))
+            roots.append(root if root != -1 else 12)
+            qualities.append(self.quality_to_id(quality))
+            if root == -1:
+                basses.append(12)
+            else:
+                basses.append(bass_note)
+
+        df['chord_id'] = idxs
+        df['root'] = roots
+        df['quality'] = qualities
+        df['bass'] = basses
+        df['chord_label'] = chord_labels
+        df['start'] = loaded_chord['start']
+        df['end'] = loaded_chord['end']
+
+        return df
+
+    @staticmethod
+    def transpose_chord_label(label, semitones):
+        """Transpose a chord label string by *semitones* semitones.
+
+        Handles ``Root:Quality/Bass`` where Root and Bass are pitch-class names.
+        Scale-degree bass (e.g. ``/5``, ``/b3``) is left untouched since it is
+        relative.  ``N`` and ``X`` are returned unchanged.
+
+        Examples::
+
+            transpose_chord_label('C:maj9/E', 2)   -> 'D:maj9/F#'
+            transpose_chord_label('A#:min7', -3)    -> 'G:min7'
+            transpose_chord_label('Bb:7/Ab', 1)     -> 'B:7/A'
+        """
+        _PITCH_CLASSES = ['C', 'C#', 'D', 'D#', 'E', 'F',
+                          'F#', 'G', 'G#', 'A', 'A#', 'B']
+        _FLAT_MAP = {
+            'Cb': 'B', 'Db': 'C#', 'Eb': 'D#', 'Fb': 'E',
+            'Gb': 'F#', 'Ab': 'G#', 'Bb': 'A#',
+        }
+
+        if label in ('N', 'X') or semitones == 0:
+            return label
+
+        def _shift_note(note_str):
+            n = _FLAT_MAP.get(note_str, note_str)
+            if n in _PITCH_CLASSES:
+                return _PITCH_CLASSES[(_PITCH_CLASSES.index(n) + semitones) % 12]
+            return note_str
+
+        slash_idx = label.find('/')
+        colon_idx = label.find(':')
+
+        if colon_idx == -1 and slash_idx == -1:
+            return _shift_note(label)
+
+        if colon_idx == -1:
+            root_str = label[:slash_idx]
+            bass_str = label[slash_idx + 1:]
+            new_root = _shift_note(root_str)
+            new_bass = _shift_note(bass_str)
+            return f'{new_root}/{new_bass}'
+
+        root_str = label[:colon_idx]
+        new_root = _shift_note(root_str)
+
+        if slash_idx == -1:
+            return f'{new_root}{label[colon_idx:]}'
+
+        quality_str = label[colon_idx:slash_idx]
+        bass_str = label[slash_idx + 1:]
+        new_bass = _shift_note(bass_str)
+        return f'{new_root}{quality_str}/{new_bass}'
+

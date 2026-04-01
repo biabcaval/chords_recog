@@ -26,27 +26,33 @@ from utils.chord_decomposition import ChordDecomposer
 from utils.mir_eval_modules import idx2voca_chord
 
 
-def decompose_preprocessed_data(data_dir, output_dir, force=False):
+def decompose_preprocessed_data(data_dir, output_dir, force=False, log_file=None):
     """
-    Convert preprocessed data from 170-chord to 9-component decomposed format.
+    Convert preprocessed data from Step 1 to 9-component decomposed format.
+
+    Prefers the ``original_chord_labels`` field (full chord strings with
+    extensions) when available.  Falls back to converting 170-class integer
+    indices via ``idx2voca_chord`` for legacy .pt files.
     
     Args:
         data_dir: Directory with preprocessed .pt files
         output_dir: Directory to save decomposed files
         force: Overwrite existing files
+        log_file: Optional path to write a CSV mapping each unique chord label
+                  to its 9 decomposed components.
     """
-    
+    from collections import Counter
+
+    COMP_NAMES = ['root', 'bass', 'triad', 'misc', '6th', '7th', '9th', '11th', '13th']
+
     data_path = Path(data_dir)
     output_path = Path(output_dir)
     
-    # Create output directory
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Initialize decomposer and index-to-chord mapping
     decomposer = ChordDecomposer()
     idx2chord = idx2voca_chord()
     
-    # Find all .pt files recursively
     pt_files = list(data_path.rglob('*.pt'))
     
     if not pt_files:
@@ -57,74 +63,80 @@ def decompose_preprocessed_data(data_dir, output_dir, force=False):
     
     successful = 0
     failed = []
-    
+    label_source_counts = Counter()
+    extension_counts = Counter()
+    unique_decompositions = {}
+
     for pt_file in tqdm(pt_files, desc="Converting to decomposed format"):
         try:
-            # Load original data
             data = torch.load(pt_file, map_location='cpu', weights_only=False)
             
-            # Extract components
             if isinstance(data, dict):
                 features = data.get('feature', data.get('cqt'))
-                chords = data.get('original_chord_labels',
-                                  data.get('chord_str',
-                                  data.get('chord')))
             else:
-                features, chords = data[:2]
+                features = data[0] if len(data) > 0 else None
             
             if features is None:
                 failed.append((pt_file.name, "No features found"))
                 continue
-            
-            # Convert chords to strings if needed
-            if isinstance(chords, torch.Tensor):
-                if chords.dtype in [torch.long, torch.int]:
-                    chord_list = [idx2chord.get(int(c), 'N') for c in chords]
-                else:
-                    chord_list = [str(c) for c in chords]
-            elif isinstance(chords, np.ndarray):
-                if chords.dtype in (np.int64, np.int32, np.int16):
-                    chord_list = [idx2chord.get(int(c), 'N') for c in chords]
-                else:
-                    chord_list = [str(c) for c in chords]
-            elif isinstance(chords, list) and chords and isinstance(chords[0], int):
-                chord_list = [idx2chord.get(c, 'N') for c in chords]
+
+            # --- Resolve chord labels (prefer full strings) ----------------
+            if isinstance(data, dict) and 'original_chord_labels' in data:
+                chord_list = list(data['original_chord_labels'])
+                label_source_counts['original_chord_labels'] += 1
+            elif isinstance(data, dict) and 'chord_str' in data:
+                chord_list = list(data['chord_str'])
+                label_source_counts['chord_str'] += 1
             else:
-                chord_list = list(chords)
-            
-            # Decompose each chord
+                chords = data.get('chord') if isinstance(data, dict) else data[1]
+                if isinstance(chords, torch.Tensor):
+                    if chords.dtype in [torch.long, torch.int]:
+                        chord_list = [idx2chord.get(int(c), 'N') for c in chords]
+                    else:
+                        chord_list = [str(c) for c in chords]
+                elif isinstance(chords, np.ndarray):
+                    if chords.dtype in (np.int64, np.int32, np.int16):
+                        chord_list = [idx2chord.get(int(c), 'N') for c in chords]
+                    else:
+                        chord_list = [str(c) for c in chords]
+                elif isinstance(chords, list) and chords and isinstance(chords[0], int):
+                    chord_list = [idx2chord.get(c, 'N') for c in chords]
+                else:
+                    chord_list = list(chords)
+                label_source_counts['index_fallback'] += 1
+
+            # --- Decompose -------------------------------------------------
             decomposed_list = []
             for chord_str in chord_list:
                 try:
                     decomposed = decomposer.decompose(chord_str)
                     decomposed_list.append(decomposed)
-                except Exception as e:
-                    # Fallback: use chord as root
-                    decomposed_list.append({
-                        'root': chord_str,
-                        'bass': 'N',
-                        'triad': 'N',
-                        'misc': 'N',
-                        '7': 'N',
-                        '9': 'N',
-                        '11': 'N',
-                        '13': 'N'
-                    })
+                except Exception:
+                    decomposed_list.append({name: 'N' for name in COMP_NAMES})
+
+                if chord_str not in unique_decompositions:
+                    unique_decompositions[chord_str] = decomposed_list[-1]
+
+            for d in decomposed_list:
+                for ext in ('9th', '11th', '13th'):
+                    if d.get(ext, 'N') != 'N':
+                        extension_counts[ext] += 1
+                if d.get('bass', 'N') != 'N':
+                    extension_counts['bass_inversion'] += 1
             
-            # Create output file preserving directory structure
+            # --- Write output -----------------------------------------------
             rel_path = pt_file.relative_to(data_path)
             output_file = output_path / rel_path
             output_file.parent.mkdir(parents=True, exist_ok=True)
             
-            # Skip if exists and not forcing
             if output_file.exists() and not force:
                 successful += 1
                 continue
             
-            # Save decomposed format
             decomposed_data = {
                 'feature': features,
                 'decomposed_chord': decomposed_list,
+                'original_chord_labels': chord_list,
                 'original_chords': chord_list,
             }
             
@@ -134,17 +146,57 @@ def decompose_preprocessed_data(data_dir, output_dir, force=False):
         except Exception as e:
             failed.append((pt_file.name, str(e)))
     
-    # Summary
+    # --- Summary -----------------------------------------------------------
     print(f"\n{'='*70}")
     print(f"Conversion Complete!")
     print(f"Successfully converted: {successful}/{len(pt_files)}")
     print(f"Output directory: {output_dir}")
-    
+
+    print(f"\nLabel source breakdown:")
+    for source, count in label_source_counts.most_common():
+        marker = " (full strings)" if source == 'original_chord_labels' else \
+                 " (WARNING: 170-idx fallback, extensions lost)" if source == 'index_fallback' else ""
+        print(f"  - {source}: {count} files{marker}")
+
+    if extension_counts:
+        print(f"\nExtension / inversion frames detected:")
+        for ext, count in extension_counts.most_common():
+            print(f"  - {ext}: {count} frames")
+    else:
+        print(f"\nWARNING: No extensions (9th/11th/13th) or bass inversions detected.")
+        print(f"  If the .lab files contain extensions, the preprocessing may")
+        print(f"  still be using the 170-index fallback path.")
+
+    print(f"\nUnique chord labels decomposed: {len(unique_decompositions)}")
+
+    # --- Write decomposition log -------------------------------------------
+    if log_file:
+        log_path = Path(log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, 'w', encoding='utf-8') as f:
+            header = 'original_label,' + ','.join(COMP_NAMES)
+            f.write(header + '\n')
+            for label in sorted(unique_decompositions.keys()):
+                comps = unique_decompositions[label]
+                vals = [comps.get(c, 'N') for c in COMP_NAMES]
+                f.write(f'{label},' + ','.join(vals) + '\n')
+        print(f"Decomposition log written to: {log_path}")
+
+        non_trivial = [l for l, d in unique_decompositions.items()
+                       if any(d.get(c, 'N') != 'N'
+                              for c in ('9th', '11th', '13th'))
+                       or (d.get('bass', 'N') != 'N')]
+        if non_trivial:
+            print(f"\nSample labels with extensions / inversions ({min(len(non_trivial), 20)} shown):")
+            for label in non_trivial[:20]:
+                d = unique_decompositions[label]
+                parts = [f"{c}={d.get(c,'N')}" for c in COMP_NAMES if d.get(c, 'N') != 'N']
+                print(f"  {label:30s} -> {', '.join(parts)}")
+
     if failed:
-        from collections import Counter
         reason_counts = Counter(reason for _, reason in failed)
-        print(f"Failed: {len(failed)}")
-        print("\nFailure breakdown:")
+        print(f"\nFailed: {len(failed)}")
+        print("Failure breakdown:")
         for reason, count in reason_counts.most_common():
             print(f"  - {reason}: {count} files")
         if len(failed) <= 10:
@@ -156,7 +208,7 @@ def decompose_preprocessed_data(data_dir, output_dir, force=False):
 
 
 def preprocess_datasets_decomposed(config_path, root_dir, dataset_names, 
-                                   num_workers=1, force=False):
+                                   num_workers=1, force=False, log_file=None):
     """
     Preprocess datasets to decomposed format.
     
@@ -278,10 +330,14 @@ def preprocess_datasets_decomposed(config_path, root_dir, dataset_names,
             print(f"  Input:  {intermediate_dir}")
             print(f"  Output: {output_dir}")
             
+            ds_log = None
+            if log_file:
+                ds_log = str(Path(log_file).with_suffix('')) + f'_{dataset_name}.csv'
             decompose_preprocessed_data(
                 intermediate_dir, 
                 output_dir, 
-                force=force
+                force=force,
+                log_file=ds_log,
             )
         else:
             print(f"\nSkipping {dataset_name} (not found at {intermediate_dir})")
@@ -327,6 +383,13 @@ def main():
         action='store_true',
         help='Force preprocessing even if data already exists'
     )
+    parser.add_argument(
+        '--log_file',
+        type=str,
+        default=None,
+        help='Write a CSV log mapping each unique chord label to its '
+             '9 decomposed components (one file per dataset)'
+    )
     
     args = parser.parse_args()
     
@@ -339,7 +402,8 @@ def main():
         root_dir=root_dir,
         dataset_names=args.datasets,
         num_workers=args.num_workers,
-        force=args.force
+        force=args.force,
+        log_file=args.log_file,
     )
     
     sys.exit(0 if success else 1)
