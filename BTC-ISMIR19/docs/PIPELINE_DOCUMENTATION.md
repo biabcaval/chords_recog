@@ -144,33 +144,61 @@ A normalização é aplicada on-the-fly no `AudioDatasetStructured.__getitem__()
 
 ### 2.4 Estrutura dos Arquivos `.pt`
 
-Cada segmento é salvo como um arquivo PyTorch:
+Cada segmento é salvo como um arquivo PyTorch. Após o preprocessing atualizado (com bypass do funil de 170 classes), a estrutura é:
 
 ```python
 {
     'feature': np.array,              # Shape: (252, 108) - CQT features
-    'chord': list,                    # Lista de índices de acordes por frame
-    'original_chords': list,          # Índices originais (backup)
-    'original_chord_labels': list,    # Labels originais com extensões (ex: 'C:maj7(9)')
+    'chord': list,                    # Lista de índices 170-vocab por frame (retrocompatibilidade)
+    'root': list,                     # Índices root por frame (0-12)
+    'quality': list,                  # Índices quality por frame (0-15)
+    'bass': list,                     # Índices bass por frame (0-12)
+    'original_chord_labels': list,    # Labels COMPLETAS do .lab com extensões e inversões
+    'etc': str,                       # Metadado de timing do segmento
 }
 ```
 
-> **Nota**: O campo `original_chord_labels` contém os labels originais dos arquivos `.lab` 
-> com extensões completas (ex: `C:maj7(9)`, `B:7(b9)`). Este campo é adicionado pelo script
-> `scripts/add_original_labels.py` e permite capturar extensões 9th, 11th, 13th que são
-> simplificadas no vocabulário padrão de 170 classes.
+O campo **`original_chord_labels`** é a peça central: contém as strings originais dos arquivos `.lab` (ex: `C:maj7(9)`, `A:min7/E`, `F:sus4(b7,9)`), com pitch shift aplicado via `transpose_chord_label()`. Este campo preserva extensões (9th, 11th, 13th) e inversões de bass que o campo `chord` (índices 170 classes) perde.
+
+O `AudioDatasetStructured.__getitem__` prioriza `original_chord_labels` quando disponível, garantindo que as 9 heads de decomposição recebam labels completas para treino.
 
 **Localização:** `/datasets/result/{dataset}_voca/22050_10.0_5.0/cqt_252_36_2048/{song}/`
 
-### 2.5 Adicionando Labels Originais aos Arquivos .pt
+### 2.5 Bypass do Funil de 170 Classes
 
-O pré-processamento original simplifica as anotações de acordes, perdendo extensões como `(9)`, `(b9)`, `(#11)`. Para recuperar essas extensões:
+O pipeline original convertia labels de acordes para um índice de 170 classes via `reduce_extended_chords=True`, destruindo extensões e inversões. O pipeline atualizado mantém retrocompatibilidade (campo `chord` com índices) mas adiciona `original_chord_labels` com as strings completas.
+
+**Fluxo atualizado no Step 1 (`generate_labels_features_voca`):**
+
+1. `get_converted_chord_full()` lê o `.lab` e gera DataFrame com `chord_id` (170-idx, compat.) **e** `chord_label` (string completa)
+2. No loop de alinhamento temporal, coleta tanto `chord_list` (índices) quanto `chord_label_list` (strings)
+3. `transpose_chord_label(label, shift)` transpõe root e bass nas strings para data augmentation
+4. Ambos os campos são salvos no `.pt`
+
+**Fluxo no Step 2 (`decompose_preprocessed_data`):**
+
+1. Detecta se o `.pt` tem `original_chord_labels` (strings completas) ou apenas `chord` (índices)
+2. Se tem strings: usa-as diretamente para decomposição — sem perda de informação
+3. Se só tem índices: faz fallback via `idx2voca_chord()` (comportamento anterior, com warning)
+4. Log detalhado mostra a fonte dos labels e contagem de extensões detectadas
+
+**Para reprocessar com labels completas:**
 
 ```bash
-# Dry-run (apenas mostra o que seria feito)
-python scripts/add_original_labels.py --data_root /path/to/datasets --dry_run
+# Deletar dados antigos e reprocessar
+rm -rf /path/to/datasets/result/{dataset}_voca/
+rm -rf /path/to/datasets/result_decomposed/{dataset}_voca/
+python scripts/preprocess_decomposed.py --datasets {dataset} --num_workers 16 --force --log_file decomposition_log.csv
+```
 
-# Executar (adiciona o campo original_chord_labels aos .pt)
+O log CSV gerado mapeia cada label única à sua decomposição em 9 componentes, útil para diagnóstico.
+
+### 2.6 Adicionando Labels Originais a Arquivos .pt Legados
+
+Para arquivos `.pt` antigos que não têm `original_chord_labels`, o script `add_original_labels.py` pode adicionar o campo retroativamente:
+
+```bash
+python scripts/add_original_labels.py --data_root /path/to/datasets --dry_run
 python scripts/add_original_labels.py --data_root /path/to/datasets
 ```
 
@@ -1171,79 +1199,105 @@ for t in range(10):  # Primeiros 10 frames
     print(f"{time_sec:.2f}s: {chord}")
 ```
 
-### 8.5 HarmonicCRF: Decodificação Temporal com CRF
+### 8.5 CRF Harmônico: Decodificação Temporal
 
-O **HarmonicCRF** é um módulo opcional de pós-processamento que aplica um Campo Aleatório Condicional (CRF) sobre as predições de root e triad para suavizar a sequência temporal, evitando transições de acordes implausíveis.
+O CRF é um módulo opcional de pós-processamento que aplica um Campo Aleatório Condicional sobre as predições do ChordFormer para suavizar a sequência temporal, evitando transições de acordes implausíveis.
 
-#### Conceito
+Dois modos estão disponíveis, selecionáveis via `--crf_mode`:
 
-Em vez de fazer argmax frame a frame (que pode oscilar entre acordes semelhantes), o CRF combina os logits de root (13 classes) e triad (7 classes) em 91 tags conjuntas (root × triad) e aplica o algoritmo de Viterbi para encontrar a sequência globalmente ótima.
+#### Modo `root_triad` (HarmonicCRF — padrão)
+
+Combina os logits de root (13 classes) e triad (7 classes) em 91 tags conjuntas e aplica Viterbi. Extensões (bass, 7th, 9th, etc.) resolvidas por argmax independente.
 
 ```
 ChordFormer (congelado) → 9 head logits
     → HarmonicCRF:
-        1. Potencial de observação: log P(root) + log P(triad) = (B, T, 91)
-        2. Viterbi com transições aprendidas (91×91)
+        1. Potencial: log P(root) + log P(triad) = (B, T, 91)
+        2. Viterbi com transições aprendidas (91×91, ~8k params)
         3. Decodifica tag → root + triad
-    → Extensões (bass, 7th, 9th, etc.) resolvidas por argmax
+    → Extensões via argmax
     → ChordReassembler → acorde final
 ```
 
-A matriz de transição (~8k parâmetros) é treinada em cima dos logits do ChordFormer congelado, aprendendo quais progressões harmônicas o modelo tende a produzir (ex: `C:maj → G:7` é comum, `C:maj → C#:dim` é raro).
+#### Modo `full` (FullChordCRF)
 
-#### Treino do HarmonicCRF
+Opera sobre o vocabulário completo de acordes observados nos dados de treino (~2000 tags). Todas as 9 heads contribuem para o potencial de observação:
 
-Após treinar o ChordFormer, treina-se o CRF separadamente (~minutos):
+```
+ChordFormer (congelado) → 9 head logits
+    → FullChordCRF:
+        1. Construção do vocab: scan dos .pt de treino → ~2000 labels únicas
+        2. Decomposition matrix: cada label → 9 component indices (pré-computado)
+        3. Potencial: soma log P(comp_i) para cada entrada do vocab = (B, T, ~2000)
+        4. Viterbi com transições aprendidas (~2000×2000, ~4M params)
+        5. Decodifica tag → lookup das 9 componentes na matrix
+    → ChordReassembler → acorde final
+```
+
+Este modo captura transições entre acordes completos — incluindo extensões (9th, 11th, 13th) e inversões de bass — que não são modeladas no modo `root_triad`.
+
+O vocabulário é construído automaticamente via `utils/chord_vocab_builder.py` com validação round-trip, e salvo no checkpoint do CRF para correspondência exata na inferência.
+
+#### Treino do CRF
+
+Após treinar o ChordFormer, treina-se o CRF separadamente:
 
 ```bash
+# Modo root_triad (padrão)
 python train_harmonic_crf.py \
     --checkpoint checkpoints/meu_run/model_best.pt \
     --config run_config.yaml \
     --train_datasets billboard queen robbiewilliams rwc jaah dj_avan_songbook2 \
     --crf_run_name harmonic_crf_BiQuRoRwJaDj2 \
+    --crf_mode root_triad \
+    --num_epochs 50
+
+# Modo full (vocabulário completo)
+python train_harmonic_crf.py \
+    --checkpoint checkpoints/meu_run/model_best.pt \
+    --config run_config.yaml \
+    --train_datasets billboard queen robbiewilliams rwc jaah dj_avan_songbook2 \
+    --crf_run_name crf_full_BiQuRoRwJaDj2 \
+    --crf_mode full \
     --num_epochs 50
 ```
 
 O script:
 1. Carrega o ChordFormer e congela todos os parâmetros
-2. Instancia o HarmonicCRF (91 tags, ~8k params treináveis)
-3. Loop de treino: logits congelados → CRF loss (NLL) → backprop só nos params do CRF
-4. Loga accuracy do CRF vs argmax (baseline) para medir o ganho
-5. Early stopping, salva `crf_best.pt`
+2. No modo `full`: escaneia os `.pt` de treino para construir o vocabulário, valida round-trip
+3. Instancia o CRF (91 ou ~2000 tags)
+4. Loop de treino: logits congelados → CRF loss (NLL) → backprop só nos params do CRF
+5. Loga accuracy do CRF vs argmax por componente para medir o ganho
+6. Early stopping, salva `crf_best.pt` (com vocab embutido no modo full)
 
 | Parâmetro | Default | Descrição |
 |---|---|---|
 | `--checkpoint` | (obrigatório) | Checkpoint do ChordFormer treinado |
+| `--crf_mode` | `root_triad` | Modo do CRF: `root_triad` (91 tags) ou `full` (~2000 tags) |
 | `--train_datasets` | config | Datasets para treino/validação |
 | `--num_epochs` | 50 | Épocas de treino do CRF |
 | `--learning_rate` | 0.01 | LR para parâmetros do CRF |
 | `--crf_run_name` | auto | Nome da run |
 | `--early_stop_patience` | 10 | Paciência para early stopping |
 
-#### Inferência com HarmonicCRF
+#### Inferência com CRF
 
 ```bash
 python run_inference_batch_decomposed.py \
     --checkpoint checkpoints/meu_run/model_best.pt \
-    --harmonic_crf checkpoints/harmonic_crf_BiQuRoRwJaDj2/crf_best.pt \
+    --harmonic_crf checkpoints/crf_full_BiQuRoRwJaDj2/crf_best.pt \
     --test_dataset dj_avan_songbook1 \
     --backbone chordformer
 ```
 
-O flag `--harmonic_crf` ativa a decodificação Viterbi. Sem o flag, o comportamento é idêntico ao anterior (argmax por frame).
+O flag `--harmonic_crf` ativa a decodificação Viterbi. O modo (root_triad ou full) é auto-detectado a partir do checkpoint. Sem o flag, o comportamento é idêntico ao anterior (argmax por frame).
 
 #### Arquivos
 
-- `models/harmonic_crf.py` — Módulo `HarmonicCRF` (potencial de observação, CRF, Viterbi, loss)
-- `models/crf_model.py` — CRF core reutilizado (transições, forward algorithm, Viterbi) — **legado, não modificado**
-- `train_harmonic_crf.py` — Script de treino do CRF
-
-#### Extensibilidade futura
-
-- Expandir para root × triad × 7th (91 × 4 = 364 tags)
-- Adicionar outros heads ao potencial de observação (bass, 7th)
-- Treinar end-to-end (descongelar ChordFormer)
-- Substituir transições aprendidas por penalidade fixa (comparação com baseline)
+- `models/harmonic_crf.py` — Módulos `HarmonicCRF` (root×triad) e `FullChordCRF` (vocab completo)
+- `models/crf_model.py` — CRF core (transições, forward algorithm, Viterbi) — compartilhado
+- `utils/chord_vocab_builder.py` — Construção e validação do vocabulário a partir dos dados de treino
+- `train_harmonic_crf.py` — Script de treino do CRF (ambos os modos)
 
 ---
 
@@ -1642,7 +1696,7 @@ BTC-ISMIR19/
 │   └── curriculum_learning.py        # Curriculum learning
 ├── models/
 │   ├── btc_model_decomposed.py       # ChordFormer decomposed + MultiTaskLoss + GradNorm
-│   ├── harmonic_crf.py               # HarmonicCRF — CRF root×triad para decodificação temporal
+│   ├── harmonic_crf.py               # HarmonicCRF (root×triad) e FullChordCRF (vocab completo)
 │   ├── crf_model.py                  # CRF core (transições, Viterbi, forward alg.) — legado, reutilizado
 │   ├── btc_model.py                  # Modelos legado (BTC, baselines)
 │   └── baseline_models.py            # CNN, CRNN, Crf wrapper (legado)
@@ -1651,19 +1705,22 @@ BTC-ISMIR19/
 │   ├── decomposed_inference.py       # DecomposedChordTrainer, Inference, Metrics, GradNorm update
 │   ├── transformer_modules.py        # ConformerEncoder, output layers
 │   ├── mir_eval_modules.py           # idx2voca_chord, scoring
-│   ├── preprocess.py                 # Feature extraction (CQT)
+│   ├── preprocess.py                 # Feature extraction (CQT) + original_chord_labels
+│   ├── chord_vocab_builder.py       # Construção de vocabulário de acordes para FullChordCRF
 │   ├── hparams.py                    # HParams (YAML config loader)
-│   └── chords.py                     # Chord vocab e intervalos
+│   └── chords.py                     # Chord vocab, intervalos, transpose_chord_label
 ├── scripts/
 │   ├── preprocess_datasets.py        # Preprocessing principal
 │   ├── preprocess_decomposed.py      # Preprocessing decomposed
-│   ├── add_original_labels.py        # Adiciona labels originais aos .pt
+│   ├── add_original_labels.py        # Adiciona labels originais aos .pt (legado)
+│   ├── merge_balanced_datasets.sh   # Unifica balanced_v1_train + test → full
+│   ├── validate_chord_labels.py     # Validação de labels: transpose, extensões, deltas
 │   ├── compute_normalization.py                # Calcula mean/std global para normalização
 │   ├── precompute_class_weights_decomposed.py  # Cache de class weights
 │   ├── diagnose_decomposition_mismatch.py      # Diagnóstico train/val
 │   └── convert_to_decomposed.py      # Converte .pt 170-class → decomposed
 ├── train_decomposed.py               # Treino ChordMax (ChordFormer + GradNorm + wandb)
-├── train_harmonic_crf.py             # Treino do HarmonicCRF (CRF sobre ChordFormer congelado)
+├── train_harmonic_crf.py             # Treino CRF (--crf_mode root_triad|full)
 ├── train_curriculum.py               # Treino legado
 ├── infer_decomposed.py               # Inferência janela única
 ├── infer_full_audio.py               # Inferência áudio completo (chunks)
