@@ -41,12 +41,16 @@ from models.btc_model_decomposed import (
     BTC_model_decomposed,
     ChordFormer_model_decomposed,
 )
-from models.harmonic_crf import HarmonicCRF
+from models.harmonic_crf import HarmonicCRF, FullChordCRF, CRF_MODE_CHOICES
 from data.audio_dataset_structured import (
     AudioDatasetStructured,
     AudioDataLoaderStructured,
 )
 from utils.chord_decomposition import COMPONENT_NAMES
+from utils.chord_vocab_builder import (
+    build_vocab_from_pt_files,
+    validate_vocab,
+)
 from utils.hparams import HParams
 
 logging.basicConfig(
@@ -104,6 +108,9 @@ def main():
                         help='Device')
     parser.add_argument('--normalization', type=str, default=None,
                         help='Path to normalization .pt file (mean/std)')
+    parser.add_argument('--crf_mode', type=str, default='root_triad',
+                        choices=CRF_MODE_CHOICES,
+                        help='CRF mode: root_triad (91 tags) or full (~2000 tags)')
     parser.add_argument('--early_stop_patience', type=int, default=10,
                         help='Stop after N epochs without improvement')
     parser.add_argument('--lr_decay_factor', type=float, default=0.5,
@@ -216,11 +223,37 @@ def main():
         val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4,
     )
 
-    # ── HarmonicCRF ──
+    # ── CRF ──
 
-    harmonic_crf = HarmonicCRF(n_roots=13, n_triads=7).to(device)
+    crf_mode = args.crf_mode
+    logger.info(f"CRF mode: {crf_mode}")
+
+    chord_vocab = None
+    chord_to_idx = None
+    component_matrix = None
+
+    if crf_mode == 'full':
+        logger.info("Building full-chord vocabulary from training data...")
+        chord_vocab, chord_to_idx, component_matrix = build_vocab_from_pt_files(
+            data_root, dataset_names, config,
+        )
+        valid = validate_vocab(chord_vocab, component_matrix)
+        if not valid:
+            logger.error("Vocab validation failed — aborting")
+            sys.exit(1)
+        logger.info(f"Full-chord vocab: {len(chord_vocab)} tags "
+                     f"(transition matrix: {len(chord_vocab)}x{len(chord_vocab)} "
+                     f"= {len(chord_vocab)**2:,} params)")
+        harmonic_crf = FullChordCRF(
+            chord_vocab=chord_vocab,
+            component_matrix=component_matrix,
+            chord_to_idx=chord_to_idx,
+        ).to(device)
+    else:
+        harmonic_crf = HarmonicCRF(n_roots=13, n_triads=7).to(device)
+
     crf_params = sum(p.numel() for p in harmonic_crf.parameters())
-    logger.info(f"HarmonicCRF parameters (trainable): {crf_params:,}")
+    logger.info(f"CRF parameters (trainable): {crf_params:,}")
 
     optimizer = optim.Adam(
         harmonic_crf.parameters(),
@@ -273,18 +306,20 @@ def main():
 
             train_losses.append(crf_loss.item())
 
-            # Accuracy: compare CRF-decoded root+triad vs GT
             with torch.no_grad():
                 crf_preds = harmonic_crf(logits)
-                root_correct = (crf_preds['root'] == labels['root']).sum().item()
-                triad_correct = (crf_preds['triad'] == labels['triad']).sum().item()
-                both_correct = (
-                    (crf_preds['root'] == labels['root']) &
-                    (crf_preds['triad'] == labels['triad'])
-                ).sum().item()
-                n = labels['root'].numel()
-                train_correct += both_correct
-                train_total += n
+                if crf_mode == 'full':
+                    all_match = torch.ones_like(labels['root'], dtype=torch.bool)
+                    for comp in COMPONENT_NAMES:
+                        all_match &= (crf_preds[comp] == labels[comp])
+                    train_correct += all_match.sum().item()
+                else:
+                    both_correct = (
+                        (crf_preds['root'] == labels['root']) &
+                        (crf_preds['triad'] == labels['triad'])
+                    ).sum().item()
+                    train_correct += both_correct
+                train_total += labels['root'].numel()
 
         train_loss = np.mean(train_losses)
         train_acc = train_correct / train_total if train_total > 0 else 0
@@ -292,15 +327,12 @@ def main():
         # ── Validate ──
         harmonic_crf.eval()
         val_losses = []
-        val_correct_root = 0
-        val_correct_triad = 0
-        val_correct_both = 0
+        val_correct_per_comp = {c: 0 for c in COMPONENT_NAMES}
+        val_correct_joint = 0
         val_total = 0
 
-        # Also track argmax-only accuracy for comparison
-        val_argmax_correct_root = 0
-        val_argmax_correct_triad = 0
-        val_argmax_correct_both = 0
+        val_argmax_correct_per_comp = {c: 0 for c in COMPONENT_NAMES}
+        val_argmax_correct_joint = 0
 
         with torch.no_grad():
             for batch in val_loader:
@@ -321,35 +353,30 @@ def main():
                 val_loss = harmonic_crf.loss(logits, labels)
                 val_losses.append(val_loss.item())
 
-                # CRF-decoded accuracy
                 crf_preds = harmonic_crf(logits)
-                val_correct_root += (crf_preds['root'] == labels['root']).sum().item()
-                val_correct_triad += (crf_preds['triad'] == labels['triad']).sum().item()
-                val_correct_both += (
-                    (crf_preds['root'] == labels['root']) &
-                    (crf_preds['triad'] == labels['triad'])
-                ).sum().item()
 
-                # Argmax baseline (what we'd get without CRF)
-                argmax_root = torch.argmax(logits['root'], dim=-1)
-                argmax_triad = torch.argmax(logits['triad'], dim=-1)
-                val_argmax_correct_root += (argmax_root == labels['root']).sum().item()
-                val_argmax_correct_triad += (argmax_triad == labels['triad']).sum().item()
-                val_argmax_correct_both += (
-                    (argmax_root == labels['root']) &
-                    (argmax_triad == labels['triad'])
-                ).sum().item()
+                crf_joint_match = torch.ones(batch_size, seq_len,
+                                             dtype=torch.bool, device=device)
+                argmax_joint_match = torch.ones(batch_size, seq_len,
+                                                dtype=torch.bool, device=device)
 
+                for comp in COMPONENT_NAMES:
+                    crf_match = (crf_preds[comp] == labels[comp])
+                    val_correct_per_comp[comp] += crf_match.sum().item()
+                    crf_joint_match &= crf_match
+
+                    argmax_pred = torch.argmax(logits[comp], dim=-1)
+                    argmax_match = (argmax_pred == labels[comp])
+                    val_argmax_correct_per_comp[comp] += argmax_match.sum().item()
+                    argmax_joint_match &= argmax_match
+
+                val_correct_joint += crf_joint_match.sum().item()
+                val_argmax_correct_joint += argmax_joint_match.sum().item()
                 val_total += labels['root'].numel()
 
         val_loss = np.mean(val_losses)
-        val_acc_root = val_correct_root / val_total if val_total > 0 else 0
-        val_acc_triad = val_correct_triad / val_total if val_total > 0 else 0
-        val_acc_both = val_correct_both / val_total if val_total > 0 else 0
-
-        argmax_acc_root = val_argmax_correct_root / val_total if val_total > 0 else 0
-        argmax_acc_triad = val_argmax_correct_triad / val_total if val_total > 0 else 0
-        argmax_acc_both = val_argmax_correct_both / val_total if val_total > 0 else 0
+        val_acc_joint = val_correct_joint / val_total if val_total > 0 else 0
+        argmax_acc_joint = val_argmax_correct_joint / val_total if val_total > 0 else 0
 
         # ── Logging ──
 
@@ -358,42 +385,38 @@ def main():
             f"Train loss: {train_loss:.4f} acc: {train_acc:.4f} | "
             f"Val loss: {val_loss:.4f}"
         )
-        logger.info(
-            f"  CRF     root: {val_acc_root:.4f}  triad: {val_acc_triad:.4f}  "
-            f"both: {val_acc_both:.4f}"
-        )
-        logger.info(
-            f"  Argmax  root: {argmax_acc_root:.4f}  triad: {argmax_acc_triad:.4f}  "
-            f"both: {argmax_acc_both:.4f}"
-        )
 
-        delta_root = val_acc_root - argmax_acc_root
-        delta_triad = val_acc_triad - argmax_acc_triad
-        delta_both = val_acc_both - argmax_acc_both
-        logger.info(
-            f"  Delta   root: {delta_root:+.4f}  triad: {delta_triad:+.4f}  "
-            f"both: {delta_both:+.4f}"
-        )
+        crf_parts = []
+        argmax_parts = []
+        delta_parts = []
+        for comp in ['root', 'triad', 'bass', '7th']:
+            crf_a = val_correct_per_comp[comp] / val_total if val_total else 0
+            arg_a = val_argmax_correct_per_comp[comp] / val_total if val_total else 0
+            crf_parts.append(f"{comp}:{crf_a:.3f}")
+            argmax_parts.append(f"{comp}:{arg_a:.3f}")
+            delta_parts.append(f"{comp}:{crf_a - arg_a:+.3f}")
+
+        crf_parts.append(f"joint:{val_acc_joint:.3f}")
+        argmax_parts.append(f"joint:{argmax_acc_joint:.3f}")
+        delta_parts.append(f"joint:{val_acc_joint - argmax_acc_joint:+.3f}")
+
+        logger.info(f"  CRF    {' | '.join(crf_parts)}")
+        logger.info(f"  Argmax {' | '.join(argmax_parts)}")
+        logger.info(f"  Delta  {' | '.join(delta_parts)}")
 
         # ── Checkpoint ──
 
-        if val_acc_both > best_val_acc:
-            best_val_acc = val_acc_both
+        if val_acc_joint > best_val_acc:
+            best_val_acc = val_acc_joint
             best_epoch = epoch + 1
             early_stop_counter = 0
 
-            save_path = output_dir / 'crf_best.pt'
-            torch.save({
+            save_dict = {
                 'harmonic_crf_state_dict': harmonic_crf.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'epoch': epoch + 1,
                 'best_val_acc': best_val_acc,
-                'val_acc_root': val_acc_root,
-                'val_acc_triad': val_acc_triad,
-                'argmax_acc_root': argmax_acc_root,
-                'argmax_acc_triad': argmax_acc_triad,
-                'n_roots': harmonic_crf.n_roots,
-                'n_triads': harmonic_crf.n_triads,
+                'crf_mode': crf_mode,
                 'chordformer_checkpoint': args.checkpoint,
                 'config': {
                     'learning_rate': args.learning_rate,
@@ -401,20 +424,29 @@ def main():
                     'datasets': list(dataset_names),
                     'kfold': args.kfold,
                 },
-            }, save_path)
+            }
+            if crf_mode == 'full':
+                save_dict['chord_vocab'] = chord_vocab
+                save_dict['chord_to_idx'] = chord_to_idx
+                save_dict['component_matrix'] = component_matrix
+            else:
+                save_dict['n_roots'] = harmonic_crf.n_roots
+                save_dict['n_triads'] = harmonic_crf.n_triads
+
+            save_path = output_dir / 'crf_best.pt'
+            torch.save(save_dict, save_path)
             logger.info(f"  ** New best! acc={best_val_acc:.4f} saved to {save_path}")
         else:
             early_stop_counter += 1
 
-        # LR decay when accuracy drops
-        if val_acc_both < prev_val_acc:
+        if val_acc_joint < prev_val_acc:
             for pg in optimizer.param_groups:
                 old_lr = pg['lr']
                 new_lr = max(old_lr * args.lr_decay_factor, args.lr_min)
                 pg['lr'] = new_lr
             if new_lr != old_lr:
                 logger.info(f"  LR decay: {old_lr:.6f} -> {new_lr:.6f}")
-        prev_val_acc = val_acc_both
+        prev_val_acc = val_acc_joint
 
         if early_stop_counter >= args.early_stop_patience:
             logger.info(f"Early stopping at epoch {epoch+1} "
@@ -425,8 +457,11 @@ def main():
 
     logger.info("=" * 60)
     logger.info("Training complete!")
+    logger.info(f"  CRF mode:       {crf_mode}")
     logger.info(f"  Best epoch:     {best_epoch}")
-    logger.info(f"  Best val acc:   {best_val_acc:.4f} (root+triad joint)")
+    logger.info(f"  Best val acc:   {best_val_acc:.4f}")
+    if crf_mode == 'full':
+        logger.info(f"  Vocab size:     {len(chord_vocab)} tags")
     logger.info(f"  Checkpoint:     {output_dir / 'crf_best.pt'}")
     logger.info("=" * 60)
 

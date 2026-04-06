@@ -1,45 +1,35 @@
 """
-HarmonicCRF: Conditional Random Field for chord sequence decoding.
+CRF-based sequence decoders for the ChordMax decomposed pipeline.
 
-This module implements a CRF that operates on the joint root x triad space
-(13 roots x 7 triads = 91 tags) to enforce temporal coherence in chord
-predictions from the ChordMax decomposed pipeline.
+Two modes are available:
 
-It is designed to work as a post-processing stage on top of the frozen
-ChordFormer model: the 9-head logits are combined into an observation
-potential, and the CRF's learnable transition matrix captures which
-harmonic progressions are plausible.
+1. **root_triad** (``HarmonicCRF``): Joint CRF over root x triad
+   (13 x 7 = 91 tags).  Extensions resolved via argmax.
 
-This is separate from the legacy BTC CRF (models/crf_model.py) which
-operates on the monolithic 170-class vocabulary.
+2. **full** (``FullChordCRF``): CRF over the full observed chord
+   vocabulary (~2000 tags built from training data).  All 9 components
+   are captured in the transition matrix.
 
-Architecture:
-    ChordFormer (frozen) -> 9 head logits
-        -> HarmonicCRF:
-            1. Compute observation potential from root + triad log-probs
-            2. Viterbi decoding with learned transitions
-            3. Split joint tags back into root + triad
-            4. Extensions (bass, misc, 6th, 7th, 9th, 11th, 13th) via argmax
-
-Extensibility (future improvements):
-    - Add other heads (bass, 7th) to the observation potential
-    - Expand to root x triad x 7th (91 x 4 = 364 tags)
-    - Use fixed penalty transitions instead of learned (for comparison)
-    - Estimate transitions from GT statistics (no training)
+Both are designed as post-processing stages on top of a frozen
+ChordFormer: the 9-head logits are combined into an observation
+potential, and a learnable transition matrix captures plausible
+harmonic progressions.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Dict, List, Optional
 
 from models.crf_model import CRF
 from utils.chord_decomposition import COMPONENT_NAMES
 
+CRF_MODE_CHOICES = ['root_triad', 'full']
 
-# Components whose predictions come from the CRF (joint decoding)
+# Components whose predictions come from the CRF (joint decoding) - root_triad mode
 CRF_COMPONENTS = ['root', 'triad']
 
-# Components resolved independently via argmax (not part of CRF)
+# Components resolved independently via argmax (root_triad mode only)
 ARGMAX_COMPONENTS = [c for c in COMPONENT_NAMES if c not in CRF_COMPONENTS]
 
 
@@ -184,3 +174,120 @@ class HarmonicCRF(nn.Module):
         joint_tags = self.encode_joint_tag(root_labels, triad_labels)  # (B, T)
 
         return self.crf.loss(obs, joint_tags)
+
+
+class FullChordCRF(nn.Module):
+    """CRF over the full observed chord vocabulary.
+
+    Instead of only root x triad (91 tags), this CRF operates on every
+    unique chord that appears in the training data (~2000 tags).  The
+    observation potential for each tag is the sum of log-probabilities
+    from all 9 decomposed heads, indexed by a pre-computed component
+    matrix.
+
+    Args:
+        chord_vocab: Ordered list of chord label strings.
+        component_matrix: ``(N_vocab, 9)`` int64 tensor.  Row *i* holds
+            the 9 component-class indices for ``chord_vocab[i]``.
+        chord_to_idx: Mapping from label string to vocab index.
+    """
+
+    def __init__(
+        self,
+        chord_vocab: List[str],
+        component_matrix: torch.Tensor,
+        chord_to_idx: Optional[Dict[str, int]] = None,
+    ):
+        super().__init__()
+        self.chord_vocab = list(chord_vocab)
+        self.n_tags = len(chord_vocab)
+        self.chord_to_idx = chord_to_idx or {l: i for i, l in enumerate(chord_vocab)}
+
+        self.register_buffer('component_matrix', component_matrix.long())
+        self.crf = CRF(num_tags=self.n_tags)
+
+        self._tuple_to_idx = self._build_tuple_index()
+
+    def _build_tuple_index(self) -> dict:
+        mapping = {}
+        fallback = self.chord_to_idx.get('N', 0)
+        for i in range(self.component_matrix.shape[0]):
+            key = tuple(self.component_matrix[i].tolist())
+            mapping[key] = i
+        mapping.setdefault((0,) * len(COMPONENT_NAMES), fallback)
+        return mapping
+
+    def labels_to_tags(self, labels: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Convert per-frame 9-component index labels to vocab tag indices.
+
+        Args:
+            labels: Dict mapping component names to ``(B, T)`` index tensors.
+
+        Returns:
+            ``(B, T)`` tensor of vocab tag indices.
+        """
+        B, T = labels[COMPONENT_NAMES[0]].shape
+        device = labels[COMPONENT_NAMES[0]].device
+        fallback = self.chord_to_idx.get('N', 0)
+
+        stacked = torch.stack([labels[c] for c in COMPONENT_NAMES], dim=-1)  # (B, T, 9)
+        tags = torch.full((B, T), fallback, dtype=torch.long, device=device)
+
+        for b in range(B):
+            for t in range(T):
+                key = tuple(stacked[b, t].tolist())
+                tags[b, t] = self._tuple_to_idx.get(key, fallback)
+
+        return tags
+
+    def compute_observation_potential(self, logits: dict) -> torch.Tensor:
+        """Sum log-probs from all 9 heads for every vocab entry.
+
+        Args:
+            logits: Dict mapping component names to ``(B, T, C_i)`` tensors.
+
+        Returns:
+            ``(B, T, N_vocab)`` observation scores.
+        """
+        first_key = COMPONENT_NAMES[0]
+        B, T = logits[first_key].shape[:2]
+        device = logits[first_key].device
+
+        obs = torch.zeros(B, T, self.n_tags, device=device)
+
+        for j, comp in enumerate(COMPONENT_NAMES):
+            log_p = F.log_softmax(logits[comp], dim=-1)           # (B, T, C_j)
+            indices = self.component_matrix[:, j].to(device)       # (N_vocab,)
+            obs = obs + log_p[:, :, indices]                       # (B, T, N_vocab)
+
+        return obs
+
+    def forward(self, logits: dict) -> dict:
+        """Viterbi decode the best chord sequence.
+
+        Returns:
+            Dict mapping each component name to ``(B, T)`` predicted indices.
+        """
+        obs = self.compute_observation_potential(logits)
+        joint_tags = self.crf(obs)  # (B, T)
+
+        predictions = {}
+        for j, comp in enumerate(COMPONENT_NAMES):
+            comp_col = self.component_matrix[:, j].to(joint_tags.device)
+            predictions[comp] = comp_col[joint_tags]  # (B, T)
+
+        return predictions
+
+    def loss(self, logits: dict, labels: dict) -> torch.Tensor:
+        """CRF negative log-likelihood.
+
+        Args:
+            logits: Dict of ``(B, T, C_i)`` logit tensors.
+            labels: Dict of ``(B, T)`` ground-truth component indices.
+
+        Returns:
+            Scalar NLL loss.
+        """
+        obs = self.compute_observation_potential(logits)
+        tags = self.labels_to_tags(labels)
+        return self.crf.loss(obs, tags)

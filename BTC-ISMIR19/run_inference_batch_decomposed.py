@@ -378,17 +378,33 @@ def main():
         exp = args.exp_name or Path(args.checkpoint).parent.name
         output_dir = os.path.join(args.output_base, f"inference_{exp}_test_{ds_tag}")
 
-    # Load HarmonicCRF if provided
+    # Load CRF if provided (auto-detect root_triad vs full mode)
     harmonic_crf = None
     if args.harmonic_crf:
-        logger.info(f"Loading HarmonicCRF from {args.harmonic_crf}")
+        logger.info(f"Loading CRF from {args.harmonic_crf}")
         crf_ckpt = torch.load(args.harmonic_crf, map_location=device, weights_only=False)
-        n_roots = crf_ckpt.get('n_roots', 13)
-        n_triads = crf_ckpt.get('n_triads', 7)
-        harmonic_crf = HarmonicCRF(n_roots=n_roots, n_triads=n_triads).to(device)
-        harmonic_crf.load_state_dict(crf_ckpt['harmonic_crf_state_dict'])
-        harmonic_crf.eval()
-        logger.info(f"HarmonicCRF loaded ({n_roots}x{n_triads}={n_roots*n_triads} tags)")
+        crf_mode = crf_ckpt.get('crf_mode', 'root_triad')
+
+        if crf_mode == 'full':
+            from models.harmonic_crf import FullChordCRF
+            chord_vocab = crf_ckpt['chord_vocab']
+            component_matrix = crf_ckpt['component_matrix']
+            chord_to_idx = crf_ckpt['chord_to_idx']
+            harmonic_crf = FullChordCRF(
+                chord_vocab=chord_vocab,
+                component_matrix=component_matrix,
+                chord_to_idx=chord_to_idx,
+            ).to(device)
+            harmonic_crf.load_state_dict(crf_ckpt['harmonic_crf_state_dict'])
+            harmonic_crf.eval()
+            logger.info(f"FullChordCRF loaded ({len(chord_vocab)} tags)")
+        else:
+            n_roots = crf_ckpt.get('n_roots', 13)
+            n_triads = crf_ckpt.get('n_triads', 7)
+            harmonic_crf = HarmonicCRF(n_roots=n_roots, n_triads=n_triads).to(device)
+            harmonic_crf.load_state_dict(crf_ckpt['harmonic_crf_state_dict'])
+            harmonic_crf.eval()
+            logger.info(f"HarmonicCRF loaded ({n_roots}x{n_triads}={n_roots*n_triads} tags)")
 
         # Model must return logits for CRF observation potential
         config.model['probs_out'] = True
