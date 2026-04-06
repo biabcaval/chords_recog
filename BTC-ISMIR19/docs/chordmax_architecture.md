@@ -8,6 +8,10 @@ O pipeline completo do modelo pode ser descrito da seguinte forma: o sinal de á
 
 ## Diagrama da Arquitetura
 
+### Com CRF modo `root_triad` (padrão)
+
+O CRF decodifica conjuntamente root e triad (91 tags). As demais 7 heads são resolvidas por argmax independente.
+
 ```mermaid
 flowchart TB
     subgraph input [Entrada]
@@ -33,14 +37,9 @@ flowchart TB
         h13["13th\n3 classes"]
     end
 
-    subgraph crf_rt [CRF modo root_triad]
-        joint91["log P(root) + log P(triad)\n91 tags"]
-        viterbi91["Viterbi 91×91"]
-    end
-
-    subgraph crf_full [CRF modo full]
-        joint_full["Soma log P de todas as 9 heads\n~2000 tags observados"]
-        viterbi_full["Viterbi N×N"]
+    subgraph crf_rt [HarmonicCRF]
+        joint91["Potencial de Observação\nlog P(root) + log P(triad)\n13×7 = 91 tags"]
+        viterbi91["Viterbi\nMatriz de Transição 91×91\n~8k params"]
     end
 
     subgraph output [Saída]
@@ -50,9 +49,61 @@ flowchart TB
     audio --> cqt --> proj --> pos --> blocks
     blocks -->|"(B, T, 128)"| root & bass & triad & misc & h6 & h7 & h9 & h11 & h13
     root & triad --> joint91 --> viterbi91
-    viterbi91 --> reassemble
+    viterbi91 -->|"root, triad"| reassemble
     bass & misc & h6 & h7 & h9 & h11 & h13 -->|argmax| reassemble
-    root & bass & triad & misc & h6 & h7 & h9 & h11 & h13 --> joint_full --> viterbi_full --> reassemble
+```
+
+### Com CRF modo `full`
+
+O CRF decodifica conjuntamente todas as 9 heads sobre o vocabulário completo de acordes observados no treino (~2000 tags).
+
+```mermaid
+flowchart TB
+    subgraph input2 [Entrada]
+        audio2["Áudio (22.050 Hz)"]
+        cqt2["Log-CQT\n252 bins, 36 bins/oitava"]
+    end
+
+    subgraph encoder2 [Conformer Encoder]
+        proj2["Projeção Linear\n252 → 128"]
+        pos2["Codificação Posicional\nSenoidal"]
+        blocks2["12× Conformer Block\n0.5·FFN → MHSA(8h) → DWConv(k=31) → 0.5·FFN → LN"]
+    end
+
+    subgraph heads2 [9 Component Heads]
+        root2["Root\n13 classes"]
+        bass2["Bass\n13 classes"]
+        triad2["Triad\n7 classes"]
+        misc2["Misc\n2 classes"]
+        h62["6th\n2 classes"]
+        h72["7th\n4 classes"]
+        h92["9th\n4 classes"]
+        h112["11th\n3 classes"]
+        h132["13th\n3 classes"]
+    end
+
+    subgraph vocab [Vocabulário Observado]
+        scan["Scan dos .pt de treino\n~2000 labels únicas"]
+        decomp_table["Decomposition Matrix\nlabel → 9 component indices"]
+    end
+
+    subgraph crf_f [FullChordCRF]
+        joint_full["Potencial de Observação\nSoma log P das 9 heads\npor entrada do vocab"]
+        viterbi_full["Viterbi\nMatriz de Transição N×N\n~4M params"]
+        decode_full["Lookup na Decomposition Matrix\ntag → 9 componentes"]
+    end
+
+    subgraph output2 [Saída]
+        reassemble2["Reassembly\nComponentes → Notação Harte\ne.g. A:min7, C:maj7(9)"]
+    end
+
+    audio2 --> cqt2 --> proj2 --> pos2 --> blocks2
+    blocks2 -->|"(B, T, 128)"| root2 & bass2 & triad2 & misc2 & h62 & h72 & h92 & h112 & h132
+    scan --> decomp_table
+    root2 & bass2 & triad2 & misc2 & h62 & h72 & h92 & h112 & h132 --> joint_full
+    decomp_table --> joint_full
+    joint_full --> viterbi_full --> decode_full
+    decode_full -->|"9 componentes"| reassemble2
 ```
 
 ## Representação de Entrada
