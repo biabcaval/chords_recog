@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import os
 import torch
@@ -91,6 +92,72 @@ class AudioDataset(Dataset):
         
         return res
 
+    @staticmethod
+    def _load_fold_assignments(root_dir):
+        """Load stratified fold assignments if available."""
+        path = os.path.join(root_dir, "fold_assignments.json")
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        print(f"Using stratified fold assignments from {path}")
+        return data.get("songs", {})
+
+    def _split_by_fold(self, song_names, temp, kfold, fold_map=None):
+        """Split songs into train/val by fold index.
+
+        If *fold_map* is provided (dict song_name -> fold_index from
+        fold_assignments.json) it is used for stratified splitting.
+        Otherwise falls back to the original contiguous-block method.
+        """
+        total_fold = 5
+
+        if fold_map is not None:
+            if self.train:
+                result = []
+                selected = []
+                for s in song_names:
+                    if fold_map.get(s, -1) != kfold:
+                        result += temp[s]
+                        selected.append(s)
+                return selected, result
+            else:
+                result = []
+                selected = []
+                for s in song_names:
+                    if fold_map.get(s, -1) == kfold:
+                        instances = [inst for inst in temp[s] if "1.00_0" in inst]
+                        result += instances
+                        selected.append(s)
+                return selected, result
+
+        # Fallback: original contiguous-block split
+        quotient = len(song_names) // total_fold
+        remainder = len(song_names) % total_fold
+        fold_num = [0]
+        for i in range(total_fold):
+            fold_num.append(quotient)
+        for i in range(remainder):
+            fold_num[i+1] += 1
+        for i in range(total_fold):
+            fold_num[i+1] += fold_num[i]
+
+        result = []
+        if self.train:
+            tmp = []
+            for k in range(total_fold):
+                if k != kfold:
+                    for i in range(fold_num[k], fold_num[k+1]):
+                        result += temp[song_names[i]]
+                    tmp += song_names[fold_num[k]:fold_num[k + 1]]
+            return tmp, result
+        else:
+            for i in range(fold_num[kfold], fold_num[kfold+1]):
+                instances = temp[song_names[i]]
+                instances = [inst for inst in instances if "1.00_0" in inst]
+                result += instances
+            return song_names[fold_num[kfold]:fold_num[kfold+1]], result
+
     def get_paths(self, kfold=4):
         temp = {}
         used_song_names = list()
@@ -111,9 +178,8 @@ class AudioDataset(Dataset):
                 for instance_name in instance_names:
                     paths.append(os.path.join(dataset_path, song_name, instance_name))
                 temp[song_name] = paths
-        # throw away unused song names
-        song_names = used_song_names
-        song_names = SortedList(song_names)
+
+        song_names = SortedList(used_song_names)
 
         print('Total used song length : %d' %len(song_names))
         tmp = []
@@ -121,41 +187,13 @@ class AudioDataset(Dataset):
             tmp += temp[song_names[i]]
         print('Total instances (train and valid) : %d' %len(tmp))
 
-        # divide train/valid dataset using k fold
-        result = []
-        total_fold = 5
-        quotient = len(song_names) // total_fold
-        remainder = len(song_names) % total_fold
-        fold_num = [0]
-        for i in range(total_fold):
-            fold_num.append(quotient)
-        for i in range(remainder):
-            fold_num[i+1] += 1
-        for i in range(total_fold):
-                fold_num[i+1] += fold_num[i]
-
-        if self.train:
-            tmp = []
-            # get not augmented data
-            for k in range(total_fold):
-                if k != kfold:
-                    for i in range(fold_num[k], fold_num[k+1]):
-                        result += temp[song_names[i]]
-                    tmp += song_names[fold_num[k]:fold_num[k + 1]]
-            song_names = tmp
-        else:
-            for i in range(fold_num[kfold], fold_num[kfold+1]):
-                instances = temp[song_names[i]]
-                instances = [inst for inst in instances if "1.00_0" in inst]
-                result += instances
-            song_names = song_names[fold_num[kfold]:fold_num[kfold+1]]
-        return song_names, result
+        fold_map = self._load_fold_assignments(self.root_dir)
+        return self._split_by_fold(song_names, temp, kfold, fold_map)
 
     def get_paths_voca(self, kfold=4):
         temp = {}
         used_song_names = list()
         for name in self.dataset_names:
-            # Try result_decomposed first, then fall back to result
             dataset_path = os.path.join(self.root_dir, "result_decomposed", name+'_voca', self.mp3_string, self.feature_string)
             if not os.path.exists(dataset_path):
                 dataset_path = os.path.join(self.root_dir, "result", name+'_voca', self.mp3_string, self.feature_string)
@@ -174,9 +212,8 @@ class AudioDataset(Dataset):
                 for instance_name in instance_names:
                     paths.append(os.path.join(dataset_path, song_name, instance_name))
                 temp[song_name] = paths
-        # throw away unused song names
-        song_names = used_song_names
-        song_names = SortedList(song_names)
+
+        song_names = SortedList(used_song_names)
 
         print('Total used song length : %d' %len(song_names))
         tmp = []
@@ -184,35 +221,8 @@ class AudioDataset(Dataset):
             tmp += temp[song_names[i]]
         print('Total instances (train and valid) : %d' %len(tmp))
 
-        # divide train/valid dataset using k fold
-        result = []
-        total_fold = 5
-        quotient = len(song_names) // total_fold
-        remainder = len(song_names) % total_fold
-        fold_num = [0]
-        for i in range(total_fold):
-            fold_num.append(quotient)
-        for i in range(remainder):
-            fold_num[i+1] += 1
-        for i in range(total_fold):
-                fold_num[i+1] += fold_num[i]
-
-        if self.train:
-            tmp = []
-            # get not augmented data
-            for k in range(total_fold):
-                if k != kfold:
-                    for i in range(fold_num[k], fold_num[k+1]):
-                        result += temp[song_names[i]]
-                    tmp += song_names[fold_num[k]:fold_num[k + 1]]
-            song_names = tmp
-        else:
-            for i in range(fold_num[kfold], fold_num[kfold+1]):
-                instances = temp[song_names[i]]
-                instances = [inst for inst in instances if "1.00_0" in inst]
-                result += instances
-            song_names = song_names[fold_num[kfold]:fold_num[kfold+1]]
-        return song_names, result
+        fold_map = self._load_fold_assignments(self.root_dir)
+        return self._split_by_fold(song_names, temp, kfold, fold_map)
 
 def _collate_fn(batch):
     batch_size = len(batch)
