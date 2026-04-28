@@ -5,16 +5,30 @@ from __future__ import print_function
 import torch
 import torch.nn as nn
 
+
 class CRF(nn.Module):
     """
     Implements Conditional Random Fields that can be trained via
     backpropagation.
+
+    The forward algorithm (partition function) and Viterbi decoder both
+    process the tag dimension in chunks of ``chunk_size`` to avoid
+    materialising the full ``(B, N, N)`` transition tensor at each step.
+    This makes the ``full`` CRF mode (N ≈ 2000) feasible without OOM.
+
+    Args:
+        num_tags: Number of CRF tags.
+        chunk_size: Number of destination tags processed per chunk in the
+            forward and Viterbi passes.  Smaller values use less peak
+            memory at the cost of slightly more kernel launches.
+            Defaults to 256.
     """
 
-    def __init__(self, num_tags):
+    def __init__(self, num_tags, chunk_size=256):
         super(CRF, self).__init__()
 
         self.num_tags = num_tags
+        self.chunk_size = chunk_size
         self.transitions = nn.Parameter(torch.Tensor(num_tags, num_tags))
         self.start_transitions = nn.Parameter(torch.randn(num_tags))
         self.stop_transitions = nn.Parameter(torch.randn(num_tags))
@@ -67,8 +81,6 @@ class CRF(nn.Module):
         Returns: Sequence score of shape [batch size]
         """
 
-        batch_size = feats.shape[0]
-
         # Compute feature scores
         feat_score = feats.gather(2, tags.unsqueeze(-1)).squeeze(-1).sum(dim=-1)
 
@@ -88,9 +100,13 @@ class CRF(nn.Module):
 
     def _partition_function(self, feats):
         """
-        Computes the partitition function for CRF using the forward algorithm.
-        Basically calculate scores for all possible tag sequences for
-        the given feature vector sequence
+        Computes the partition function for the CRF using the forward algorithm.
+
+        The transition step is computed in chunks of ``self.chunk_size``
+        destination tags to avoid allocating the full ``(B, N, N)`` tensor,
+        keeping peak memory at ``O(B × N × chunk_size)`` instead of
+        ``O(B × N²)``.
+
         Parameters:
             feats: Input features [batch size, sequence length, number of tags]
         Returns:
@@ -101,52 +117,62 @@ class CRF(nn.Module):
         if self.num_tags != num_tags:
             raise ValueError('num_tags should be {} but got {}'.format(self.num_tags, num_tags))
 
-        a = feats[:, 0] + self.start_transitions.unsqueeze(0)  # [batch_size, num_tags]
-        transitions = self.transitions.unsqueeze(0)  # [1, num_tags, num_tags] from -> to
+        a = feats[:, 0] + self.start_transitions.unsqueeze(0)  # (B, N)
+        transitions = self.transitions.unsqueeze(0)             # (1, N, N)
 
         for i in range(1, seq_size):
-            feat = feats[:, i].unsqueeze(1)  # [batch_size, 1, num_tags]
-            a = self._log_sum_exp(a.unsqueeze(-1) + transitions + feat, 1)  # [batch_size, num_tags]
+            feat = feats[:, i]          # (B, N)
+            new_a = torch.empty_like(a)
+            for j in range(0, num_tags, self.chunk_size):
+                end = min(j + self.chunk_size, num_tags)
+                # (B, N, 1) + (1, N, chunk) → (B, N, chunk); logsumexp over "from" dim
+                chunk = a.unsqueeze(-1) + transitions[:, :, j:end]
+                new_a[:, j:end] = torch.logsumexp(chunk, dim=1) + feat[:, j:end]
+            a = new_a
 
-        return self._log_sum_exp(a + self.stop_transitions.unsqueeze(0), 1)  # [batch_size]
+        return torch.logsumexp(a + self.stop_transitions.unsqueeze(0), dim=1)  # (B,)
 
     def _viterbi(self, feats):
         """
-        Uses Viterbi algorithm to predict the best sequence
+        Uses Viterbi algorithm to predict the best sequence.
+
+        Like the partition function, the max-over-sources step is chunked
+        to avoid the ``(B, N, N)`` peak allocation.  The backtracking
+        indices are stored in a pre-allocated ``(T-1, B, N)`` tensor
+        instead of a growing Python list.
+
         Parameters:
             feats: Input features [batch size, sequence length, number of tags]
         Returns: Best tag sequence [batch size, sequence length]
         """
-        _, seq_size, num_tags = feats.shape
+        batch_size, seq_size, num_tags = feats.shape
 
         if self.num_tags != num_tags:
             raise ValueError('num_tags should be {} but got {}'.format(self.num_tags, num_tags))
 
-        v = feats[:, 0] + self.start_transitions.unsqueeze(0)  # [batch_size, num_tags]
-        transitions = self.transitions.unsqueeze(0)  # [1, num_tags, num_tags] from -> to
-        paths = []
+        v = feats[:, 0] + self.start_transitions.unsqueeze(0)  # (B, N)
+        transitions = self.transitions.unsqueeze(0)             # (1, N, N)
+
+        # Pre-allocate backtracking table instead of growing a Python list.
+        paths = torch.empty(seq_size - 1, batch_size, num_tags,
+                            dtype=torch.long, device=feats.device)
 
         for i in range(1, seq_size):
-            feat = feats[:, i]  # [batch_size, num_tags]
-            v, idx = (v.unsqueeze(-1) + transitions).max(1)  # [batch_size, num_tags], [batch_size, num_tags]
+            new_v = torch.empty_like(v)
+            for j in range(0, num_tags, self.chunk_size):
+                end = min(j + self.chunk_size, num_tags)
+                # (B, N, 1) + (1, N, chunk) → (B, N, chunk); max over "from" dim
+                chunk = v.unsqueeze(-1) + transitions[:, :, j:end]
+                new_v[:, j:end], paths[i - 1, :, j:end] = chunk.max(1)
+            v = new_v + feats[:, i]
 
-            paths.append(idx)
-            v = (v + feat)  # [batch_size, num_tags]
+        v, tag = (v + self.stop_transitions.unsqueeze(0)).max(1, keepdim=True)  # (B, 1)
 
-        v, tag = (v + self.stop_transitions.unsqueeze(0)).max(1, True)
-
-        # Backtrack
+        # Backtrack through the pre-allocated paths tensor
         tags = [tag]
-        for idx in reversed(paths):
-            tag = idx.gather(1, tag)
+        for i in range(seq_size - 2, -1, -1):
+            tag = paths[i].gather(1, tag)
             tags.append(tag)
 
         tags.reverse()
-        return torch.cat(tags, 1)
-
-    def _log_sum_exp(self, logits, dim):
-        """
-        Computes log-sum-exp in a stable way
-        """
-        max_val, _ = logits.max(dim)
-        return max_val + (logits - max_val.unsqueeze(dim)).exp().sum(dim).log()
+        return torch.cat(tags, dim=1)  # (B, T)

@@ -22,7 +22,7 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional
 
 from models.crf_model import CRF
-from utils.chord_decomposition import COMPONENT_NAMES
+from utils.chord_decomposition import COMPONENT_NAMES, CHORD_VOCAB
 
 CRF_MODE_CHOICES = ['root_triad', 'full']
 
@@ -206,19 +206,42 @@ class FullChordCRF(nn.Module):
         self.register_buffer('component_matrix', component_matrix.long())
         self.crf = CRF(num_tags=self.n_tags)
 
-        self._tuple_to_idx = self._build_tuple_index()
+        lookup, strides = self._build_lookup_tensor()
+        self.register_buffer('lookup_tensor', lookup)
+        self.register_buffer('lookup_strides', strides)
 
-    def _build_tuple_index(self) -> dict:
-        mapping = {}
+    def _build_lookup_tensor(self):
+        """Build a vectorized mixed-radix lookup: component tuple → vocab index.
+
+        Encodes each 9-component combination as a single integer using
+        mixed-radix strides, then builds a flat lookup tensor. Replaces the
+        O(B×T) Python dict loop in ``labels_to_tags`` with a single
+        vectorized ``index_select`` operation.
+
+        Returns:
+            lookup: ``(total_combinations,)`` long tensor.
+            strides: ``(9,)`` long tensor of per-component strides.
+        """
+        sizes = [len(CHORD_VOCAB[c]) for c in COMPONENT_NAMES]
+        strides = torch.ones(len(sizes), dtype=torch.long)
+        for i in range(len(sizes) - 2, -1, -1):
+            strides[i] = strides[i + 1] * sizes[i + 1]
+
         fallback = self.chord_to_idx.get('N', 0)
-        for i in range(self.component_matrix.shape[0]):
-            key = tuple(self.component_matrix[i].tolist())
-            mapping[key] = i
-        mapping.setdefault((0,) * len(COMPONENT_NAMES), fallback)
-        return mapping
+        total = int(strides[0].item() * sizes[0])
+        lookup = torch.full((total,), fallback, dtype=torch.long)
+
+        key_ints = (self.component_matrix * strides).sum(-1)  # (N_vocab,)
+        for i in range(self.n_tags):
+            lookup[key_ints[i].item()] = i
+
+        return lookup, strides
 
     def labels_to_tags(self, labels: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Convert per-frame 9-component index labels to vocab tag indices.
+
+        Fully vectorized via a pre-built mixed-radix lookup tensor — no
+        Python loops over batch or time dimensions.
 
         Args:
             labels: Dict mapping component names to ``(B, T)`` index tensors.
@@ -226,19 +249,9 @@ class FullChordCRF(nn.Module):
         Returns:
             ``(B, T)`` tensor of vocab tag indices.
         """
-        B, T = labels[COMPONENT_NAMES[0]].shape
-        device = labels[COMPONENT_NAMES[0]].device
-        fallback = self.chord_to_idx.get('N', 0)
-
         stacked = torch.stack([labels[c] for c in COMPONENT_NAMES], dim=-1)  # (B, T, 9)
-        tags = torch.full((B, T), fallback, dtype=torch.long, device=device)
-
-        for b in range(B):
-            for t in range(T):
-                key = tuple(stacked[b, t].tolist())
-                tags[b, t] = self._tuple_to_idx.get(key, fallback)
-
-        return tags
+        key_ints = (stacked * self.lookup_strides.to(stacked.device)).sum(-1)  # (B, T)
+        return self.lookup_tensor.to(stacked.device)[key_ints]  # (B, T)
 
     def compute_observation_potential(self, logits: dict) -> torch.Tensor:
         """Sum log-probs from all 9 heads for every vocab entry.
