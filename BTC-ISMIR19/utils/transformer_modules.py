@@ -600,22 +600,32 @@ class PointwiseConv1d(nn.Module):
 class ConformerConvModule(nn.Module):
     """
     Conformer Convolution Module.
-    
+
     Structure:
-        LayerNorm -> Pointwise Conv -> GLU -> Depthwise Conv -> BatchNorm -> Swish -> Pointwise Conv -> Dropout
+        LayerNorm -> Pointwise Conv -> GLU -> Depthwise Conv -> {BatchNorm|Identity}
+        -> Swish -> Pointwise Conv -> Dropout
+
+    The post-depthwise normalization can be toggled via ``use_batchnorm``:
+    - ``True``  (ChordFormer / current ChordMax code): use ``nn.BatchNorm1d``.
+    - ``False`` (ChordMax paper, Tabela 2 "BN=Nao"): skip normalization (Identity).
     """
-    def __init__(self, hidden_size, kernel_size=31, expansion_factor=2, dropout=0.1):
+    def __init__(self, hidden_size, kernel_size=31, expansion_factor=2, dropout=0.1,
+                 use_batchnorm=True):
         super(ConformerConvModule, self).__init__()
-        
+
         self.layer_norm = LayerNorm(hidden_size)
         self.pointwise_conv1 = PointwiseConv1d(hidden_size, hidden_size * expansion_factor, bias=True)
         self.glu = GLU(dim=1)
-        
+
         # Depthwise conv with same padding
         padding = (kernel_size - 1) // 2
         self.depthwise_conv = DepthwiseConv1d(hidden_size, hidden_size, kernel_size, padding=padding, bias=False)
-        
-        self.batch_norm = nn.BatchNorm1d(hidden_size)
+
+        self.use_batchnorm = use_batchnorm
+        if use_batchnorm:
+            self.batch_norm = nn.BatchNorm1d(hidden_size)
+        else:
+            self.batch_norm = nn.Identity()
         self.swish = Swish()
         self.pointwise_conv2 = PointwiseConv1d(hidden_size, hidden_size, bias=True)
         self.dropout = nn.Dropout(dropout)
@@ -743,8 +753,9 @@ class ConformerBlock(nn.Module):
     Structure (Macaron-style):
         x + 0.5 * FFN(x) -> x + MHSA(x) -> x + Conv(x) -> x + 0.5 * FFN(x) -> LayerNorm
     """
-    def __init__(self, hidden_size, num_heads, conv_kernel_size=31, 
-                 ff_expansion_factor=4, conv_expansion_factor=2, dropout=0.1, attention_map=False):
+    def __init__(self, hidden_size, num_heads, conv_kernel_size=31,
+                 ff_expansion_factor=4, conv_expansion_factor=2, dropout=0.1,
+                 attention_map=False, use_batchnorm_in_conv=True):
         super(ConformerBlock, self).__init__()
         
         self.attention_map = attention_map
@@ -756,7 +767,10 @@ class ConformerBlock(nn.Module):
         self.self_attn = ConformerMultiHeadAttention(hidden_size, num_heads, dropout)
         
         # Convolution module
-        self.conv_module = ConformerConvModule(hidden_size, conv_kernel_size, conv_expansion_factor, dropout)
+        self.conv_module = ConformerConvModule(
+            hidden_size, conv_kernel_size, conv_expansion_factor, dropout,
+            use_batchnorm=use_batchnorm_in_conv,
+        )
         
         # Second half feed-forward module
         self.ff2 = ConformerFeedForward(hidden_size, ff_expansion_factor, dropout)
@@ -798,22 +812,35 @@ class ConformerBlock(nn.Module):
 
 class ConformerEncoder(nn.Module):
     """
-    Conformer Encoder: Stack of Conformer blocks with input projection and positional encoding.
+    Conformer Encoder: Stack of Conformer blocks with input projection and
+    (optional) sinusoidal positional encoding.
+
+    Knobs to switch between ChordMax (default) and ChordFormer:
+    - ``use_positional_encoding`` (default ``True``): if ``False``, the
+      sinusoidal timing signal is not added to the projected input. This
+      mirrors the ChordFormer setting (Tabela 2: "Codif. posicional = Nenhuma").
+    - ``use_batchnorm_in_conv`` (default ``True``): forwarded to every
+      ``ConformerBlock`` to toggle BatchNorm vs Identity inside the conv module.
     """
-    def __init__(self, embedding_size, hidden_size, num_layers, num_heads, 
+    def __init__(self, embedding_size, hidden_size, num_layers, num_heads,
                  conv_kernel_size=31, ff_expansion_factor=4, conv_expansion_factor=2,
-                 max_length=1000, input_dropout=0.1, layer_dropout=0.1, attention_map=False):
+                 max_length=1000, input_dropout=0.1, layer_dropout=0.1, attention_map=False,
+                 use_positional_encoding=True, use_batchnorm_in_conv=True):
         super(ConformerEncoder, self).__init__()
         
         self.attention_map = attention_map
-        
+        self.use_positional_encoding = use_positional_encoding
+
         # Input projection
         self.input_projection = nn.Linear(embedding_size, hidden_size)
         self.input_dropout = nn.Dropout(input_dropout)
-        
-        # Positional encoding
-        self.timing_signal = _gen_timing_signal(max_length, hidden_size)
-        
+
+        # Positional encoding (only built when requested; saves a buffer otherwise)
+        if use_positional_encoding:
+            self.timing_signal = _gen_timing_signal(max_length, hidden_size)
+        else:
+            self.timing_signal = None
+
         # Stack of Conformer blocks
         self.conformer_blocks = nn.ModuleList([
             ConformerBlock(
@@ -823,7 +850,8 @@ class ConformerEncoder(nn.Module):
                 ff_expansion_factor=ff_expansion_factor,
                 conv_expansion_factor=conv_expansion_factor,
                 dropout=layer_dropout,
-                attention_map=attention_map
+                attention_map=attention_map,
+                use_batchnorm_in_conv=use_batchnorm_in_conv,
             )
             for _ in range(num_layers)
         ])
@@ -843,10 +871,11 @@ class ConformerEncoder(nn.Module):
         
         # Project to hidden size
         x = self.input_projection(x)
-        
-        # Add positional encoding
-        x = x + self.timing_signal[:, :x.shape[1], :].type_as(x)
-        
+
+        # Add (optional) positional encoding
+        if self.use_positional_encoding and self.timing_signal is not None:
+            x = x + self.timing_signal[:, :x.shape[1], :].type_as(x)
+
         # Pass through Conformer blocks
         for block in self.conformer_blocks:
             if self.attention_map:

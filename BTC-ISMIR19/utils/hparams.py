@@ -15,6 +15,18 @@ class HParams(object):
         self.__dict__.update(kwargs)
         return self
 
+    def get(self, key, default=None):
+        # Mimic ``dict.get`` for top-level sections so callers like
+        # ``config.get('gradnorm', {})`` actually return the YAML block
+        # instead of silently falling back to the default.
+        return self.__dict__.get(key, default)
+
+    def __contains__(self, key):
+        return key in self.__dict__
+
+    def __getitem__(self, key):
+        return self.__dict__[key]
+
     def save(self, path):
         with open(path, 'w') as f:
             yaml.dump(self.__dict__, f)

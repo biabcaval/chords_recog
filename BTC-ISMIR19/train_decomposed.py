@@ -281,14 +281,46 @@ def main():
                             'When provided, features are standardized before training.')
     parser.add_argument('--no_class_distribution', action='store_true',
                        help='Disable per-head class distribution logging during validation')
-    
+
+    # ------------------------------------------------------------------
+    # ChordFormer-replication knobs (optimizer / scheduler / CRF)
+    # ------------------------------------------------------------------
+    parser.add_argument('--optimizer', type=str, default=None,
+                       choices=['adam', 'adamw'],
+                       help="Optimizer family (ChordMax default: adam; ChordFormer paper: adamw). "
+                            "When omitted, falls back to experiment.optimizer in the YAML, then 'adam'.")
+    parser.add_argument('--scheduler', type=str, default=None,
+                       choices=['cosine', 'plateau'],
+                       help="LR scheduler (ChordMax default: cosine; ChordFormer paper: plateau). "
+                            "When omitted, falls back to experiment.scheduler in the YAML, then 'cosine'.")
+    parser.add_argument('--scheduler_factor', type=float, default=None,
+                       help='ReduceLROnPlateau factor (default 0.1 = divide LR by 10).')
+    parser.add_argument('--scheduler_patience', type=int, default=None,
+                       help='ReduceLROnPlateau patience in epochs (default 5).')
+    parser.add_argument('--scheduler_min_lr', type=float, default=None,
+                       help='Minimum LR. With plateau, training early-stops when LR drops below this. '
+                            'Default 1e-6 (ChordFormer paper).')
+    parser.add_argument('--crf', type=str, default=None,
+                       choices=['none', 'trainable', 'linear'],
+                       help="CRF decoding stage (ChordMax default: trainable; ChordFormer paper: linear lambda=30). "
+                            "Persisted to training_config so the post-training CRF stage knows which kind to instantiate. "
+                            "When omitted, falls back to crf.type in the YAML, then 'none'.")
+    parser.add_argument('--crf_lambda', type=float, default=None,
+                       help='Self-transition bonus for the LinearCRF (default 30, used only when --crf=linear).')
+    parser.add_argument('--disable_gradnorm', action='store_true',
+                       help='Shortcut for --no_gradnorm (force-disable GradNorm).')
+
     args = parser.parse_args()
     args.log_class_distribution = not args.no_class_distribution
-    
+
+    # --disable_gradnorm is a friendlier alias for --no_gradnorm.
+    if args.disable_gradnorm:
+        args.no_gradnorm = True
+
     if args.use_class_weights and args.no_class_weights:
         parser.error("Use only one of --use_class_weights or --no_class_weights")
     if args.use_gradnorm and args.no_gradnorm:
-        parser.error("Use only one of --use_gradnorm or --no_gradnorm")
+        parser.error("Use only one of --use_gradnorm or --no_gradnorm (or --disable_gradnorm)")
 
     try:
         component_weights = parse_component_weights(args.component_weights)
@@ -668,10 +700,57 @@ def main():
         p for n, p in model.named_parameters()
         if p.requires_grad and n != 'criterion.gradnorm_weights'
     ]
-    optimizer = optim.Adam(
-        model_trainable_params,
-        lr=args.learning_rate,
-        weight_decay=args.weight_decay
+
+    # ------------------------------------------------------------------
+    # Optimizer: CLI > YAML(experiment.optimizer) > 'adam' (ChordMax default).
+    # Use AdamW to mirror the ChordFormer paper (Tabela 6).
+    # ------------------------------------------------------------------
+    exp_cfg = config.experiment if hasattr(config, 'experiment') else {}
+    optimizer_name = (
+        args.optimizer
+        or (exp_cfg.get('optimizer', None) if hasattr(exp_cfg, 'get') else None)
+        or 'adam'
+    ).lower()
+    if optimizer_name == 'adamw':
+        optimizer = optim.AdamW(
+            model_trainable_params,
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+        )
+    else:
+        optimizer = optim.Adam(
+            model_trainable_params,
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+        )
+    logger.info(
+        f"Optimizer: {optimizer.__class__.__name__}(lr={args.learning_rate}, weight_decay={args.weight_decay})"
+    )
+
+    # ------------------------------------------------------------------
+    # Scheduler: CLI > YAML(experiment.scheduler) > 'cosine' (ChordMax default).
+    # ChordFormer paper uses ReduceLROnPlateau(factor=0.1, patience=5, min_lr=1e-6).
+    # ------------------------------------------------------------------
+    scheduler_name = (
+        args.scheduler
+        or (exp_cfg.get('scheduler', None) if hasattr(exp_cfg, 'get') else None)
+        or 'cosine'
+    ).lower()
+
+    scheduler_factor = (
+        args.scheduler_factor
+        if args.scheduler_factor is not None
+        else float(exp_cfg.get('scheduler_factor', 0.1)) if hasattr(exp_cfg, 'get') else 0.1
+    )
+    scheduler_patience = (
+        args.scheduler_patience
+        if args.scheduler_patience is not None
+        else int(exp_cfg.get('scheduler_patience', 5)) if hasattr(exp_cfg, 'get') else 5
+    )
+    scheduler_min_lr = (
+        args.scheduler_min_lr
+        if args.scheduler_min_lr is not None
+        else float(exp_cfg.get('scheduler_min_lr', 1e-6)) if hasattr(exp_cfg, 'get') else 1e-6
     )
 
     scheduler_t_max = int(config.experiment.get('scheduler_t_max', args.num_epochs))
@@ -681,10 +760,47 @@ def main():
         )
         scheduler_t_max = args.num_epochs
 
-    scheduler = CosineAnnealingLR(optimizer, T_max=scheduler_t_max)
-    logger.info(f"Scheduler: CosineAnnealingLR(T_max={scheduler_t_max})")
-    # Alternative: use ReduceLROnPlateau for adaptive scheduling
-    # scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5, verbose=True)
+    if scheduler_name == 'plateau':
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=scheduler_factor,
+            patience=scheduler_patience,
+            min_lr=scheduler_min_lr,
+        )
+        logger.info(
+            f"Scheduler: ReduceLROnPlateau(factor={scheduler_factor}, "
+            f"patience={scheduler_patience}, min_lr={scheduler_min_lr}). "
+            f"Training will early-stop when LR <= {scheduler_min_lr}."
+        )
+    else:
+        scheduler = CosineAnnealingLR(optimizer, T_max=scheduler_t_max)
+        logger.info(f"Scheduler: CosineAnnealingLR(T_max={scheduler_t_max})")
+
+    # ------------------------------------------------------------------
+    # CRF stage (CLI > YAML(crf.type) > 'none').
+    # The CRF itself is trained separately by train_harmonic_crf.py on top of
+    # the frozen backbone; here we only resolve and persist the choice so the
+    # checkpoint records which CRF variant the user intends to use afterwards.
+    # ------------------------------------------------------------------
+    crf_cfg = config.get('crf', {}) if hasattr(config, 'get') else {}
+    crf_choice = (
+        args.crf
+        or (crf_cfg.get('type', None) if hasattr(crf_cfg, 'get') else None)
+        or 'none'
+    ).lower()
+    if crf_choice not in {'none', 'trainable', 'linear'}:
+        logger.warning(f"Unknown crf.type='{crf_choice}' in config; defaulting to 'none'.")
+        crf_choice = 'none'
+    crf_lambda = float(
+        args.crf_lambda
+        if args.crf_lambda is not None
+        else (crf_cfg.get('lambda', 30.0) if hasattr(crf_cfg, 'get') else 30.0)
+    )
+    logger.info(
+        f"CRF stage (post-training): type={crf_choice}"
+        + (f", lambda={crf_lambda}" if crf_choice == 'linear' else "")
+    )
     
     # Setup trainer and inference
     trainer = DecomposedChordTrainer(model, device=device, verbose=True)
@@ -705,6 +821,13 @@ def main():
     # Store training config for checkpoints
     training_config = {
         'run_name': run_name,
+        'optimizer': optimizer.__class__.__name__,
+        'scheduler': scheduler.__class__.__name__,
+        'scheduler_factor': scheduler_factor,
+        'scheduler_patience': scheduler_patience,
+        'scheduler_min_lr': scheduler_min_lr,
+        'crf_type': crf_choice,
+        'crf_lambda': crf_lambda if crf_choice == 'linear' else None,
         'learning_rate': args.learning_rate,
         'weight_decay': args.weight_decay,
         'batch_size': args.batch_size,
@@ -775,8 +898,10 @@ def main():
             },
             'runtime': {
                 'device': str(device),
-                'optimizer': 'Adam',
-                'scheduler': 'CosineAnnealingLR',
+                'optimizer': optimizer.__class__.__name__,
+                'scheduler': scheduler.__class__.__name__,
+                'crf_type': crf_choice,
+                'crf_lambda': crf_lambda if crf_choice == 'linear' else None,
             },
             'cli_args': safe_cli_args,
         }
@@ -785,6 +910,12 @@ def main():
             allow_val_change=True
         )
     
+    # Track the most recent validation loss (used by ReduceLROnPlateau and the
+    # LR-based early-stop condition; falls back to train_loss when validation
+    # has not run yet in this epoch).
+    last_val_loss = None
+    early_stopped = False
+
     for epoch in range(args.num_epochs):
         logger.info(f"\n=== Epoch {epoch + 1}/{args.num_epochs} ===")
 
@@ -843,6 +974,7 @@ def main():
             log_dist = getattr(args, 'log_class_distribution', True)
             val_metrics = trainer.validate(val_loader, compute_class_distribution=log_dist)
             val_loss = val_metrics['val_loss']
+            last_val_loss = val_loss
             val_component_losses = val_metrics.get('component_losses', {})
             logger.info(f"Val Loss: {val_loss:.4f}")
             
@@ -995,8 +1127,23 @@ def main():
                     })
         
         # Update learning rate
-        scheduler.step()
-        
+        # ReduceLROnPlateau needs a metric (val_loss); other schedulers don't.
+        if isinstance(scheduler, ReduceLROnPlateau):
+            metric = last_val_loss if last_val_loss is not None else train_loss
+            scheduler.step(metric)
+        else:
+            scheduler.step()
+
+        # LR-based early stop (mainly for ChordFormer's "until LR <= 1e-6").
+        current_lr = optimizer.param_groups[0]['lr']
+        if isinstance(scheduler, ReduceLROnPlateau) and current_lr <= scheduler_min_lr + 1e-12:
+            logger.info(
+                f"Early stop: optimizer LR ({current_lr:g}) reached scheduler_min_lr "
+                f"({scheduler_min_lr:g}) after epoch {epoch + 1}."
+            )
+            early_stopped = True
+            break
+
         # Periodic checkpoint
         if (epoch + 1) % 10 == 0:
             checkpoint_path = output_dir / f"model_epoch_{epoch + 1:03d}.pt"
@@ -1021,6 +1168,7 @@ def main():
     
     # Save final model
     training_config['end_time'] = datetime.now().isoformat()
+    training_config['early_stopped'] = bool(early_stopped)
     final_path = output_dir / "model_final.pt"
     torch.save({
         'epoch': args.num_epochs,

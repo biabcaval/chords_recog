@@ -157,3 +157,28 @@ $$\phi(t, j) = \sum_{i=1}^{9} \log P(\text{comp}_i = M_{j,i} \mid t)$$
 onde \( M \) é uma matriz de componentes pré-computada que mapeia cada acorde \( j \) do vocabulário às suas 9 classes de componentes. A matriz de transição (~4M parâmetros para 2000 tags) captura progressões entre acordes completos — incluindo extensões (9th, 11th, 13th) e inversões de bass — que não são modeladas no modo `root_triad`.
 
 O vocabulário é construído automaticamente a partir dos `.pt` de treino via `utils/chord_vocab_builder.py`, com validação round-trip de cada entrada. Tanto o vocabulário quanto a decomposition matrix são salvos no checkpoint do CRF para garantir correspondência exata na inferência.
+
+## Variante ChordFormer-like para Benchmarks Comparáveis
+
+Para permitir comparações justas com o paper ChordFormer, o codebase suporta uma configuração alternativa que replica fielmente os hiperparâmetros do ChordFormer (Tabelas 1, 2, 5, 6 de [`chordformer_vs_chordmax_tables.tex`](chordformer_vs_chordmax_tables.tex)) mantendo as 9 heads de saída do ChordMax (Tabela 4 — Root/Bass/Triad/Misc/6th/7th/9th/11th/13th).
+
+As diferenças entre as duas configurações são selecionáveis via YAML + flags CLI, sem alterar o ChordMax padrão:
+
+| Aspecto                  | ChordMax (padrão)           | ChordFormer-like (variante)        |
+| ------------------------ | --------------------------- | ---------------------------------- |
+| Hop length               | 2 048 (≈93 ms/frame)        | **512** (≈23 ms/frame)             |
+| Janela de entrada        | 108 frames (≈10 s)          | **1 000 frames (≈23,2 s)**         |
+| Dimensão oculta          | 128                         | **256**                            |
+| Blocos Conformer         | 12                          | **4**                              |
+| Heads de atenção         | 8                           | **16**                             |
+| FFN expansion (`4×`)     | 128 → 512                   | 256 → **1 024**                    |
+| Codif. posicional        | Senoidal                    | **Nenhuma**                        |
+| BatchNorm na conv        | Sim                         | Sim (igual)                        |
+| GradNorm                 | Ligado (α=0,7)              | **Desligado**                      |
+| CRF                      | Matriz treinável (Viterbi)  | **Linear, λ=30 (fixo)**            |
+| Otimizador               | Adam                        | **AdamW**                          |
+| Scheduler                | CosineAnnealingLR           | **ReduceLROnPlateau (÷10, p=5)**   |
+| Batch size               | 32                          | **24**                             |
+| Parada                   | Após `num_epochs`           | LR ≤ 10⁻⁶ (early-stop por LR)      |
+
+Os arquivos envolvidos são [`run_config_chordformer.yaml`](../run_config_chordformer.yaml) e [`models/linear_crf.py`](../models/linear_crf.py); o pipeline completo (pré-processamento → backbone → CRF) está documentado em [`chordformer_replication.md`](chordformer_replication.md).

@@ -530,8 +530,12 @@ class MultiHeadChordDecomposer(nn.Module):
 | `ff_expansion_factor` | 4 | Expansão da FFN (ChordFormer) |
 | `use_head_ffn` | False | Ativar FFN bottleneck nas output heads (ChordFormer only) |
 | `head_ffn_dim` | hidden_size//2 | Dimensão oculta da FFN nas heads (default: 64 quando hidden=128) |
+| `use_positional_encoding` | True | Codificação posicional senoidal no encoder (desligar para replicar ChordFormer) |
+| `use_batchnorm_in_conv` | True | BatchNorm dentro do módulo conv do Conformer (mesmo valor no ChordFormer) |
 
-**Total de parâmetros:** ~4.65M sem FFN heads / ~4.68M com FFN heads (ChordFormer, 12 layers, hidden=128)
+**Total de parâmetros:** ~4.65M sem FFN heads / ~4.68M com FFN heads (ChordFormer, 12 layers, hidden=128). Variante ChordFormer-like (4 layers, hidden=256, 16 heads) tem ~6.17M.
+
+> Para a configuração que replica o paper ChordFormer (hop 512, janela de 1000 frames, AdamW + ReduceLROnPlateau, CRF linear λ=30, sem GradNorm), veja [chordformer_replication.md](chordformer_replication.md).
 
 ---
 

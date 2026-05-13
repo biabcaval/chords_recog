@@ -22,9 +22,27 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional
 
 from models.crf_model import CRF
+from models.linear_crf import LinearCRF
 from utils.chord_decomposition import COMPONENT_NAMES, CHORD_VOCAB
 
 CRF_MODE_CHOICES = ['root_triad', 'full']
+CRF_KIND_CHOICES = ['trainable', 'linear']
+
+
+def _make_crf(num_tags: int, kind: str = 'trainable', lam: float = 30.0):
+    """Instantiate either a trainable CRF or the fixed LinearCRF (lambda*I).
+
+    Used by HarmonicCRF / FullChordCRF so both can be switched between the
+    ChordMax default (learned transitions) and the ChordFormer-style fixed
+    smoothing prior without touching the rest of the pipeline.
+    """
+    if kind == 'linear':
+        return LinearCRF(num_tags=num_tags, lam=lam)
+    if kind == 'trainable':
+        return CRF(num_tags=num_tags)
+    raise ValueError(
+        f"Unknown CRF kind '{kind}'. Choices: {CRF_KIND_CHOICES}."
+    )
 
 # Components whose predictions come from the CRF (joint decoding) - root_triad mode
 CRF_COMPONENTS = ['root', 'triad']
@@ -51,13 +69,16 @@ class HarmonicCRF(nn.Module):
         n_triads: Number of triad classes (default: 7, matching CHORD_VOCAB['triad'])
     """
 
-    def __init__(self, n_roots: int = 13, n_triads: int = 7):
+    def __init__(self, n_roots: int = 13, n_triads: int = 7,
+                 crf_kind: str = 'trainable', crf_lambda: float = 30.0):
         super().__init__()
         self.n_roots = n_roots
         self.n_triads = n_triads
         self.n_joint_tags = n_roots * n_triads
+        self.crf_kind = crf_kind
+        self.crf_lambda = float(crf_lambda)
 
-        self.crf = CRF(num_tags=self.n_joint_tags)
+        self.crf = _make_crf(self.n_joint_tags, kind=crf_kind, lam=self.crf_lambda)
 
     def encode_joint_tag(self, root_idx: torch.Tensor, triad_idx: torch.Tensor) -> torch.Tensor:
         """Encode separate root and triad indices into a single joint tag.
@@ -197,14 +218,18 @@ class FullChordCRF(nn.Module):
         chord_vocab: List[str],
         component_matrix: torch.Tensor,
         chord_to_idx: Optional[Dict[str, int]] = None,
+        crf_kind: str = 'trainable',
+        crf_lambda: float = 30.0,
     ):
         super().__init__()
         self.chord_vocab = list(chord_vocab)
         self.n_tags = len(chord_vocab)
         self.chord_to_idx = chord_to_idx or {l: i for i, l in enumerate(chord_vocab)}
+        self.crf_kind = crf_kind
+        self.crf_lambda = float(crf_lambda)
 
         self.register_buffer('component_matrix', component_matrix.long())
-        self.crf = CRF(num_tags=self.n_tags)
+        self.crf = _make_crf(self.n_tags, kind=crf_kind, lam=self.crf_lambda)
 
         lookup, strides = self._build_lookup_tensor()
         self.register_buffer('lookup_tensor', lookup)

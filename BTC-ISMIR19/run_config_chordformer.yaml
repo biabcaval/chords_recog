@@ -1,0 +1,160 @@
+# =============================================================================
+# ChordFormer-like configuration for ChordMax (comparable benchmark)
+#
+# This YAML mirrors the ChordFormer hyperparameters reported in the paper
+# (tabelas 1, 2, 5, 6, 7 of `docs/chordformer_vs_chordmax_tables.tex`), but
+# keeps our 9 output heads (Root/Bass/Triad/Misc/6th/7th/9th/11th/13th).
+# Use it instead of `run_config.yaml` to obtain a fair, head-to-head
+# comparison against the current ChordMax setup.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Audio & Feature Extraction (ChordFormer: hop 512 ~= 23 ms / frame)
+# -----------------------------------------------------------------------------
+
+mp3:
+  song_hz: 22050
+  inst_len: 23.22            # 1000 frames * 512 / 22050 ~= 23.22 s
+  skip_interval: 11.6        # ~50% overlap between consecutive segments
+
+feature:
+  n_bins: 252
+  bins_per_octave: 36
+  hop_length: 512            # ChordFormer (ChordMax uses 2048)
+  large_voca: True
+
+# -----------------------------------------------------------------------------
+# Training (ChordFormer: AdamW + ReduceLROnPlateau(/10, p=5) until lr <= 1e-6)
+# -----------------------------------------------------------------------------
+
+experiment:
+  optimizer: adamw           # ChordFormer uses AdamW
+  learning_rate: 1.0e-3      # ChordFormer initial LR
+  weight_decay: 0.01         # AdamW default-ish weight decay
+  batch_size: 24             # ChordFormer: 24 segments x 1000 frames
+  max_epoch: 200             # Cap; effective stop is lr <= scheduler_min_lr
+  save_step: 20
+  data_ratio: 0.8
+  # NOTE: keep this pointing at the same datasets folder as run_config.yaml.
+  # The preprocessing pipeline writes ChordFormer .pt files to a different
+  # sub-folder automatically because the feature_string encodes hop_length
+  # (so cqt_252_36_512 lives alongside the existing cqt_252_36_2048 without
+  # overwriting anything).
+  data_root: '/home/daniel.melo/datasets'
+  dataset_names:
+    - billboard
+    - dj_avan_songbook1
+    - dj_avan_songbook2
+    - jaah
+    - queen
+    - robbiewilliams
+    - rwc
+    - balanced_v1_full
+
+  # Scheduler ----------------------------------------------------------------
+  scheduler: plateau         # ChordFormer: ReduceLROnPlateau
+  scheduler_factor: 0.1      # divide LR by 10
+  scheduler_patience: 5      # 5 epochs without val improvement
+  scheduler_min_lr: 1.0e-6   # early-stop when LR drops below this
+
+# -----------------------------------------------------------------------------
+# Loss / weighting / regularization (ChordFormer: CE pond., sem GradNorm/Focal)
+# -----------------------------------------------------------------------------
+
+class_weights:
+  enabled: True
+  gamma: 0.5                 # ChordFormer tested {0.3, 0.5, 0.7, 1.0}
+  w_max: 10.0                # ChordFormer tested {10.0, 20.0}
+
+gradnorm:
+  enabled: False             # ChordFormer does NOT use GradNorm
+  alpha: 0.7
+  lr: 0.005
+  eps: 1.0e-8
+  w_min: 1.0e-3
+  w_max: 10.0
+
+focal:
+  gamma: 0.0                 # ChordFormer: no focal loss
+
+# -----------------------------------------------------------------------------
+# CRF (ChordFormer: linear CRF with fixed lambda = 30)
+# -----------------------------------------------------------------------------
+
+crf:
+  type: linear               # linear | trainable | none
+  lambda: 30.0               # fixed self-transition bonus (linear CRF)
+
+curriculum:
+  enabled: False
+  strategy: 'mixed'
+  pacing: 'linear'
+  start_ratio: 0.3
+  pace_epochs: 30
+  difficulty_threshold: 0.5
+  warmup_epochs: 5
+
+# -----------------------------------------------------------------------------
+# Model -- Conformer encoder mirroring ChordFormer dimensions
+#         (252 -> 256, 4 blocks, 16 heads, FFN 4x = 1024, no positional enc.)
+# -----------------------------------------------------------------------------
+
+model:
+  # --- Input geometry -------------------------------------------------------
+  feature_size: 252          # must match feature.n_bins
+  timestep: 1000             # ChordFormer window (~23.2 s @ hop 512)
+
+  # --- Conformer encoder ----------------------------------------------------
+  num_layers: 4              # ChordFormer: 4 Conformer blocks
+  num_heads: 16              # ChordFormer: 16 attention heads
+  hidden_size: 256           # ChordFormer: hidden dim 256 (d_k = 16)
+  conv_kernel_size: 31       # ChordFormer & ChordMax agree
+  ff_expansion_factor: 4     # ChordFormer FFN = 4x hidden = 1024
+  conv_expansion_factor: 2   # not specified in paper; keep ChordMax default
+
+  # ChordFormer-specific knobs ----------------------------------------------
+  use_positional_encoding: False  # ChordFormer: no positional encoding
+  use_batchnorm_in_conv: True     # ChordFormer: BatchNorm in conv module
+
+  # --- Dropout (paper does not report; keep low for fair comparison) -------
+  input_dropout: 0.1
+  layer_dropout: 0.1
+  output_dropout: 0.0
+
+  # --- Output head FFN (kept off as in ChordMax default) -------------------
+  use_head_ffn: False
+  head_ffn_dim: null
+
+  # --- Misc -----------------------------------------------------------------
+  probs_out: False
+
+  # ---------------------------------------------------------------------------
+  # Legacy (BTC backbone only -- ignored by ChordFormer, kept for compatibility)
+  # ---------------------------------------------------------------------------
+  num_chords: 170
+  loss: 'ce'
+  attention_dropout: 0.1
+  relu_dropout: 0.1
+  total_key_depth: 256
+  total_value_depth: 256
+  filter_size: 256
+  use_structured_output: False
+  num_roots: 13
+  num_qualities: 16
+  num_bass: 13
+  root_weight: 1.0
+  quality_weight: 1.0
+  bass_weight: 1.0
+
+# -----------------------------------------------------------------------------
+# Paths -- separate folder so we don't overwrite the ChordMax .pt files
+# -----------------------------------------------------------------------------
+
+path:
+  ckpt_path: 'model_chordformer'
+  result_path: '/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/results_chordformer'
+  asset_path: '/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/assets'
+  # Same root as run_config.yaml; the ChordFormer-like .pt files end up in a
+  # dedicated sub-folder ".../result_decomposed/<dataset>_voca/22050_23.2_11.6/cqt_252_36_512/"
+  # while ChordMax .pt files remain under ".../22050_10.0_5.0/cqt_252_36_2048/".
+  root_path: '/home/daniel.melo/datasets'

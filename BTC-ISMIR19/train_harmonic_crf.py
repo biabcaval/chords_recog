@@ -41,7 +41,12 @@ from models.btc_model_decomposed import (
     BTC_model_decomposed,
     ChordFormer_model_decomposed,
 )
-from models.harmonic_crf import HarmonicCRF, FullChordCRF, CRF_MODE_CHOICES
+from models.harmonic_crf import (
+    HarmonicCRF,
+    FullChordCRF,
+    CRF_MODE_CHOICES,
+    CRF_KIND_CHOICES,
+)
 from data.audio_dataset_structured import (
     AudioDatasetStructured,
     AudioDataLoaderStructured,
@@ -111,6 +116,13 @@ def main():
     parser.add_argument('--crf_mode', type=str, default='root_triad',
                         choices=CRF_MODE_CHOICES,
                         help='CRF mode: root_triad (91 tags) or full (~2000 tags)')
+    parser.add_argument('--crf_kind', type=str, default=None,
+                        choices=CRF_KIND_CHOICES,
+                        help="CRF transition matrix kind: 'trainable' (ChordMax default) "
+                             "or 'linear' (ChordFormer: fixed lambda*I). "
+                             "When omitted, falls back to crf.type in the YAML, then 'trainable'.")
+    parser.add_argument('--crf_lambda', type=float, default=None,
+                        help='Self-transition bonus when --crf_kind=linear (default 30, ChordFormer paper).')
     parser.add_argument('--early_stop_patience', type=int, default=10,
                         help='Stop after N epochs without improvement')
     parser.add_argument('--lr_decay_factor', type=float, default=0.5,
@@ -228,6 +240,32 @@ def main():
     crf_mode = args.crf_mode
     logger.info(f"CRF mode: {crf_mode}")
 
+    # Resolve transition-matrix kind: CLI > YAML(crf.type) > 'trainable'.
+    crf_cfg = config.get('crf', {}) if hasattr(config, 'get') else {}
+    crf_kind = (
+        args.crf_kind
+        or (crf_cfg.get('type', None) if hasattr(crf_cfg, 'get') else None)
+        or 'trainable'
+    ).lower()
+    if crf_kind == 'none':
+        # 'none' only makes sense for backbone-only runs; here we still need a
+        # CRF to train, so warn and fall back to 'trainable'.
+        logger.warning("crf.type='none' but train_harmonic_crf.py requires a CRF; using 'trainable'.")
+        crf_kind = 'trainable'
+    if crf_kind not in CRF_KIND_CHOICES:
+        logger.warning(f"Unknown CRF kind '{crf_kind}'; defaulting to 'trainable'.")
+        crf_kind = 'trainable'
+
+    crf_lambda = float(
+        args.crf_lambda
+        if args.crf_lambda is not None
+        else (crf_cfg.get('lambda', 30.0) if hasattr(crf_cfg, 'get') else 30.0)
+    )
+    logger.info(
+        f"CRF kind: {crf_kind}"
+        + (f" (lambda={crf_lambda})" if crf_kind == 'linear' else "")
+    )
+
     chord_vocab = None
     chord_to_idx = None
     component_matrix = None
@@ -248,15 +286,25 @@ def main():
             chord_vocab=chord_vocab,
             component_matrix=component_matrix,
             chord_to_idx=chord_to_idx,
+            crf_kind=crf_kind,
+            crf_lambda=crf_lambda,
         ).to(device)
     else:
-        harmonic_crf = HarmonicCRF(n_roots=13, n_triads=7).to(device)
+        harmonic_crf = HarmonicCRF(
+            n_roots=13, n_triads=7,
+            crf_kind=crf_kind, crf_lambda=crf_lambda,
+        ).to(device)
 
-    crf_params = sum(p.numel() for p in harmonic_crf.parameters())
+    crf_params = sum(p.numel() for p in harmonic_crf.parameters() if p.requires_grad)
     logger.info(f"CRF parameters (trainable): {crf_params:,}")
+    if crf_kind == 'linear' and crf_params == 0:
+        logger.warning(
+            "LinearCRF has no trainable parameters; the optimizer step will be a no-op. "
+            "Use this kind for inference-side comparison; loss values are still informative."
+        )
 
     optimizer = optim.Adam(
-        harmonic_crf.parameters(),
+        [p for p in harmonic_crf.parameters() if p.requires_grad] or [torch.zeros(1, requires_grad=True)],
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )

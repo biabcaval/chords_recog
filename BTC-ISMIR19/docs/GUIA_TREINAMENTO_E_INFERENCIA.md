@@ -568,5 +568,68 @@ Sem o flag, o comportamento é idêntico ao anterior (argmax por frame). Veja de
 
 ---
 
-**Última atualização:** Março 2026
+## Variante ChordFormer-like (replicação do paper)
+
+Para rodar uma comparação cabeça-a-cabeça contra o ChordFormer, existe um YAML alternativo que **replica fielmente** os hiperparâmetros do paper (hop 512, janela de 1000 frames, hidden 256, 4 blocos, 16 heads, sem codificação posicional, AdamW + ReduceLROnPlateau, CRF linear λ=30, sem GradNorm), **mantendo as 9 heads do ChordMax**. Detalhes em [chordformer_replication.md](chordformer_replication.md).
+
+### Pré-processamento (hop=512)
+
+Os `.pt` atuais foram gerados com `hop_length=2048` e **não servem** para essa variante. O script grava em uma subpasta separada (`cqt_252_36_512`) automaticamente, sem sobrescrever os dados atuais:
+
+```bash
+python BTC-ISMIR19/scripts/preprocess_decomposed.py \
+    --config BTC-ISMIR19/run_config_chordformer.yaml \
+    --datasets billboard dj_avan_songbook1 dj_avan_songbook2 jaah queen robbiewilliams rwc \
+    --num_workers 4
+```
+
+### Treino do backbone ChordFormer-like
+
+```bash
+python BTC-ISMIR19/train_decomposed.py \
+    --config BTC-ISMIR19/run_config_chordformer.yaml \
+    --backbone chordformer \
+    --optimizer adamw \
+    --scheduler plateau --scheduler_factor 0.1 --scheduler_patience 5 --scheduler_min_lr 1e-6 \
+    --crf linear --crf_lambda 30 \
+    --disable_gradnorm \
+    --batch_size 24 --learning_rate 1e-3 --weight_decay 0.01 \
+    --num_epochs 200 \
+    --kfold 0 \
+    --run_name chordformer_replica_k0
+```
+
+O treino para automaticamente quando o LR cair abaixo de `1e-6` (igual ao critério do paper).
+
+### LinearCRF (λ=30) sobre o backbone congelado
+
+```bash
+python BTC-ISMIR19/train_harmonic_crf.py \
+    --checkpoint checkpoints/chordformer_replica_k0/model_best.pt \
+    --config BTC-ISMIR19/run_config_chordformer.yaml \
+    --crf_kind linear --crf_lambda 30 \
+    --train_datasets billboard dj_avan_songbook1 dj_avan_songbook2 jaah queen robbiewilliams rwc \
+    --kfold 0 \
+    --num_epochs 5 \
+    --crf_run_name chordformer_replica_k0_linearcrf
+```
+
+### Flags CLI adicionadas a `train_decomposed.py`
+
+| Flag                       | Default | Descrição                                                            |
+|----------------------------|---------|----------------------------------------------------------------------|
+| `--optimizer {adam,adamw}` | `adam`  | Otimizador. ChordFormer paper usa `adamw`.                           |
+| `--scheduler {cosine,plateau}` | `cosine` | Scheduler. ChordFormer paper usa `plateau`.                    |
+| `--scheduler_factor`       | `0.1`   | Fator de redução do `ReduceLROnPlateau` (÷10 por padrão).            |
+| `--scheduler_patience`     | `5`     | Patience em épocas sem melhora.                                      |
+| `--scheduler_min_lr`       | `1e-6`  | Early-stop por LR (sai do treino quando `lr <= min_lr`).             |
+| `--crf {none,trainable,linear}` | `none` | Tipo de CRF (gravado no `training_config`).                     |
+| `--crf_lambda`             | `30.0`  | λ self-transition para o `LinearCRF`.                                |
+| `--disable_gradnorm`       | desligado | Atalho para `--no_gradnorm`.                                       |
+
+Defaults preservam o ChordMax atual sem regressões.
+
+---
+
+**Última atualização:** Maio 2026
 

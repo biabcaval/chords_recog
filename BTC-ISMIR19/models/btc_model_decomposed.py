@@ -322,6 +322,10 @@ class ChordFormer_model_decomposed(nn.Module):
         self.last_shared_features = None
 
         # Conformer encoder (ChordFormer backbone)
+        # Two new flags allow toggling between ChordMax-style (sinusoidal pos.
+        # encoding ON, BatchNorm in conv) and ChordFormer-style (no pos. encoding,
+        # BatchNorm still ON per Tabela 2). Both default to the current ChordMax
+        # behavior so existing runs are unaffected.
         self.conformer_encoder = ConformerEncoder(
             embedding_size=cfg['feature_size'],
             hidden_size=cfg['hidden_size'],
@@ -334,6 +338,8 @@ class ChordFormer_model_decomposed(nn.Module):
             input_dropout=cfg.get('input_dropout', 0.2),
             layer_dropout=cfg.get('layer_dropout', 0.2),
             attention_map=True,
+            use_positional_encoding=cfg.get('use_positional_encoding', True),
+            use_batchnorm_in_conv=cfg.get('use_batchnorm_in_conv', True),
         )
 
         # Multi-head chord decomposition (with optional FFN bottleneck)
