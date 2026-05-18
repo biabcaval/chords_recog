@@ -38,8 +38,9 @@ different naming convention.
 import os
 import sys
 import argparse
-import math
 from multiprocessing import Pool
+
+from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -174,23 +175,60 @@ def preprocess_datasets_decomposed_cqtroll(
 
     if all_files:
         print("\n" + "=" * 60)
-        print("Starting CQT-roll preprocessing...")
+        print(f"Starting CQT-roll preprocessing ({len(all_files)} songs)...")
         print("=" * 60)
+
+        # Validate cqtroll preconditions once, up-front, so the user gets
+        # an immediate error rather than waiting for the first worker to
+        # raise inside the Pool.
+        preprocessor._validate_cqtroll_config()
+
+        total_written = 0
+        total_skipped = 0
+        failed_songs = 0
 
         if num_workers > 1:
             print(f"Using {num_workers} parallel workers")
-            num_path_per_process = math.ceil(len(all_files) / num_workers)
-            args = [
-                all_files[i * num_path_per_process:(i + 1) * num_path_per_process]
-                for i in range(num_workers)
-            ]
-
-            p = Pool(processes=num_workers)
-            p.map(preprocessor.generate_labels_features_voca_cqtroll, args)
-            p.close()
+            with Pool(processes=num_workers) as p:
+                iterator = p.imap_unordered(
+                    preprocessor.process_one_song_cqtroll,
+                    all_files,
+                )
+                with tqdm(total=len(all_files), desc="Step 1 (cqtroll)",
+                          unit="song", smoothing=0.05, dynamic_ncols=True) as pbar:
+                    for result in iterator:
+                        total_written += result.get('instances_written', 0)
+                        total_skipped += result.get('instances_skipped', 0)
+                        if result.get('song_failed'):
+                            failed_songs += 1
+                        pbar.set_postfix(
+                            written=total_written,
+                            skipped=total_skipped,
+                            failed=failed_songs,
+                        )
+                        pbar.update(1)
         else:
             print("Using single worker (sequential processing)")
-            preprocessor.generate_labels_features_voca_cqtroll(all_files)
+            with tqdm(total=len(all_files), desc="Step 1 (cqtroll)",
+                      unit="song", smoothing=0.05, dynamic_ncols=True) as pbar:
+                for song in all_files:
+                    result = preprocessor.process_one_song_cqtroll(song)
+                    total_written += result.get('instances_written', 0)
+                    total_skipped += result.get('instances_skipped', 0)
+                    if result.get('song_failed'):
+                        failed_songs += 1
+                    pbar.set_postfix(
+                        written=total_written,
+                        skipped=total_skipped,
+                        failed=failed_songs,
+                    )
+                    pbar.update(1)
+
+        print(
+            f"\nStep 1 done: {total_written} instances written, "
+            f"{total_skipped} skipped (already existed), "
+            f"{failed_songs} songs failed"
+        )
 
     print("\n" + "=" * 70)
     print("STEP 2: Converting to Decomposed Format (9 components)")
