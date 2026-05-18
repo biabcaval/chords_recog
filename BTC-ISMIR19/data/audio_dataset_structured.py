@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from data.audio_dataset import AudioDataset as BaseAudioDataset
+from utils.preprocess import cqt_to_log_db
 from utils.chord_decomposition import ChordDecomposer, COMPONENT_NAMES, NUM_COMPONENTS, CHORD_VOCAB
 from utils.mir_eval_modules import idx2voca_chord
 import logging
@@ -92,7 +93,7 @@ class AudioDatasetStructured(BaseAudioDataset):
         res = dict()
         data = torch.load(instance_path, weights_only=False)
 
-        features = np.log(np.abs(data['feature']) + 1e-6)
+        features = cqt_to_log_db(data['feature'])
 
         if self.norm_mean is not None:
             features = (features - self.norm_mean) / self.norm_std

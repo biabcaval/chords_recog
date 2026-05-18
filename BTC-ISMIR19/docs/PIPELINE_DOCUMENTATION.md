@@ -91,11 +91,23 @@ duração = 108 × (2048 / 22050) ≈ 10.03 segundos
 
 As features passam por dois estágios de normalização:
 
-**1. Log-magnitude (sempre aplicado):**
+**1. Log-magnitude em dB ref=max (sempre aplicado, formulação ChordFormer):**
 
 ```python
-features = np.log(np.abs(cqt) + 1e-6)
+from utils.preprocess import cqt_to_log_db
+features = cqt_to_log_db(cqt)
+# equivalente a:
+#   features = librosa.amplitude_to_db(np.abs(cqt), ref=np.max, top_db=80)
+#   ≈ 20 * log10(|cqt| / max|cqt|), com piso em -80 dB
 ```
+
+> **Nota histórica:** versões anteriores deste código usavam
+> `np.log(np.abs(cqt) + 1e-6)` (log natural sem normalização por pico).
+> A formulação atual em dB com `ref=max` espelha a Tabela 1 do paper
+> ChordFormer (veja `docs/chordformer_replication.md`). Arquivos de
+> normalização (`normalization*.pt`) gerados com a forma antiga **não
+> são compatíveis** e precisam ser recomputados via
+> `scripts/compute_normalization.py`.
 
 **2. Padronização mean/std (opcional, recomendado):**
 
@@ -312,9 +324,10 @@ class AudioDatasetStructured(Dataset):
     def __getitem__(self, idx):
         # 1. Carrega arquivo .pt
         data = torch.load(instance_path)
-        
-        # 2. Processa features
-        features = np.log(np.abs(data['feature']) + 1e-6)
+
+        # 2. Processa features (dB ref=max, formulação ChordFormer)
+        from utils.preprocess import cqt_to_log_db
+        features = cqt_to_log_db(data['feature'])
         features = features.T  # (T, 252)
         
         # 3. Converte índices para labels
@@ -1181,9 +1194,10 @@ model.load_state_dict(checkpoint['model_state_dict'], strict=False)
 model.eval()
 
 # Carregar áudio e extrair features
+from utils.preprocess import cqt_to_log_db
 y, sr = librosa.load('musica.mp3', sr=22050)
 cqt = librosa.cqt(y, sr=sr, n_bins=252, bins_per_octave=36, hop_length=2048)
-feature = np.log(np.abs(cqt) + 1e-6)
+feature = cqt_to_log_db(cqt)   # dB ref=max, piso em -80 dB
 
 # Preparar input (primeiro chunk de 108 frames)
 chunk = feature[:, :108].T  # (108, 252)

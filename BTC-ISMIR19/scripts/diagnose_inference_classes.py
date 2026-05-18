@@ -36,6 +36,7 @@ from utils.chord_decomposition import (
     ChordDecomposer, ChordReassembler, COMPONENT_NAMES, CHORD_VOCAB
 )
 from utils.hparams import HParams
+from utils.preprocess import cqt_to_log_db
 
 
 def load_model(checkpoint_path, config, device):
@@ -73,7 +74,7 @@ def extract_features(audio_path, config, normalization=None):
 
     y, sr = librosa.load(audio_path, sr=sr)
     cqt = librosa.cqt(y, sr=sr, n_bins=n_bins, bins_per_octave=bins_per_octave, hop_length=hop_length)
-    feature = np.log(np.abs(cqt) + 1e-6)
+    feature = cqt_to_log_db(cqt)
 
     if normalization is not None:
         feature = (feature - normalization["mean"]) / normalization["std"]

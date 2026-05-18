@@ -4,6 +4,8 @@ import mir_eval
 import torch
 import os
 
+from utils.preprocess import cqt_to_log_db
+
 idx2chord = ['C', 'C:min', 'C#', 'C#:min', 'D', 'D:min', 'D#', 'D#:min', 'E', 'E:min', 'F', 'F:min', 'F#',
              'F#:min', 'G', 'G:min', 'G#', 'G#:min', 'A', 'A:min', 'A#', 'A#:min', 'B', 'B:min', 'N']
 
@@ -103,7 +105,7 @@ def audio_file_to_features(audio_file, config):
         currunt_sec_hz = end_idx
     tmp = librosa.cqt(original_wav[currunt_sec_hz:], sr=sr, n_bins=config.feature['n_bins'], bins_per_octave=config.feature['bins_per_octave'], hop_length=config.feature['hop_length'])
     feature = np.concatenate((feature, tmp), axis=1)
-    feature = np.log(np.abs(feature) + 1e-6)
+    feature = cqt_to_log_db(feature)
     feature_per_second = config.mp3['inst_len'] / config.model['timestep']
     song_length_second = len(original_wav)/config.mp3['song_hz']
     return feature, feature_per_second, song_length_second

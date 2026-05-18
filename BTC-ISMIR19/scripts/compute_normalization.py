@@ -1,9 +1,18 @@
 #!/usr/bin/env python
 """
-Compute global mean and std of log-CQT features across ALL data of the
-specified datasets (no k-fold split — uses 100% of the data).
+Compute global mean and std of **dB-ref-max log-CQT** features across ALL
+data of the specified datasets (no k-fold split — uses 100% of the data).
 
-Saves the result as a .pt file that can be loaded during training and inference.
+The transform applied here is *exactly* the same one used by the loaders
+and inference paths via :func:`utils.preprocess.cqt_to_log_db` — namely
+``20 * log10(|cqt| / max|cqt|)`` clipped to ``-80`` dB.  This guarantees
+that the statistics saved by this script are compatible with the runtime
+loader; mixing the previous ``ln(|x| + 1e-6)`` stats with the new dB
+loader (or vice-versa) would shift features by tens of dB and destroy
+training.
+
+Saves the result as a .pt file that can be loaded during training and
+inference.
 
 Usage:
     python scripts/compute_normalization.py \
@@ -27,6 +36,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from utils.hparams import HParams
+from utils.preprocess import cqt_to_log_db
 
 
 def find_all_pt_files(data_root, dataset_names, config):
@@ -73,7 +83,7 @@ def compute_normalization(pt_files):
         raw = data['feature']
         if isinstance(raw, torch.Tensor):
             raw = raw.numpy()
-        feat = np.log(np.abs(raw) + 1e-6).astype(np.float64).ravel()
+        feat = cqt_to_log_db(raw).astype(np.float64).ravel()
 
         for val in feat:
             n += 1

@@ -12,6 +12,50 @@ class FeatureTypes(Enum):
     cqt = 'cqt'
 
 
+def cqt_to_log_db(cqt, ref='max', top_db=80.0, amin=1e-10):
+    """Convert a (possibly complex) CQT to log-magnitude in **dB ref=max**.
+
+    Mirrors the ChordFormer paper formulation (Tabela 1 of
+    ``docs/chordformer_replication.md`` / the comparison tables):
+
+        S_dB(t, f) = 20 * log10(|CQT(t, f)| / max(|CQT|))
+        S_dB       = max(S_dB, -top_db)              # floor at ``top_db`` below the per-instance max
+
+    This replaces the previous ``np.log(np.abs(x) + 1e-6)`` transform used
+    throughout the loaders and inference paths, which was a natural-log
+    of magnitude with an additive epsilon -- mathematically *not* the same
+    as the ChordFormer paper's dB(ref=max) formulation.
+
+    The two transforms are both monotonic in ``|x|`` so the *ordering* of
+    bins is preserved, but their distributions differ in shape (dB has a
+    hard floor at ``-top_db``; the previous form had a long left tail) and
+    in scale (log10 vs ln, with a normalisation by the per-instance max).
+    Because we centre/standardise the loader output via mean/std stored in
+    ``normalization*.pt``, those statistics **must be recomputed** with
+    :mod:`scripts/compute_normalization` after switching transforms.
+
+    Args:
+        cqt: ndarray of shape ``(n_bins, n_frames)`` (real or complex).
+            Complex input is handled via ``np.abs``.
+        ref: reference for the dB conversion. ``'max'`` (default) uses
+            ``np.max(|cqt|)`` for each call (per-instance normalisation,
+            matching ChordFormer). A positive float fixes the reference
+            globally; a callable is forwarded to ``librosa.amplitude_to_db``.
+        top_db: floor (in dB below the reference) for the output.
+            ``80.0`` matches the librosa default and is the standard
+            choice in MIR.
+        amin: minimum magnitude before taking log (avoids log(0)).
+
+    Returns:
+        ndarray of the same shape as ``cqt``, dtype ``float32``, with
+        values in ``[-top_db, 0]`` when ``ref='max'``.
+    """
+    mag = np.abs(cqt)
+    ref_arg = np.max if ref == 'max' else ref
+    feature = librosa.amplitude_to_db(mag, ref=ref_arg, amin=amin, top_db=top_db)
+    return feature.astype(np.float32)
+
+
 def shift_cqt_bins(cqt, semitones, bins_per_semitone=3):
     """Shift a CQT array along its frequency axis (axis=0) by an integer
     number of semitones, without wrap-around.

@@ -23,7 +23,7 @@ is mapped to the YAML key or CLI flag that controls it.
 
 | Paper row              | ChordFormer value         | YAML key (file)                                         |
 | ---------------------- | ------------------------- | ------------------------------------------------------- |
-| Transformada           | CQT em dB (ref. máx.)     | `utils/preprocess.py` (unchanged — CQT log-magnitude)    |
+| Transformada           | CQT em dB (ref. máx.)     | `utils/preprocess.cqt_to_log_db()` aplicado pelos loaders e scripts de inferência (`librosa.amplitude_to_db(\|cqt\|, ref=np.max, top_db=80)`) |
 | Taxa de amostragem     | 22 050 Hz                 | `mp3.song_hz: 22050` (`run_config_chordformer.yaml`)    |
 | Bins de frequência     | 252                       | `feature.n_bins: 252`                                   |
 | Bins por oitava        | 36                        | `feature.bins_per_octave: 36`                           |
@@ -212,6 +212,7 @@ python BTC-ISMIR19/train_decomposed.py \
 | Arquivo                                                                   | O que mudou                                                                |
 | ------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | [`run_config_chordformer.yaml`](../run_config_chordformer.yaml)           | YAML novo com os números do ChordFormer.                                   |
+| [`utils/preprocess.py`](../utils/preprocess.py)                           | **Novo helper** `cqt_to_log_db()` (dB ref=max, top_db=80) usado por todos os loaders e scripts de inferência. Substitui `np.log(\|x\|+1e-6)`. |
 | [`utils/transformer_modules.py`](../utils/transformer_modules.py)         | `use_positional_encoding`, `use_batchnorm_in_conv` em ConformerEncoder/Conv. |
 | [`models/btc_model_decomposed.py`](../models/btc_model_decomposed.py)     | Repassa os flags do YAML para o encoder.                                   |
 | [`utils/hparams.py`](../utils/hparams.py)                                 | `HParams.get()` + `__contains__` / `__getitem__` (destrava `config.get`).  |
@@ -219,3 +220,4 @@ python BTC-ISMIR19/train_decomposed.py \
 | [`models/harmonic_crf.py`](../models/harmonic_crf.py)                     | `HarmonicCRF` / `FullChordCRF` aceitam `crf_kind` (`trainable` ou `linear`).|
 | [`train_decomposed.py`](../train_decomposed.py)                           | Flags `--optimizer`, `--scheduler`, `--crf`, `--disable_gradnorm`, early-stop por LR. |
 | [`train_harmonic_crf.py`](../train_harmonic_crf.py)                       | Flags `--crf_kind`, `--crf_lambda` passadas ao `HarmonicCRF` / `FullChordCRF`. |
+| `data/audio_dataset.py`, `data/audio_dataset_structured.py`, `train_curriculum.py`, `test_full.py`, `infer_full_audio.py`, `infer_decomposed.py`, `run_inference_batch.py`, `run_inference_batch_decomposed.py`, `scripts/diagnose_inference_classes.py`, `utils/mir_eval_modules.py`, `scripts/compute_normalization.py` | Trocam a transformação `np.log(\|x\|+1e-6)` por `cqt_to_log_db(\|x\|)` para casar com a Tabela 1 do paper. **Atenção:** `normalization*.pt` gerados antes desta mudança são incompatíveis e precisam ser recomputados. |

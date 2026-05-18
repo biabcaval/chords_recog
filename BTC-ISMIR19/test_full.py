@@ -9,6 +9,7 @@ from utils.hparams import HParams
 from utils.mir_eval_modules import large_voca_score_calculation, root_majmin_score_calculation
 from models.btc_model import BTC_model
 from data.audio_dataset import AudioDataset
+from utils.preprocess import cqt_to_log_db
 
 logger.logging_verbosity(1)
 use_cuda = torch.cuda.is_available()
@@ -116,7 +117,7 @@ class TestDataset(torch.utils.data.Dataset):
         instance_path = self.paths[idx]
         res = dict()
         data = torch.load(instance_path)
-        res['feature'] = np.log(np.abs(data['feature']) + 1e-6)
+        res['feature'] = cqt_to_log_db(data['feature'])
         res['chord'] = data['chord']
         return res
 

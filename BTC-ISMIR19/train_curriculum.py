@@ -16,6 +16,7 @@ import argparse
 from utils.pytorch_utils import adjusting_learning_rate
 from utils.mir_eval_modules import root_majmin_score_calculation, large_voca_score_calculation
 from utils.transformer_modules import compute_class_weights, compute_structured_class_weights
+from utils.preprocess import cqt_to_log_db
 from data.curriculum_learning import CurriculumLearning, CurriculumDataLoader
 import warnings
 import torch
@@ -235,7 +236,7 @@ class TestDataset(torch.utils.data.Dataset):
         instance_path = self.paths[idx]
         res = dict()
         data = torch.load(instance_path)
-        res['feature'] = np.log(np.abs(data['feature']) + 1e-6)
+        res['feature'] = cqt_to_log_db(data['feature'])
         res['chord'] = data['chord']
         return res
 

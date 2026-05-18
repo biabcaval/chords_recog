@@ -36,6 +36,7 @@ from models.btc_model_decomposed import BTC_model_decomposed, ChordFormer_model_
 from models.harmonic_crf import HarmonicCRF
 from utils.chord_decomposition import ChordReassembler, COMPONENT_NAMES
 from utils.hparams import HParams
+from utils.preprocess import cqt_to_log_db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -142,7 +143,7 @@ def audio_file_to_features(audio_path, config, normalization=None):
     )
     feature = tail_cqt if feature is None else np.concatenate((feature, tail_cqt), axis=1)
 
-    feature = np.log(np.abs(feature) + 1e-6)
+    feature = cqt_to_log_db(feature)
 
     if normalization is not None:
         feature = (feature - normalization['mean']) / normalization['std']

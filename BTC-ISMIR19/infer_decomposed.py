@@ -23,6 +23,7 @@ from models.btc_model_decomposed import BTC_model_decomposed, ChordFormer_model_
 from utils.decomposed_inference import DecomposedChordInference, ChordMetrics
 from utils.chord_decomposition import ChordDecomposer, ChordReassembler
 from utils.hparams import HParams
+from utils.preprocess import cqt_to_log_db
 
 
 def _build_model(config, backbone='auto', checkpoint_meta=None):
@@ -129,8 +130,8 @@ class ChordRecognitionInference:
             hop_length=self.hop_length
         )
         
-        # Log magnitude + optional normalization
-        feature = np.log(np.abs(cqt) + 1e-6)
+        # Log magnitude in dB ref=max (ChordFormer-style); see utils.preprocess.cqt_to_log_db
+        feature = cqt_to_log_db(cqt)
         if self.normalization is not None:
             feature = (feature - self.normalization['mean']) / self.normalization['std']
         

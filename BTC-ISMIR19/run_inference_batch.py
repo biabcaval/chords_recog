@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils import logger
 from utils.hparams import HParams
+from utils.preprocess import cqt_to_log_db
 from models.btc_model import BTC_model
 
 logger.logging_verbosity(1)
@@ -69,7 +70,7 @@ def audio_file_to_features(audio_file, config):
                       bins_per_octave=config.feature['bins_per_octave'], 
                       hop_length=config.feature['hop_length'])
     feature = np.concatenate((feature, tmp), axis=1)
-    feature = np.log(np.abs(feature) + 1e-6)
+    feature = cqt_to_log_db(feature)
     feature_per_second = config.mp3['inst_len'] / config.model['timestep']
     song_length_second = len(original_wav) / config.mp3['song_hz']
     return feature, feature_per_second, song_length_second

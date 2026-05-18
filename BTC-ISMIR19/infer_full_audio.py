@@ -19,6 +19,7 @@ import logging
 from models.btc_model_decomposed import BTC_model_decomposed, ChordFormer_model_decomposed
 from utils.chord_decomposition import ChordReassembler, COMPONENT_NAMES
 from utils.hparams import HParams
+from utils.preprocess import cqt_to_log_db
 
 
 def _build_model(config, backbone='auto', checkpoint_meta=None):
@@ -71,8 +72,8 @@ def extract_features_full(audio_path, config):
         hop_length=hop_length
     )
     
-    # Log magnitude
-    feature = np.log(np.abs(cqt) + 1e-6)
+    # Log magnitude in dB ref=max (ChordFormer-style; see utils.preprocess.cqt_to_log_db)
+    feature = cqt_to_log_db(cqt)
     logger.info(f"Feature shape: {feature.shape} (bins x frames)")
     
     return feature, sr, hop_length

@@ -3,7 +3,7 @@ import numpy as np
 import os
 import torch
 from torch.utils.data import Dataset, DataLoader
-from utils.preprocess import Preprocess, FeatureTypes
+from utils.preprocess import Preprocess, FeatureTypes, cqt_to_log_db
 import math
 from multiprocessing import Pool
 from sortedcontainers import SortedList
@@ -81,7 +81,7 @@ class AudioDataset(Dataset):
 
         res = dict()
         data = torch.load(instance_path)
-        res['feature'] = np.log(np.abs(data['feature']) + 1e-6)
+        res['feature'] = cqt_to_log_db(data['feature'])
         res['chord'] = data['chord']
         
         # Load structured targets if available (for large_voca mode)
