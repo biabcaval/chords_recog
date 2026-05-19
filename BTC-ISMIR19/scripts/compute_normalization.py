@@ -11,6 +11,16 @@ loader; mixing the previous ``ln(|x| + 1e-6)`` stats with the new dB
 loader (or vice-versa) would shift features by tens of dB and destroy
 training.
 
+Mean/std are accumulated with a **vectorized parallel Welford** update
+(Chan/Golub/LeVeque 1979): each file's ~252k values are reduced to three
+scalars in numpy (microseconds per file), and only those scalars are
+folded into the running aggregate.  This is mathematically equivalent
+to the original element-wise Welford loop but ~1000x faster — without
+this optimisation, the script took ~12-25h to process 8 datasets; with
+it, ~30-60 min, dominated by ``torch.load`` IO.
+
+Live progress (mean/std/n, ETA) is shown via a tqdm bar.
+
 Saves the result as a .pt file that can be loaded during training and
 inference.
 
@@ -32,6 +42,7 @@ import argparse
 import glob
 import torch
 import numpy as np
+from tqdm import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -72,31 +83,66 @@ def find_all_pt_files(data_root, dataset_names, config):
 
 
 def compute_normalization(pt_files):
-    """Welford's online algorithm for numerically stable mean/std."""
+    """Vectorized parallel Welford for mean/std over all .pt features.
+
+    For each file, we reduce the (252, ~1001) feature array to three
+    summary scalars (chunk_n, chunk_mean, chunk_m2) using vectorized
+    numpy ops, then fold them into the running aggregate via Chan/Welford's
+    parallel update formula (Chan, Golub & LeVeque, 1979):
+
+        delta    = chunk_mean - running_mean
+        new_n    = n + chunk_n
+        new_mean = running_mean + delta * chunk_n / new_n
+        new_M2   = running_M2 + chunk_M2 + delta^2 * n * chunk_n / new_n
+
+    This is mathematically equivalent to the previous element-wise
+    Welford loop but ~1000x faster, because the per-file reduction stays
+    inside numpy and avoids the Python-level boxing of every value.
+
+    Progress (mean/std/n) is exposed live through a tqdm progress bar.
+    """
     n = 0
     mean = 0.0
     m2 = 0.0
 
-    total = len(pt_files)
-    for i, path in enumerate(pt_files):
+    pbar = tqdm(
+        pt_files,
+        desc="compute_normalization",
+        unit="file",
+        smoothing=0.05,
+        dynamic_ncols=True,
+    )
+    for i, path in enumerate(pbar):
         data = torch.load(path, weights_only=False)
         raw = data['feature']
         if isinstance(raw, torch.Tensor):
             raw = raw.numpy()
         feat = cqt_to_log_db(raw).astype(np.float64).ravel()
 
-        for val in feat:
-            n += 1
-            delta = val - mean
-            mean += delta / n
-            delta2 = val - mean
-            m2 += delta * delta2
+        chunk_n = int(feat.size)
+        chunk_mean = float(feat.mean())
+        # Numerically stable: subtract chunk mean before squaring.
+        chunk_m2 = float(((feat - chunk_mean) ** 2).sum())
 
-        if (i + 1) % 500 == 0 or i == total - 1:
-            std = np.sqrt(m2 / n) if n > 1 else 1.0
-            print(f"  [{i + 1}/{total}]  mean={mean:.6f}  std={std:.6f}  (n={n:,})")
+        if n == 0:
+            n, mean, m2 = chunk_n, chunk_mean, chunk_m2
+        else:
+            delta = chunk_mean - mean
+            new_n = n + chunk_n
+            new_mean = mean + delta * chunk_n / new_n
+            new_m2 = m2 + chunk_m2 + delta * delta * n * chunk_n / new_n
+            n, mean, m2 = new_n, new_mean, new_m2
 
-    std = np.sqrt(m2 / n) if n > 1 else 1.0
+        # Refresh live stats every 100 files (cheap; avoids tqdm spam).
+        if (i + 1) % 100 == 0 or i == len(pt_files) - 1:
+            std = (m2 / n) ** 0.5 if n > 1 else 1.0
+            pbar.set_postfix(
+                mean=f"{mean:+.4f}",
+                std=f"{std:.4f}",
+                n=f"{n:,}",
+            )
+
+    std = (m2 / n) ** 0.5 if n > 1 else 1.0
     return float(mean), float(std)
 
 
@@ -110,22 +156,31 @@ def main():
     parser.add_argument("--output", type=str, default="normalization.pt")
     args = parser.parse_args()
 
+    # Force line-buffered stdout so the header/footer prints reach the
+    # terminal (and any `| tee log`) immediately, even when stdout is a
+    # pipe.  Without this, Python defaults to 4-8 KB block buffering on
+    # non-TTY stdout, which would delay these short messages for minutes.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # py>=3.7
+    except AttributeError:
+        pass
+
     config = HParams.load(args.config)
     data_root = config.experiment.get(
         'data_root', config.path.get('root_path', '')
     )
     dataset_names = args.datasets or config.experiment.get('dataset_names', ['billboard'])
 
-    print(f"Config     : {args.config}")
-    print(f"Data root  : {data_root}")
-    print(f"Datasets   : {dataset_names}")
-    print()
+    print(f"Config     : {args.config}", flush=True)
+    print(f"Data root  : {data_root}", flush=True)
+    print(f"Datasets   : {dataset_names}", flush=True)
+    print(flush=True)
 
     pt_files = find_all_pt_files(data_root, dataset_names, config)
-    print(f"\nTotal files: {len(pt_files)}\n")
+    print(f"\nTotal files: {len(pt_files)}\n", flush=True)
 
     if not pt_files:
-        print("ERROR: No .pt files found.")
+        print("ERROR: No .pt files found.", flush=True)
         return
 
     mean, std = compute_normalization(pt_files)
@@ -138,9 +193,9 @@ def main():
     }
     torch.save(payload, args.output)
 
-    print(f"\nSaved to: {args.output}")
-    print(f"  mean = {mean:.6f}")
-    print(f"  std  = {std:.6f}")
+    print(f"\nSaved to: {args.output}", flush=True)
+    print(f"  mean = {mean:.6f}", flush=True)
+    print(f"  std  = {std:.6f}", flush=True)
 
 
 if __name__ == "__main__":
