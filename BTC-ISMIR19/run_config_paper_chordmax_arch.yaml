@@ -1,0 +1,162 @@
+# =============================================================================
+# Hybrid configuration: ChordMax encoder dims + ChordFormer-paper training
+# recipe + hop-512 long-window input features.
+#
+# This YAML is meant for the ablation where we keep the *small/deep*
+# Conformer architecture from the original ChordMax (hidden=128, 12
+# layers, 8 heads) but train it with the paper's optimizer/scheduler/
+# loss/CRF on the new hop-512 + 23.2 s window features.
+#
+# It diverges from `run_config_chordformer.yaml` only in the `model:`
+# section (architecture dims) and in `path.ckpt_path`/`result_path`.
+# Everything else is paper-aligned.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Audio & Feature Extraction (ChordFormer paper input: hop 512, ~23 s window)
+# -----------------------------------------------------------------------------
+
+mp3:
+  song_hz: 22050
+  inst_len: 23.22            # 1000 frames * 512 / 22050 ~= 23.22 s
+  skip_interval: 11.6        # ~50% overlap between consecutive segments
+
+feature:
+  n_bins: 252
+  bins_per_octave: 36
+  hop_length: 512            # paper hop (ChordMax legacy used 2048)
+  large_voca: True
+
+# -----------------------------------------------------------------------------
+# Training (paper recipe: AdamW + ReduceLROnPlateau(/10, p=5) until lr <= 1e-6)
+# -----------------------------------------------------------------------------
+
+experiment:
+  optimizer: adamw           # paper: AdamW
+  learning_rate: 1.0e-3      # paper initial LR (also pass on CLI; this key has no YAML fallback in train_decomposed.py)
+  weight_decay: 0.01         # paper-style weight decay (also pass on CLI)
+  batch_size: 24             # paper: 24 segments * 1000 frames (also pass on CLI)
+  max_epoch: 200             # cap; effective stop is lr <= scheduler_min_lr (also pass via --num_epochs)
+  save_step: 20
+  data_ratio: 0.8
+  data_root: '/home/daniel.melo/datasets'
+  dataset_names:
+    - billboard
+    - dj_avan_songbook1
+    - dj_avan_songbook2
+    - jaah
+    - queen
+    - robbiewilliams
+    - rwc
+    - balanced_v1_full
+
+  # Scheduler ----------------------------------------------------------------
+  scheduler: plateau         # paper: ReduceLROnPlateau
+  scheduler_factor: 0.1      # divide LR by 10
+  scheduler_patience: 5      # 5 epochs without val improvement
+  scheduler_min_lr: 1.0e-6   # early-stop when LR drops below this
+
+# -----------------------------------------------------------------------------
+# Loss / weighting / regularization (paper: CE ponderada, no GradNorm/Focal)
+# -----------------------------------------------------------------------------
+
+class_weights:
+  enabled: True
+  gamma: 0.5                 # paper tested {0.3, 0.5, 0.7, 1.0}
+  w_max: 10.0                # paper tested {10.0, 20.0}
+
+gradnorm:
+  enabled: False             # paper: no dynamic GradNorm
+  alpha: 0.7
+  lr: 0.005
+  eps: 1.0e-8
+  w_min: 1.0e-3
+  w_max: 10.0
+
+focal:
+  gamma: 0.0                 # paper: no focal loss
+
+# -----------------------------------------------------------------------------
+# CRF (paper: linear CRF with fixed lambda = 30)
+# -----------------------------------------------------------------------------
+
+crf:
+  type: linear               # linear | trainable | none
+  lambda: 30.0               # fixed self-transition bonus (linear CRF)
+
+curriculum:
+  enabled: False
+  strategy: 'mixed'
+  pacing: 'linear'
+  start_ratio: 0.3
+  pace_epochs: 30
+  difficulty_threshold: 0.5
+  warmup_epochs: 5
+
+# -----------------------------------------------------------------------------
+# Model -- ChordMax encoder dims (small/deep) on top of the paper window.
+#         (252 -> 128, 12 blocks, 8 heads, FFN 4x = 512, no positional enc.)
+#
+# Critical: timestep is kept at 1000 to consume the full 23.2 s window from
+# the hop-512 preprocessing.  Setting timestep=108 (the old ChordMax) would
+# clip the loader to 2.5 s and waste 90 % of the input.
+# -----------------------------------------------------------------------------
+
+model:
+  # --- Input geometry -------------------------------------------------------
+  feature_size: 252          # must match feature.n_bins
+  timestep: 1000             # paper window (~23.2 s @ hop 512); NOT 108
+
+  # --- Conformer encoder (ChordMax dims kept!) ------------------------------
+  num_layers: 12             # ChordMax: small/deep (vs paper: 4 blocks)
+  num_heads: 8               # ChordMax: 8 heads (vs paper: 16)
+  hidden_size: 128           # ChordMax: 128 hidden (vs paper: 256); d_k = 16
+  conv_kernel_size: 31       # ChordFormer & ChordMax agree
+  ff_expansion_factor: 4     # FFN = 4 x hidden = 512
+  conv_expansion_factor: 2   # ChordMax default
+
+  # --- Paper-specific knobs (kept from chordformer YAML) --------------------
+  use_positional_encoding: False  # paper: no positional encoding
+  use_batchnorm_in_conv: True     # paper: BatchNorm in conv module
+
+  # --- Dropout (paper does not report; keep low for fair comparison) -------
+  input_dropout: 0.1
+  layer_dropout: 0.1
+  output_dropout: 0.0
+
+  # --- Output head FFN (kept off as in ChordMax default) -------------------
+  use_head_ffn: False
+  head_ffn_dim: null
+
+  # --- Misc -----------------------------------------------------------------
+  probs_out: False
+
+  # ---------------------------------------------------------------------------
+  # Legacy (BTC backbone only -- ignored by ChordFormer, kept for compatibility)
+  # ---------------------------------------------------------------------------
+  num_chords: 170
+  loss: 'ce'
+  attention_dropout: 0.1
+  relu_dropout: 0.1
+  total_key_depth: 128
+  total_value_depth: 128
+  filter_size: 128
+  use_structured_output: False
+  num_roots: 13
+  num_qualities: 16
+  num_bass: 13
+  root_weight: 1.0
+  quality_weight: 1.0
+  bass_weight: 1.0
+
+# -----------------------------------------------------------------------------
+# Paths -- dedicated subfolder so we don't clash with chordformer/chordmax runs
+# -----------------------------------------------------------------------------
+
+path:
+  ckpt_path: 'model_paper_chordmax_arch'
+  result_path: '/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/results_paper_chordmax_arch'
+  asset_path: '/home/daniel.melo/BTC_ORIGINAL/chords_recog/BTC-ISMIR19/assets'
+  # Same data root as run_config_chordformer.yaml -- features live under
+  # ".../result_decomposed/<dataset>_voca/22050_23.2_11.6/cqt_252_36_512/"
+  root_path: '/home/daniel.melo/datasets'
