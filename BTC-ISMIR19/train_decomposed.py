@@ -310,6 +310,32 @@ def main():
     parser.add_argument('--disable_gradnorm', action='store_true',
                        help='Shortcut for --no_gradnorm (force-disable GradNorm).')
 
+    # ------------------------------------------------------------------
+    # GPU / throughput knobs
+    # ------------------------------------------------------------------
+    parser.add_argument('--no_amp', action='store_true',
+                       help='Disable mixed precision (AMP). By default AMP is ON when running on CUDA.')
+    parser.add_argument('--amp_dtype', type=str, default='bfloat16',
+                       choices=['bfloat16', 'float16'],
+                       help="AMP dtype. 'bfloat16' (default; great on A100/H100, no GradScaler needed) or 'float16'. "
+                            "Note: float16 is currently incompatible with GradNorm (multiple backward paths).")
+    parser.add_argument('--num_workers', type=int, default=4,
+                       help='Number of DataLoader workers (default: 4).')
+    parser.add_argument('--prefetch_factor', type=int, default=4,
+                       help='DataLoader prefetch_factor (number of batches each worker prefetches; default: 4).')
+    parser.add_argument('--no_pin_memory', action='store_true',
+                       help='Disable pinned-memory in DataLoader (default: enabled when CUDA).')
+    parser.add_argument('--no_persistent_workers', action='store_true',
+                       help='Disable persistent_workers in DataLoader (default: enabled when num_workers > 0).')
+    parser.add_argument('--no_cudnn_benchmark', action='store_true',
+                       help='Disable cudnn.benchmark (helps when input shapes vary; we have fixed timestep=1000, so benchmark is recommended).')
+    parser.add_argument('--compile', action='store_true',
+                       help="Enable torch.compile(model). WARNING: may not be compatible with GradNorm "
+                            "(secondary autograd.grad through last_shared_features). Default: off.")
+    parser.add_argument('--compile_mode', type=str, default='reduce-overhead',
+                       choices=['default', 'reduce-overhead', 'max-autotune'],
+                       help='torch.compile mode (only when --compile is set).')
+
     args = parser.parse_args()
     args.log_class_distribution = not args.no_class_distribution
 
@@ -334,7 +360,43 @@ def main():
     # Setup device
     device = torch.device(args.device)
     logger.info(f"Using device: {device}")
-    
+
+    # ------------------------------------------------------------------
+    # GPU throughput flags. Safe defaults for fixed-shape Conformer input.
+    # ------------------------------------------------------------------
+    is_cuda = (device.type == 'cuda')
+    if is_cuda:
+        # TF32 on Ampere+: ~10% free speedup with negligible accuracy impact.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        try:
+            torch.set_float32_matmul_precision('high')
+        except AttributeError:
+            pass
+        # Conv1D in Conformer benefits from cuDNN autotuner; we use a fixed
+        # timestep so the autotuner pays off after the first batch.
+        torch.backends.cudnn.benchmark = not args.no_cudnn_benchmark
+        logger.info(
+            f"GPU perf flags: TF32=on, cudnn.benchmark={torch.backends.cudnn.benchmark}, "
+            f"matmul_precision=high"
+        )
+        try:
+            dev_name = torch.cuda.get_device_name(device)
+            cap = torch.cuda.get_device_capability(device)
+            logger.info(f"CUDA device: {dev_name} (cc {cap[0]}.{cap[1]})")
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # AMP (mixed precision). Default: ON for CUDA, OFF for CPU.
+    # ------------------------------------------------------------------
+    amp_enabled = is_cuda and (not args.no_amp)
+    amp_dtype = torch.bfloat16 if args.amp_dtype == 'bfloat16' else torch.float16
+    logger.info(
+        f"AMP: enabled={amp_enabled} dtype={args.amp_dtype}"
+        + ("" if amp_enabled else " (set --no_amp to keep disabled)")
+    )
+
     # Setup run name and output directory
     if args.run_name:
         run_name = args.run_name
@@ -465,18 +527,33 @@ def main():
             config.model['feature_size'] = sample_feature_size
     
     # Create data loaders
+    pin_memory = is_cuda and (not args.no_pin_memory)
+    num_workers = max(0, int(args.num_workers))
+    persistent_workers = (num_workers > 0) and (not args.no_persistent_workers)
+    loader_kwargs = dict(
+        batch_size=args.batch_size,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+    )
+    if num_workers > 0:
+        loader_kwargs['prefetch_factor'] = max(2, int(args.prefetch_factor))
+    logger.info(
+        f"DataLoader: num_workers={num_workers}, pin_memory={pin_memory}, "
+        f"persistent_workers={persistent_workers}, "
+        f"prefetch_factor={loader_kwargs.get('prefetch_factor', 'n/a')}"
+    )
+
     train_loader = AudioDataLoaderStructured(
         train_dataset,
-        batch_size=args.batch_size,
         shuffle=True,
-        num_workers=4
+        **loader_kwargs,
     )
-    
+
     val_loader = AudioDataLoaderStructured(
         val_dataset,
-        batch_size=args.batch_size,
         shuffle=False,
-        num_workers=4
+        **loader_kwargs,
     )
     
     # Resolve class weighting mode (CLI override > config file)
@@ -688,7 +765,36 @@ def main():
         )
     model = model.to(device)
     logger.info(f"Selected backbone: {args.backbone}")
-    
+
+    # ------------------------------------------------------------------
+    # torch.compile (opt-in). GradNorm runs autograd.grad through
+    # self.model.last_shared_features set as a module attribute during
+    # forward, which can confuse the compiler; warn explicitly.
+    # ------------------------------------------------------------------
+    if args.compile:
+        if not hasattr(torch, 'compile'):
+            logger.warning("torch.compile not available in this PyTorch version; --compile ignored.")
+        else:
+            if gradnorm_enabled:
+                logger.warning(
+                    "torch.compile + GradNorm: secondary autograd.grad through "
+                    "model.last_shared_features may not be supported by Inductor. "
+                    "If you see compile failures, retry with --no_gradnorm."
+                )
+            logger.info(f"Compiling model with torch.compile(mode={args.compile_mode!r})...")
+            try:
+                model = torch.compile(model, mode=args.compile_mode)
+            except Exception as exc:
+                logger.error(f"torch.compile failed; running uncompiled. Error: {exc}")
+
+    # AMP + fp16 + GradNorm: explicitly unsupported (double backward + GradScaler).
+    if amp_enabled and amp_dtype == torch.float16 and gradnorm_enabled:
+        logger.warning(
+            "AMP fp16 + GradNorm is not currently wired (would need GradScaler around "
+            "two separate backward passes). Falling back to bfloat16 for AMP."
+        )
+        amp_dtype = torch.bfloat16
+
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -803,7 +909,13 @@ def main():
     )
     
     # Setup trainer and inference
-    trainer = DecomposedChordTrainer(model, device=device, verbose=True)
+    trainer = DecomposedChordTrainer(
+        model,
+        device=device,
+        verbose=True,
+        amp_enabled=amp_enabled,
+        amp_dtype=amp_dtype,
+    )
     inference = DecomposedChordInference(model, device=device)
     metrics_fn = ChordMetrics()
     
@@ -882,6 +994,18 @@ def main():
         'trainable_params': trainable_params,
         'start_time': datetime.now().isoformat(),
         'output_dir': str(output_dir),
+        'perf': {
+            'amp_enabled': amp_enabled,
+            'amp_dtype': args.amp_dtype if amp_enabled else None,
+            'tf32': is_cuda,
+            'cudnn_benchmark': bool(torch.backends.cudnn.benchmark) if is_cuda else False,
+            'pin_memory': pin_memory,
+            'num_workers': num_workers,
+            'persistent_workers': persistent_workers,
+            'prefetch_factor': loader_kwargs.get('prefetch_factor'),
+            'compile': bool(args.compile),
+            'compile_mode': args.compile_mode if args.compile else None,
+        },
     }
 
     if wandb_enabled:

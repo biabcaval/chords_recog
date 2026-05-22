@@ -164,16 +164,22 @@ class DecomposedChordTrainer:
     Handles training loop, validation, and metrics computation.
     """
     
-    def __init__(self, model, device=None, verbose=True):
+    def __init__(self, model, device=None, verbose=True,
+                 amp_enabled=False, amp_dtype=None):
         """
         Args:
             model: The BTC_model_decomposed to train
             device: Device to train on
             verbose: Print progress information
+            amp_enabled: If True, wrap forward+loss in torch.autocast.
+            amp_dtype: torch dtype for autocast (torch.bfloat16 or torch.float16).
+                Only used when amp_enabled is True.
         """
         self.model = model
         self.device = device or next(model.parameters()).device
         self.verbose = verbose
+        self.amp_enabled = bool(amp_enabled) and (self.device.type == 'cuda')
+        self.amp_dtype = amp_dtype if amp_dtype is not None else torch.bfloat16
         self.last_component_raw_losses = {component: 0.0 for component in COMPONENT_NAMES}
         self.last_component_weighted_losses = {component: 0.0 for component in COMPONENT_NAMES}
         self.last_component_weights = {component: 1.0 for component in COMPONENT_NAMES}
@@ -181,6 +187,14 @@ class DecomposedChordTrainer:
         self.last_gradnorm_inv_rate = {component: 1.0 for component in COMPONENT_NAMES}
         self.last_gradnorm_grad_norm = {component: 0.0 for component in COMPONENT_NAMES}
         self.last_gradnorm_target = {component: 0.0 for component in COMPONENT_NAMES}
+
+    def _autocast(self):
+        """Return an autocast context. No-op when amp_enabled is False."""
+        if self.amp_enabled:
+            return torch.autocast(device_type=self.device.type, dtype=self.amp_dtype, enabled=True)
+        # null context manager: torch.autocast with enabled=False is a no-op and safe everywhere.
+        return torch.autocast(device_type=self.device.type if self.device.type != 'cpu' else 'cpu',
+                              dtype=torch.float32, enabled=False)
 
     def _apply_gradnorm_update(self):
         criterion = getattr(self.model, 'criterion', None)
@@ -277,26 +291,32 @@ class DecomposedChordTrainer:
         component_weights_sum = {component: 0.0 for component in COMPONENT_NAMES}
         num_batches = 0
         
+        non_blocking = (self.device.type == 'cuda')
         for batch_idx, batch in enumerate(train_loader):
-            # Prepare batch
-            features = batch['features'].to(self.device)
-            components = {comp: batch['components'][comp].to(self.device) 
+            # Prepare batch (non_blocking pairs with pin_memory=True in the DataLoader).
+            features = batch['features'].to(self.device, non_blocking=non_blocking)
+            components = {comp: batch['components'][comp].to(self.device, non_blocking=non_blocking)
                          for comp in COMPONENT_NAMES}
-            
+
             # Reshape labels to (batch_size, seq_len)
             batch_size = features.shape[0]
             seq_len = features.shape[3]  # features shape: (batch, 1, feature_size, seq_len)
-            
+
             labels = {}
             for component in COMPONENT_NAMES:
                 labels[component] = components[component].reshape(batch_size, seq_len)
-            
-            # Forward pass (now returns 4 values)
-            predictions, loss, _, batch_component_losses = self.model(features, labels=labels)
+
+            # Forward + loss under autocast (mixed precision); backward stays
+            # outside autocast as recommended by PyTorch AMP.
+            with self._autocast():
+                predictions, loss, _, batch_component_losses = self.model(features, labels=labels)
+
+            # GradNorm operates on the autograd graph produced by the forward
+            # above (works with bf16 tensors; not validated for fp16 + GradScaler).
             self._apply_gradnorm_update()
-            
-            # Backward pass
-            optimizer.zero_grad()
+
+            # Backward pass (set_to_none=True frees grad memory and is a small win).
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
             
@@ -370,20 +390,22 @@ class DecomposedChordTrainer:
             total_correct = {comp: 0 for comp in COMPONENT_NAMES}
             total_frames = 0
         
+        non_blocking = (self.device.type == 'cuda')
         with torch.no_grad():
             for batch in val_loader:
-                features = batch['features'].to(self.device)
-                components = {comp: batch['components'][comp].to(self.device) 
+                features = batch['features'].to(self.device, non_blocking=non_blocking)
+                components = {comp: batch['components'][comp].to(self.device, non_blocking=non_blocking)
                              for comp in COMPONENT_NAMES}
-                
+
                 batch_size = features.shape[0]
                 seq_len = features.shape[3]
-                
+
                 labels = {}
                 for component in COMPONENT_NAMES:
                     labels[component] = components[component].reshape(batch_size, seq_len)
-                
-                predictions, loss, _, batch_component_losses = self.model(features, labels=labels)
+
+                with self._autocast():
+                    predictions, loss, _, batch_component_losses = self.model(features, labels=labels)
                 
                 total_loss += loss.item()
                 num_batches += 1
