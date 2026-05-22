@@ -34,7 +34,7 @@ feature:
 experiment:
   optimizer: adamw           # paper: AdamW
   learning_rate: 1.0e-3      # paper initial LR (also pass on CLI; this key has no YAML fallback in train_decomposed.py)
-  weight_decay: 0.01         # paper-style weight decay (also pass on CLI)
+  weight_decay: 0.001         # paper-style weight decay (also pass on CLI)
   batch_size: 24             # paper: 24 segments * 1000 frames (also pass on CLI)
   max_epoch: 200             # cap; effective stop is lr <= scheduler_min_lr (also pass via --num_epochs)
   save_step: 20
@@ -66,7 +66,7 @@ class_weights:
   w_max: 10.0                # paper tested {10.0, 20.0}
 
 gradnorm:
-  enabled: False             # paper: no dynamic GradNorm
+  enabled: True             # paper: no dynamic GradNorm
   alpha: 0.7
   lr: 0.005
   eps: 1.0e-8
@@ -74,7 +74,7 @@ gradnorm:
   w_max: 10.0
 
 focal:
-  gamma: 0.0                 # paper: no focal loss
+  gamma: 2.0                 # paper: no focal loss
 
 # -----------------------------------------------------------------------------
 # CRF (paper: linear CRF with fixed lambda = 30)
@@ -108,9 +108,9 @@ model:
   timestep: 1000             # paper window (~23.2 s @ hop 512); NOT 108
 
   # --- Conformer encoder (ChordMax dims kept!) ------------------------------
-  num_layers: 12             # ChordMax: small/deep (vs paper: 4 blocks)
+  num_layers: 4            # ChordMax: small/deep (vs paper: 4 blocks)
   num_heads: 8               # ChordMax: 8 heads (vs paper: 16)
-  hidden_size: 128           # ChordMax: 128 hidden (vs paper: 256); d_k = 16
+  hidden_size: 256           # ChordMax: 128 hidden (vs paper: 256); d_k = 16
   conv_kernel_size: 31       # ChordFormer & ChordMax agree
   ff_expansion_factor: 4     # FFN = 4 x hidden = 512
   conv_expansion_factor: 2   # ChordMax default
