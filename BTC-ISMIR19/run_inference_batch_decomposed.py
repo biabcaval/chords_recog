@@ -345,6 +345,12 @@ def parse_args():
              "When provided, root+triad predictions use CRF temporal smoothing "
              "instead of per-frame argmax.",
     )
+    parser.add_argument(
+        "--linear_crf_lambda", type=float, default=None,
+        help="Instantiate a LinearCRF (root_triad mode, lambda*I transitions) "
+             "on the fly without loading a checkpoint. Mutually exclusive with "
+             "--harmonic_crf. Use 30.0 for ChordFormer-paper alignment.",
+    )
     return parser.parse_args()
 
 
@@ -381,6 +387,9 @@ def main():
 
     # Load CRF if provided (auto-detect root_triad vs full mode)
     harmonic_crf = None
+    if args.harmonic_crf and args.linear_crf_lambda is not None:
+        raise SystemExit("Use only one of --harmonic_crf or --linear_crf_lambda.")
+
     if args.harmonic_crf:
         logger.info(f"Loading CRF from {args.harmonic_crf}")
         crf_ckpt = torch.load(args.harmonic_crf, map_location=device, weights_only=False)
@@ -411,11 +420,28 @@ def main():
         config.model['probs_out'] = True
         model, normalization = load_checkpoint(args.checkpoint, config, args.backbone, device)
 
+    elif args.linear_crf_lambda is not None:
+        logger.info(f"Instantiating in-memory LinearCRF (lambda={args.linear_crf_lambda})")
+        harmonic_crf = HarmonicCRF(
+            n_roots=13, n_triads=7,
+            crf_kind='linear',
+            crf_lambda=float(args.linear_crf_lambda),
+        ).to(device)
+        harmonic_crf.eval()
+        logger.info(
+            f"HarmonicCRF (linear) ready: 13x7=91 tags, lambda={args.linear_crf_lambda}"
+        )
+        # Same as the file-loading branch: backbone needs to return logits.
+        config.model['probs_out'] = True
+        model, normalization = load_checkpoint(args.checkpoint, config, args.backbone, device)
+
     logger.info(f"Checkpoint : {args.checkpoint}")
     logger.info(f"Audio dir  : {audio_dir}")
     logger.info(f"Output dir : {output_dir}")
     if args.harmonic_crf:
         logger.info(f"CRF        : {args.harmonic_crf}")
+    elif args.linear_crf_lambda is not None:
+        logger.info(f"CRF        : LinearCRF in-memory (lambda={args.linear_crf_lambda})")
 
     run_inference(model, audio_dir, output_dir, config, device, normalization,
                   harmonic_crf=harmonic_crf)
