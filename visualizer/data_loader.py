@@ -479,12 +479,48 @@ def _merge_adjacent_component_diff(diff: List[Dict]) -> List[Dict]:
     return merged
 
 
+def normalize_filename(name: str) -> str:
+    """Normalize a filename (without extension) for fuzzy matching.
+
+    Same convention as ``BTC-ISMIR19/generate_metrics_csv.py``:
+      - lowercase
+      - spaces and hyphens replaced with underscores
+
+    This allows the visualizer to match GT and inference files even when
+    they were produced with different naming conventions (e.g., GT uses
+    "Djavan_Doidice_Songbook2.lab" and inference uses
+    "djavan_doidice_songbook2.lab").
+    """
+    return name.lower().replace(' ', '_').replace('-', '_')
+
+
 def scan_lab_directory(directory: str) -> List[str]:
-    """Return sorted list of track names (without .lab extension) in a directory."""
+    """Return sorted list of NORMALIZED track names in a directory.
+
+    Track names are normalized via :func:`normalize_filename` so the
+    same id can be used to lookup the file in different directories
+    that follow slightly different naming conventions.
+    """
     if not os.path.isdir(directory):
         return []
     files = glob.glob(os.path.join(directory, '*.lab'))
-    return sorted(Path(f).stem for f in files)
+    return sorted({normalize_filename(Path(f).stem) for f in files})
+
+
+def scan_lab_directory_map(directory: str) -> Dict[str, str]:
+    """Return a dict mapping normalized track_id -> actual filepath.
+
+    When two files normalize to the same id, the alphabetically first
+    one wins (deterministic; unlikely to happen in practice).
+    """
+    if not os.path.isdir(directory):
+        return {}
+    result: Dict[str, str] = {}
+    for f in sorted(glob.glob(os.path.join(directory, '*.lab'))):
+        norm = normalize_filename(Path(f).stem)
+        if norm not in result:
+            result[norm] = f
+    return result
 
 
 def scan_inference_dirs(base_dir: str) -> List[Dict]:
@@ -574,11 +610,24 @@ def get_track_data(
     gt_dir: Optional[str] = None,
     pred_dir: Optional[str] = None,
 ) -> Dict:
-    """Load full track data including segments, decomposition, diff, and stats."""
+    """Load full track data including segments, decomposition, diff, and stats.
+
+    ``track_id`` is the normalized form of the filename stem (see
+    :func:`normalize_filename`). The actual file paths in ``gt_dir`` and
+    ``pred_dir`` are resolved via fuzzy lookup so that capitalisation /
+    space / hyphen differences between GT and inference filenames do not
+    prevent matching.
+    """
     data: Dict = {'track_id': track_id}
 
-    gt_path = os.path.join(gt_dir, f'{track_id}.lab') if gt_dir else None
-    pred_path = os.path.join(pred_dir, f'{track_id}.lab') if pred_dir else None
+    gt_path = None
+    pred_path = None
+    if gt_dir:
+        gt_map = scan_lab_directory_map(gt_dir)
+        gt_path = gt_map.get(track_id)
+    if pred_dir:
+        pred_map = scan_lab_directory_map(pred_dir)
+        pred_path = pred_map.get(track_id)
 
     gt_segments = None
     pred_segments = None
