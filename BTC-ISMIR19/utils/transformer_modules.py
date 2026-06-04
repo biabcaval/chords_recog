@@ -8,56 +8,91 @@ import numpy as np
 import math
 
 
+def _accumulate_bincount(train_dataset, key, num_classes, device):
+    """Stream a dataset attribute through a GPU-resident torch.bincount accumulator.
+
+    Returns an int64 tensor of shape (num_classes,) on `device` with raw counts.
+    Returns None if `key` is missing from every sample.
+    """
+    counts = torch.zeros(num_classes, dtype=torch.long, device=device)
+    found_any = False
+
+    for i in range(len(train_dataset)):
+        data = train_dataset[i]
+        if key not in data:
+            continue
+        labels = data[key]
+
+        if isinstance(labels, torch.Tensor):
+            indices = labels.detach().to(device=device, dtype=torch.long, non_blocking=True).reshape(-1)
+        else:
+            indices = torch.as_tensor(labels, dtype=torch.long, device=device).reshape(-1)
+
+        if indices.numel() == 0:
+            continue
+        found_any = True
+
+        valid_mask = (indices >= 0) & (indices < num_classes)
+        if not bool(valid_mask.any()):
+            continue
+        counts += torch.bincount(indices[valid_mask], minlength=num_classes)
+
+    return counts if found_any else None
+
+
+def _counts_to_weights(counts, gamma, w_max):
+    """Vectorized class-weight formula on the same device as `counts`.
+
+    Equivalent to: weights = clamp((N_max / max(counts, 1)) ** gamma, max=w_max).
+    """
+    counts_float = counts.to(torch.float32)
+    counts_clamped = torch.clamp(counts_float, min=1.0)
+    n_max = counts_float.max()
+    weights = torch.clamp((n_max / counts_clamped) ** float(gamma), max=float(w_max))
+    return weights
+
+
 def compute_class_weights(train_dataset, num_classes=170, gamma=0.5, w_max=10.0, device=None):
     """
     Compute class weights inversely proportional to class frequency.
-    
+
+    Counting and the weight formula run on `device` (GPU when available) using
+    `torch.bincount` and vectorized torch ops.
+
     Args:
         train_dataset: Dataset to compute weights from (must have __getitem__ returning dict with 'chord' key)
         num_classes: Number of chord classes
         gamma: Exponent for weight calculation (lower = more smoothing)
         w_max: Maximum weight cap to prevent extreme weights
-        device: Device to put weights on (defaults to cuda if available)
-    
+        device: Device to run computation and place weights on (defaults to cuda if available)
+
     Returns:
-        torch.Tensor: Class weights of shape (num_classes,)
+        torch.Tensor: Class weights of shape (num_classes,) on `device`
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    class_counts = torch.zeros(num_classes)
-    
-    for i in range(len(train_dataset)):
-        data = train_dataset[i]
-        chords = data['chord']
-        if isinstance(chords, np.ndarray):
-            chords = torch.from_numpy(chords)
-        elif not isinstance(chords, torch.Tensor):
-            chords = torch.tensor(chords)
-        
-        # Count occurrences of each chord class
-        for c in chords.view(-1):
-            if 0 <= c < num_classes:
-                class_counts[c] += 1
-    
-    # Avoid division by zero
-    class_counts = torch.clamp(class_counts, min=1)
-    
-    # Weight inversely proportional to frequency: (N_max / N_class)^gamma
-    N_max = class_counts.max()
-    weights = torch.clamp((N_max / class_counts) ** gamma, max=w_max)
-    
-    return weights.to(device)
+    elif not isinstance(device, torch.device):
+        device = torch.device(device)
+
+    counts = _accumulate_bincount(train_dataset, key='chord', num_classes=num_classes, device=device)
+    if counts is None:
+        # No labels found anywhere; return uniform weights to avoid NaNs downstream.
+        return torch.ones(num_classes, dtype=torch.float32, device=device)
+
+    return _counts_to_weights(counts, gamma=gamma, w_max=w_max)
 
 
 def compute_structured_class_weights(train_dataset, num_roots=13, num_qualities=16, num_bass=13,
                                       gamma=0.5, w_max=10.0, device=None):
     """
     Compute per-class weights for structured output (Root, Quality, Bass).
-    
+
     This function calculates class weights inversely proportional to frequency
     for each component separately, following the ChordFormer reweighted loss approach.
-    
+
+    All counting and arithmetic runs on `device` via `torch.bincount` and
+    vectorized torch ops.
+
     Args:
         train_dataset: Dataset with 'root', 'quality', 'bass' keys
         num_roots: Number of root classes (12 pitches + no chord = 13)
@@ -65,69 +100,35 @@ def compute_structured_class_weights(train_dataset, num_roots=13, num_qualities=
         num_bass: Number of bass classes (12 pitches + no bass = 13)
         gamma: Exponent for weight calculation (lower = more smoothing)
         w_max: Maximum weight cap to prevent extreme weights
-        device: Device to put weights on
-    
+        device: Device to run computation and place weights on
+
     Returns:
-        tuple: (root_weights, quality_weights, bass_weights) - each tensor of respective shape
+        tuple: (root_weights, quality_weights, bass_weights) - each tensor on `device`,
+               or (None, None, None) when no structured labels are present.
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    root_counts = torch.zeros(num_roots)
-    quality_counts = torch.zeros(num_qualities)
-    bass_counts = torch.zeros(num_bass)
-    
-    for i in range(len(train_dataset)):
-        data = train_dataset[i]
-        
-        # Get structured labels if available
-        if 'root' in data and 'quality' in data and 'bass' in data:
-            roots = data['root']
-            qualities = data['quality']
-            basses = data['bass']
-            
-            # Convert to tensors if needed
-            if isinstance(roots, np.ndarray):
-                roots = torch.from_numpy(roots)
-            elif not isinstance(roots, torch.Tensor):
-                roots = torch.tensor(roots)
-                
-            if isinstance(qualities, np.ndarray):
-                qualities = torch.from_numpy(qualities)
-            elif not isinstance(qualities, torch.Tensor):
-                qualities = torch.tensor(qualities)
-                
-            if isinstance(basses, np.ndarray):
-                basses = torch.from_numpy(basses)
-            elif not isinstance(basses, torch.Tensor):
-                basses = torch.tensor(basses)
-            
-            # Count occurrences
-            for r in roots.view(-1):
-                if 0 <= r < num_roots:
-                    root_counts[r] += 1
-            for q in qualities.view(-1):
-                if 0 <= q < num_qualities:
-                    quality_counts[q] += 1
-            for b in basses.view(-1):
-                if 0 <= b < num_bass:
-                    bass_counts[b] += 1
-    
-    # Check if we found structured data
-    if root_counts.sum() == 0:
+    elif not isinstance(device, torch.device):
+        device = torch.device(device)
+
+    # Single-pass-per-component bincount on GPU. Each helper short-circuits when
+    # the dataset never exposes the structured labels (e.g. legacy dataset).
+    root_counts = _accumulate_bincount(train_dataset, key='root', num_classes=num_roots, device=device)
+    if root_counts is None:
         return None, None, None
-    
-    # Avoid division by zero
-    root_counts = torch.clamp(root_counts, min=1)
-    quality_counts = torch.clamp(quality_counts, min=1)
-    bass_counts = torch.clamp(bass_counts, min=1)
-    
-    # Weight inversely proportional to frequency: (N_max / N_class)^gamma
-    root_weights = torch.clamp((root_counts.max() / root_counts) ** gamma, max=w_max)
-    quality_weights = torch.clamp((quality_counts.max() / quality_counts) ** gamma, max=w_max)
-    bass_weights = torch.clamp((bass_counts.max() / bass_counts) ** gamma, max=w_max)
-    
-    return root_weights.to(device), quality_weights.to(device), bass_weights.to(device)
+    quality_counts = _accumulate_bincount(train_dataset, key='quality', num_classes=num_qualities, device=device)
+    bass_counts = _accumulate_bincount(train_dataset, key='bass', num_classes=num_bass, device=device)
+
+    # If root labels exist but quality/bass don't, fall back to all-None to keep
+    # the original "all-or-nothing" semantics.
+    if quality_counts is None or bass_counts is None:
+        return None, None, None
+
+    root_weights = _counts_to_weights(root_counts, gamma=gamma, w_max=w_max)
+    quality_weights = _counts_to_weights(quality_counts, gamma=gamma, w_max=w_max)
+    bass_weights = _counts_to_weights(bass_counts, gamma=gamma, w_max=w_max)
+
+    return root_weights, quality_weights, bass_weights
 
 def _gen_bias_mask(max_length):
     """

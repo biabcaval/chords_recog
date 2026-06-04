@@ -65,7 +65,12 @@ def main():
     parser.add_argument('--w_max', type=float, default=10.0, help='Class weighting cap')
     parser.add_argument('--cache_dir', type=str, default='./class_weights_cache', help='Directory to store cache file')
     parser.add_argument('--output_path', type=str, default=None, help='Optional explicit output file path')
-    parser.add_argument('--device', type=str, default='cpu', help='Device for resulting tensors (cpu/cuda)')
+    parser.add_argument(
+        '--device',
+        type=str,
+        default='auto',
+        help='Device for class-weight computation. "auto" (default) uses CUDA when available, otherwise CPU.'
+    )
     parser.add_argument('--force', action='store_true', help='Overwrite output if it already exists')
     args = parser.parse_args()
 
@@ -107,8 +112,11 @@ def main():
         logger.info("Use --force to overwrite.")
         return
 
-    device = torch.device(args.device)
-    logger.info("Computing class weights...")
+    if args.device == 'auto':
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        device = torch.device(args.device)
+    logger.info(f"Computing class weights on device: {device}")
     class_weights, class_counts = MultiTaskLoss.compute_class_weights(
         train_dataset=train_dataset,
         gamma=args.gamma,

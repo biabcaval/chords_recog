@@ -626,40 +626,59 @@ class MultiTaskLoss(nn.Module):
     def compute_class_weights(train_dataset, gamma=0.5, w_max=10.0, device=None, return_counts=False):
         """
         Compute class weights from training data using the Class Re-weighting formula.
-        
+
         Formula:
             w_m^(j) = min((n_m^(j) / max(n_m'^(j)))^(-gamma), w_max)
-        
+
         where:
             - n_m^(j) is the count of class m in component j
             - max(n_m'^(j)) is the maximum count among all classes in component j
             - gamma is the weighting exponent (default 0.5)
             - w_max is the maximum weight cap (default 10.0)
-        
+
         This gives higher weights to rare classes to handle the long tail distribution.
-        
+
+        All counting and weight arithmetic runs on `device` (GPU when available),
+        using `torch.bincount` and vectorized torch ops. Only the final
+        `class_counts` dict is materialized as float64 numpy arrays on CPU to
+        preserve the existing serialization API in callers.
+
         Args:
             train_dataset: Training dataset with 'components' field. Each sample should
                           have a 'components' dict mapping component names to index arrays.
                           Dataset should support __len__ and __getitem__.
             gamma: Weighting exponent (lower = more smoothing). Default: 0.5
             w_max: Maximum weight cap to prevent extreme weights. Default: 10.0
-            device: Device to place tensors on (defaults to CPU)
-        
+            device: Device to run computation and place output tensors on. Defaults
+                to CUDA when available, otherwise CPU.
+            return_counts: If True, also return per-component class counts.
+
         Returns:
-            class_weights: Dict mapping component names to weight tensors
-            class_counts (optional): Dict mapping component names to class counts (if return_counts=True)
+            class_weights: Dict mapping component names to weight tensors on `device`.
+            class_counts (optional): Dict mapping component names to numpy float64
+                                     arrays of counts on CPU.
         """
         import logging
         logger = logging.getLogger(__name__)
-        
-        class_weights = {}
-        class_counts = {
-            component: np.zeros(len(CHORD_VOCAB[component]), dtype=np.float64)
+
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        elif not isinstance(device, torch.device):
+            device = torch.device(device)
+
+        # All counting accumulators live on `device` for GPU-resident bincount.
+        # int64 to allow safe accumulation across very large datasets.
+        counts_by_component = {
+            component: torch.zeros(
+                len(CHORD_VOCAB[component]),
+                dtype=torch.long,
+                device=device,
+            )
             for component in COMPONENT_NAMES
         }
+        vocab_sizes = {component: len(CHORD_VOCAB[component]) for component in COMPONENT_NAMES}
 
-        # Single dataset pass for all components using vectorized bincount.
+        # Single dataset pass for all components using GPU bincount.
         n_samples = len(train_dataset)
         for i in range(n_samples):
             sample = train_dataset[i]
@@ -668,54 +687,62 @@ class MultiTaskLoss(nn.Module):
 
             sample_components = sample['components']
             for component in COMPONENT_NAMES:
-                vocab_size = len(CHORD_VOCAB[component])
+                vocab_size = vocab_sizes[component]
                 component_data = sample_components.get(component, None)
                 if component_data is None:
                     continue
 
                 if isinstance(component_data, torch.Tensor):
-                    component_indices = component_data.detach().cpu().numpy().reshape(-1)
-                elif isinstance(component_data, np.ndarray):
-                    component_indices = component_data.reshape(-1)
+                    indices = component_data.detach().to(
+                        device=device, dtype=torch.long, non_blocking=True
+                    ).reshape(-1)
                 else:
-                    component_indices = np.asarray(component_data).reshape(-1)
+                    indices = torch.as_tensor(
+                        component_data, dtype=torch.long, device=device
+                    ).reshape(-1)
 
-                if component_indices.size == 0:
+                if indices.numel() == 0:
                     continue
 
-                component_indices = component_indices.astype(np.int64, copy=False)
-                valid = component_indices[(component_indices >= 0) & (component_indices < vocab_size)]
-                if valid.size == 0:
+                # Filter out-of-range indices on-device before bincount.
+                valid_mask = (indices >= 0) & (indices < vocab_size)
+                if not bool(valid_mask.any()):
                     continue
+                valid = indices[valid_mask]
 
-                class_counts[component] += np.bincount(valid, minlength=vocab_size).astype(np.float64)
+                counts_by_component[component] += torch.bincount(valid, minlength=vocab_size)
 
+        class_weights = {}
+        class_counts = {}
         for component in COMPONENT_NAMES:
-            counts = class_counts[component]
-            vocab_size = len(CHORD_VOCAB[component])
-            max_count = float(np.max(counts))
+            counts = counts_by_component[component]
+            vocab_size = vocab_sizes[component]
+            max_count_t = counts.max()
+            max_count = float(max_count_t.item())
 
             if max_count == 0:
                 logger.warning(f"No data found for component '{component}'. Using uniform weights.")
-                weights = np.ones(vocab_size, dtype=np.float64)
+                weights_tensor = torch.ones(vocab_size, dtype=torch.float32, device=device)
             else:
-                # Start with max cap for all classes (including unseen classes).
-                weights = np.full(vocab_size, w_max, dtype=np.float64)
+                # Start with max cap for all classes (covers unseen classes with count==0).
+                weights_tensor = torch.full(
+                    (vocab_size,), float(w_max), dtype=torch.float32, device=device
+                )
                 nonzero = counts > 0
-                ratios = counts[nonzero] / max_count
-                weights_nonzero = np.minimum(np.power(ratios, -gamma), w_max)
-                weights[nonzero] = weights_nonzero
-
-            weights_tensor = torch.tensor(weights, dtype=torch.float32)
-            if device is not None:
-                weights_tensor = weights_tensor.to(device)
+                ratios = counts[nonzero].to(torch.float32) / float(max_count)
+                weights_nonzero = torch.clamp(torch.pow(ratios, -float(gamma)), max=float(w_max))
+                weights_tensor[nonzero] = weights_nonzero
 
             class_weights[component] = weights_tensor
 
+            # Preserve API: class_counts items as numpy float64 on CPU.
+            class_counts[component] = counts.detach().cpu().numpy().astype(np.float64)
+
             logger.debug(
                 f"Component '{component}': "
-                f"counts range [{counts.min():.0f}, {counts.max():.0f}], "
-                f"weights range [{weights.min():.3f}, {weights.max():.3f}]"
+                f"counts range [{int(counts.min().item())}, {int(counts.max().item())}], "
+                f"weights range [{weights_tensor.min().item():.3f}, "
+                f"{weights_tensor.max().item():.3f}]"
             )
 
         if return_counts:
