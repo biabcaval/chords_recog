@@ -1,17 +1,47 @@
 import json
+import random
 import numpy as np
 import os
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 from utils.preprocess import Preprocess, FeatureTypes, cqt_to_log_db
 import math
 from multiprocessing import Pool
 from sortedcontainers import SortedList
 
+# Substring identifying the non-augmented (original) instance file.
+# Files are named like "1.00_0_<idx>.pt" where 1.00 is the time-stretch factor
+# and 0 is the pitch-shift offset in semitones. See scripts/preprocess_with_extensions.py.
+_NON_AUG_TAG = "1.00_0"
+
+# Valid split roles for the paper-faithful 60/20/20 rotation.
+_VALID_SPLITS = (None, "train", "val", "test")
+
+
 class AudioDataset(Dataset):
     def __init__(self, config, root_dir='/data/music/chord_recognition', dataset_names=('isophonic',),
-                 featuretype=FeatureTypes.cqt, num_workers=20, train=False, preprocessing=False, resize=None, kfold=4):
+                 featuretype=FeatureTypes.cqt, num_workers=20, train=False, preprocessing=False,
+                 resize=None, kfold=4, split=None):
+        """
+        Args:
+            split: One of None, 'train', 'val', 'test'.
+                - None (default): legacy 80/20 mode. `train=True` returns the 4
+                  folds different from `kfold` (with augmentations); `train=False`
+                  returns fold `kfold` as validation (non-augmented only).
+                - 'train' | 'val' | 'test': paper-faithful 60/20/20 rotation.
+                  test_fold = kfold % 5, val_fold = (kfold + 1) % 5,
+                  train_folds = the 3 remaining folds. Augmentations are kept
+                  only in 'train'; 'val' and 'test' use the original instance
+                  (filename containing "1.00_0") only.
+                In paper mode the `train` flag is ignored; split alone controls
+                the role of this dataset instance.
+        """
         super(AudioDataset, self).__init__()
+
+        if split not in _VALID_SPLITS:
+            raise ValueError(
+                f"AudioDataset: invalid split={split!r}. Expected one of {_VALID_SPLITS}."
+            )
 
         self.config = config
         self.root_dir = root_dir
@@ -19,6 +49,7 @@ class AudioDataset(Dataset):
         self.preprocessor = Preprocess(config, featuretype, dataset_names, self.root_dir)
         self.resize = resize
         self.train = train
+        self.split = split
         self.ratio = config.experiment['data_ratio']
 
         # preprocessing hyperparameters
@@ -103,16 +134,64 @@ class AudioDataset(Dataset):
         print(f"Using stratified fold assignments from {path}")
         return data.get("songs", {})
 
-    def _split_by_fold(self, song_names, temp, kfold, fold_map=None):
-        """Split songs into train/val by fold index.
+    def _resolve_split(self, kfold):
+        """Map (self.split, self.train, kfold) onto the role of each fold.
 
-        If *fold_map* is provided (dict song_name -> fold_index from
-        fold_assignments.json) it is used for stratified splitting.
-        Otherwise falls back to the original contiguous-block method.
+        Returns:
+            (train_folds, eval_fold)
+
+            - train_folds: list of fold indices whose instances are concatenated
+              (with augmentations) when assembling the dataset.
+            - eval_fold: index of the single fold used as evaluation set
+              (non-augmented only), or -1 if this dataset plays a train role.
+
+        Paper-faithful 60/20/20 rotation (split in {'train','val','test'}):
+            test_fold  = kfold % 5
+            val_fold   = (kfold + 1) % 5
+            train_folds = the 3 remaining folds
+
+        Legacy 80/20 (split is None):
+            train -> 4 folds different from `kfold`
+            !train -> fold `kfold` as validation
+        """
+        total_fold = 5
+        if self.split is None:
+            # Legacy 80/20: train uses 4 folds, eval uses fold `kfold`.
+            if self.train:
+                return [k for k in range(total_fold) if k != kfold], -1
+            return [], kfold
+
+        # 60/20/20 rotation:
+        #   test = fold kfold
+        #   val  = fold (kfold + 1) % 5
+        #   train = the 3 remaining folds
+        test_fold = kfold % total_fold
+        val_fold = (kfold + 1) % total_fold
+
+        if self.split == "train":
+            return [k for k in range(total_fold)
+                    if k != test_fold and k != val_fold], -1
+        if self.split == "val":
+            return [], val_fold
+        # split == "test"
+        return [], test_fold
+
+    def _split_by_fold(self, song_names, temp, kfold, fold_map=None):
+        """Split songs into train/val[/test] by fold index.
+
+        Behavior:
+            - Paper mode (self.split in {'train','val','test'}): always uses the
+              deterministic contiguous-block split derived from the lexicographic
+              ordering of song_names. `fold_map` is ignored — paper-faithful
+              splitting does not depend on external assignments.
+            - Legacy mode (self.split is None): if `fold_map` is provided
+              (loaded from fold_assignments.json), uses stratified per-song
+              mapping. Otherwise falls back to the contiguous-block 80/20 split.
         """
         total_fold = 5
 
-        if fold_map is not None:
+        # ---- Legacy stratified path (fold_map only honored when split is None) ----
+        if self.split is None and fold_map is not None:
             if self.train:
                 result = []
                 selected = []
@@ -126,37 +205,41 @@ class AudioDataset(Dataset):
                 selected = []
                 for s in song_names:
                     if fold_map.get(s, -1) == kfold:
-                        instances = [inst for inst in temp[s] if "1.00_0" in inst]
+                        instances = [inst for inst in temp[s] if _NON_AUG_TAG in inst]
                         result += instances
                         selected.append(s)
                 return selected, result
 
-        # Fallback: original contiguous-block split
+        # ---- Contiguous-block split (default + paper-faithful) ----
+        # Build fold boundaries (5 folds; remainders go to the first folds).
         quotient = len(song_names) // total_fold
         remainder = len(song_names) % total_fold
         fold_num = [0]
-        for i in range(total_fold):
+        for _ in range(total_fold):
             fold_num.append(quotient)
         for i in range(remainder):
-            fold_num[i+1] += 1
+            fold_num[i + 1] += 1
         for i in range(total_fold):
-            fold_num[i+1] += fold_num[i]
+            fold_num[i + 1] += fold_num[i]
+
+        train_folds, eval_fold = self._resolve_split(kfold)
 
         result = []
-        if self.train:
+        if eval_fold == -1:
+            # Train role: concatenate the requested folds, keep augmentations.
             tmp = []
-            for k in range(total_fold):
-                if k != kfold:
-                    for i in range(fold_num[k], fold_num[k+1]):
-                        result += temp[song_names[i]]
-                    tmp += song_names[fold_num[k]:fold_num[k + 1]]
+            for k in train_folds:
+                for i in range(fold_num[k], fold_num[k + 1]):
+                    result += temp[song_names[i]]
+                tmp += song_names[fold_num[k]:fold_num[k + 1]]
             return tmp, result
-        else:
-            for i in range(fold_num[kfold], fold_num[kfold+1]):
-                instances = temp[song_names[i]]
-                instances = [inst for inst in instances if "1.00_0" in inst]
-                result += instances
-            return song_names[fold_num[kfold]:fold_num[kfold+1]], result
+
+        # Eval role (val or test, or legacy validation): single fold, originals only.
+        for i in range(fold_num[eval_fold], fold_num[eval_fold + 1]):
+            instances = temp[song_names[i]]
+            instances = [inst for inst in instances if _NON_AUG_TAG in inst]
+            result += instances
+        return song_names[fold_num[eval_fold]:fold_num[eval_fold + 1]], result
 
     def get_paths(self, kfold=4):
         temp = {}
@@ -278,3 +361,52 @@ class AudioDataLoader(DataLoader):
     def __init__(self, *args, **kwargs):
         super(AudioDataLoader, self).__init__(*args, **kwargs)
         self.collate_fn = _collate_fn
+
+
+class EpochSampler(Sampler):
+    """Sample one random segment per song per epoch (paper-faithful).
+
+    ChordFormer (Akram et al., 2026, IV-B) trains on a single random 1000-frame
+    segment per song each epoch instead of iterating over every preprocessed
+    instance. This sampler reproduces that behavior on top of a flat list of
+    instance paths by grouping indices per song (via the parent directory of
+    each path) and emitting one randomly-chosen index per song per epoch, then
+    shuffling the resulting list.
+
+    Use only with train datasets that contain augmented instances. Val/test
+    must iterate naturally over the filtered originals.
+
+    The sampler discovers paths through `dataset.paths` (works for AudioDataset
+    and AudioDatasetStructured).
+    """
+
+    def __init__(self, dataset):
+        self.dataset = dataset
+        paths = self._collect_paths(dataset)
+
+        self.song_to_indices = {}
+        for idx, p in enumerate(paths):
+            song_dir = os.path.basename(os.path.dirname(p))
+            self.song_to_indices.setdefault(song_dir, []).append(idx)
+
+        self.songs = list(self.song_to_indices.keys())
+
+    @staticmethod
+    def _collect_paths(dataset):
+        if hasattr(dataset, "paths"):
+            return list(dataset.paths)
+        raise AttributeError(
+            "EpochSampler expects `dataset` to expose a `.paths` list of "
+            "instance file paths (AudioDataset / AudioDatasetStructured)."
+        )
+
+    def __iter__(self):
+        indices = []
+        for song in self.songs:
+            idx = random.choice(self.song_to_indices[song])
+            indices.append(idx)
+        random.shuffle(indices)
+        return iter(indices)
+
+    def __len__(self):
+        return len(self.songs)

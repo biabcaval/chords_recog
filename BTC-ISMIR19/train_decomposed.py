@@ -29,6 +29,7 @@ from models.btc_model_decomposed import (
     ChordFormer_model_decomposed,
     MultiTaskLoss,
 )
+from data.audio_dataset import EpochSampler
 from data.audio_dataset_structured import AudioDatasetStructured, AudioDataLoaderStructured
 from utils.decomposed_inference import DecomposedChordTrainer, DecomposedChordInference, ChordMetrics
 from utils.chord_decomposition import COMPONENT_NAMES
@@ -268,6 +269,16 @@ def main():
     )
     parser.add_argument('--train_datasets', type=str, nargs='+', default=None,
                        help='Datasets for training/validation (overrides config). Example: --train_datasets billboard jaah queen')
+    parser.add_argument('--split_mode', type=str, default='legacy',
+                       choices=['legacy', 'paper'],
+                       help="Dataset split strategy. "
+                            "'legacy' (default): 80/20 — train uses 4 folds, val uses fold `kfold`; "
+                            "no test set. Compatible with existing runs. "
+                            "'paper': 60/20/20 rotation (ChordFormer, Akram et al. 2026, IV-B). "
+                            "test_fold=kfold%5, val_fold=(kfold+1)%5, train_folds=remaining 3. "
+                            "All 3 splits come from --train_datasets (paper-faithful). "
+                            "Enables EpochSampler (one random segment per song per epoch) on the train loader "
+                            "and persists test_paths_kfold{k}.txt for downstream evaluation.")
     parser.add_argument('--wandb_api_key', type=str, default=None,
                        help='Weights & Biases API key (or set WANDB_API_KEY env var)')
     parser.add_argument('--wandb_entity', type=str, default=None,
@@ -490,31 +501,81 @@ def main():
     logger.info(f"Data root: {data_root}")
     logger.info(f"Datasets: {dataset_names}")
     logger.info(f"K-Fold: {args.kfold}")
+    logger.info(f"Split mode: {args.split_mode}")
     if component_weights is not None:
         logger.info(f"Component weights: {component_weights}")
-    
-    train_dataset = AudioDatasetStructured(
-        config,
-        root_dir=data_root,
-        dataset_names=tuple(dataset_names),
-        train=True,
-        decompose=True,
-        kfold=args.kfold,
-        normalization=normalization,
-    )
-    
-    val_dataset = AudioDatasetStructured(
-        config,
-        root_dir=data_root,
-        dataset_names=tuple(dataset_names),
-        train=False,
-        decompose=True,
-        kfold=args.kfold,
-        normalization=normalization,
-    )
-    
+
+    # Build datasets according to split mode.
+    #   legacy: 2 datasets (train / val), train=True/False, split=None.
+    #   paper : 3 datasets (train / val / test) with split=... and train=False.
+    #           The `train` flag is ignored by AudioDataset when split is given;
+    #           we keep train=False for clarity and to avoid downstream branches
+    #           that key off `self.train`.
+    test_dataset = None
+    if args.split_mode == 'paper':
+        train_dataset = AudioDatasetStructured(
+            config,
+            root_dir=data_root,
+            dataset_names=tuple(dataset_names),
+            train=False,
+            decompose=True,
+            kfold=args.kfold,
+            split='train',
+            normalization=normalization,
+        )
+        val_dataset = AudioDatasetStructured(
+            config,
+            root_dir=data_root,
+            dataset_names=tuple(dataset_names),
+            train=False,
+            decompose=True,
+            kfold=args.kfold,
+            split='val',
+            normalization=normalization,
+        )
+        test_dataset = AudioDatasetStructured(
+            config,
+            root_dir=data_root,
+            dataset_names=tuple(dataset_names),
+            train=False,
+            decompose=True,
+            kfold=args.kfold,
+            split='test',
+            normalization=normalization,
+        )
+    else:
+        train_dataset = AudioDatasetStructured(
+            config,
+            root_dir=data_root,
+            dataset_names=tuple(dataset_names),
+            train=True,
+            decompose=True,
+            kfold=args.kfold,
+            normalization=normalization,
+        )
+        val_dataset = AudioDatasetStructured(
+            config,
+            root_dir=data_root,
+            dataset_names=tuple(dataset_names),
+            train=False,
+            decompose=True,
+            kfold=args.kfold,
+            normalization=normalization,
+        )
+
     logger.info(f"Training samples: {len(train_dataset)}")
     logger.info(f"Validation samples: {len(val_dataset)}")
+    if test_dataset is not None:
+        logger.info(f"Test samples: {len(test_dataset)}")
+
+        # Persist the test path list so post-training evaluation does not need
+        # to rebuild the dataset (paper-faithful workflow: train selects on val,
+        # test is only consumed downstream).
+        test_paths_file = output_dir / f"test_paths_kfold{args.kfold}.txt"
+        with open(test_paths_file, "w", encoding="utf-8") as f:
+            for p in test_dataset.paths:
+                f.write(f"{p}\n")
+        logger.info(f"Saved test paths -> {test_paths_file}")
     
     # Final guardrail: infer actual feature width from data and keep model in sync.
     if len(train_dataset) > 0:
@@ -544,11 +605,26 @@ def main():
         f"prefetch_factor={loader_kwargs.get('prefetch_factor', 'n/a')}"
     )
 
-    train_loader = AudioDataLoaderStructured(
-        train_dataset,
-        shuffle=True,
-        **loader_kwargs,
-    )
+    if args.split_mode == 'paper':
+        # Paper-faithful: one random segment per song per epoch (EpochSampler
+        # already shuffles internally, so shuffle MUST be False here).
+        train_sampler = EpochSampler(train_dataset)
+        logger.info(
+            f"EpochSampler enabled: {len(train_sampler)} songs -> "
+            f"{len(train_sampler)} segments/epoch"
+        )
+        train_loader = AudioDataLoaderStructured(
+            train_dataset,
+            sampler=train_sampler,
+            shuffle=False,
+            **loader_kwargs,
+        )
+    else:
+        train_loader = AudioDataLoaderStructured(
+            train_dataset,
+            shuffle=True,
+            **loader_kwargs,
+        )
 
     val_loader = AudioDataLoaderStructured(
         val_dataset,
