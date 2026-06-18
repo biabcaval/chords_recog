@@ -52,6 +52,25 @@ gradnorm:
 focal:
   gamma: 0.0
 
+# =============================================================================
+# BEATs frontend (frozen Microsoft BEATs backbone -> decomposed multi-head)
+# =============================================================================
+# Used by scripts/preextract_beats_embeddings.py and train_beats_decomposed.py.
+# The backbone is NOT on PyPI: clone microsoft/unilm and provide the checkpoint.
+beats:
+  embed_dim: 768                 # BEATs_iter3_plus_AS2M hidden size (frozen)
+  target_sr: 16000               # BEATs requires 16kHz mono input
+  beats_tag: 'beats_iter3_plus'  # subfolder tag for pre-extracted embeddings
+  head_type: 'linear'            # 'linear' (paper baseline) or 'mlp'
+  hidden_dim: 256                # MLP head hidden width (head_type=mlp only)
+  dropout: 0.1                   # dropout inside classifier heads
+  augment: 'none'               # pitch-shift set for pre-extraction: 'none'=[0], 'full'=[-5..6]
+  checkpoint_path: '/home/daniel.melo/BEATS_checkpoints/BEATs_iter3_plus_AS2M.pt'  # BEATs checkpoint (.pt)
+  source_path: '/home/daniel.melo/unilm/beats'                                     # cloned unilm/beats dir with BEATs.py
+  # checkpoint / source default from config above, but can be overridden per run via CLI:
+  #   --beats_checkpoint /path/BEATs_iter3_plus_AS2M.pt
+  #   --beats_source     /path/unilm/beats
+
 curriculum:
   enabled: False
   strategy: 'mixed'
