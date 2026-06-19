@@ -154,7 +154,14 @@ def process_song(preprocessor, backbone, song_name, lab_path, mp3_path, save_pat
         logger.warning("Skipping '%s' (audio load error: %s)", song_name, exc)
         return 0
 
-    result_root = os.path.join(save_path + "_beats", mp3_str, beats_tag, song_name.strip())
+    # ``save_path`` comes from Preprocess.get_all_files() as ``<root>/result/<dataset>``.
+    # Embeddings must live in the top-level ``result_beats`` tree (mirroring
+    # ``result_decomposed`` / ``result_not_structured``) so BEATsEmbeddingDataset._result_dir
+    # can find them: ``<root>/result_beats/<dataset>_beats/<mp3_str>/<beats_tag>/<song>``.
+    data_root = os.path.dirname(os.path.dirname(save_path))
+    dataset_name = os.path.basename(save_path)
+    result_root = os.path.join(data_root, "result_beats", dataset_name + "_beats",
+                               mp3_str, beats_tag, song_name.strip())
     os.makedirs(result_root, exist_ok=True)
 
     total = 0
