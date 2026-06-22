@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 
 from models.btc_model_decomposed import MultiTaskLoss
-from utils.chord_decomposition import COMPONENT_NAMES, CHORD_VOCAB
+from utils.decomposition_registry import get_decomposition
 
 # Native embedding dimension of BEATs_iter3_plus_AS2M (12-layer, 768-wide ViT).
 BEATS_EMBED_DIM = 768
@@ -174,25 +174,30 @@ class BEATsChordDecomposer(nn.Module):
             ``forward`` expects pre-extracted embeddings ``(batch, n_patches,
             input_dim)``.
         probs_out: If True, ``forward`` returns the raw logits dict.
+        decomposition: Chord-decomposition scheme. ``'paper6'`` (default) uses
+            the ChordFormer paper's 6 heads (root_triad, bass, 7th, 9th, 11th,
+            13th); ``'full9'`` uses the project's 9-head decomposition.
     """
 
     def __init__(self, input_dim=BEATS_EMBED_DIM, head_type="linear",
                  hidden_dim=256, dropout=0.1, class_weights=None,
                  component_weights=None, focal_gamma=0.0, backbone=None,
-                 probs_out=False):
+                 probs_out=False, decomposition="paper6"):
         super().__init__()
         self.input_dim = input_dim
         self.head_type = head_type
         self.probs_out = probs_out
         self.backbone = backbone
-        self.component_names = COMPONENT_NAMES
-        self.vocab_sizes = {c: len(CHORD_VOCAB[c]) for c in COMPONENT_NAMES}
+        decomp = get_decomposition(decomposition)
+        self.decomposition = decomp.scheme
+        self.component_names = list(decomp.COMPONENT_NAMES)
+        self.vocab_sizes = {c: len(decomp.CHORD_VOCAB[c]) for c in self.component_names}
         self.last_shared_features = None
 
         self.heads = nn.ModuleDict({
             component: self._build_head(head_type, input_dim, hidden_dim,
                                         self.vocab_sizes[component], dropout)
-            for component in COMPONENT_NAMES
+            for component in self.component_names
         })
 
         self.criterion = MultiTaskLoss(

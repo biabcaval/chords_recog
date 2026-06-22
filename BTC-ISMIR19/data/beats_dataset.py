@@ -18,7 +18,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from sortedcontainers import SortedList
 
-from utils.chord_decomposition import ChordDecomposer, COMPONENT_NAMES
+from utils.decomposition_registry import get_decomposition
 from data.audio_dataset_structured import get_component_vocab_sizes  # re-exported
 
 __all__ = [
@@ -69,12 +69,15 @@ class BEATsEmbeddingDataset(Dataset):
 
     def __init__(self, root_dir=None, dataset_names=("billboard",), train=False,
                  kfold=4, beats_tag="beats_iter3_plus", mp3_string="22050_10.0_5.0",
-                 paths=None, decompose=True, max_patches=None):
+                 paths=None, decompose=True, max_patches=None,
+                 decomposition="paper6"):
         super().__init__()
         self.train = train
         self.decompose = decompose
-        self.decomposer = ChordDecomposer() if decompose else None
-        self.component_names = COMPONENT_NAMES
+        decomp = get_decomposition(decomposition)
+        self.decomposition = decomp.scheme
+        self.decomposer = decomp.ChordDecomposer() if decompose else None
+        self.component_names = list(decomp.COMPONENT_NAMES)
         self.max_patches = max_patches
 
         if paths is not None:
@@ -207,7 +210,7 @@ class BEATsEmbeddingDataset(Dataset):
 
         if self.decompose and self.decomposer is not None:
             components = self.decomposer.decompose_batch(chord_labels)
-            for component in COMPONENT_NAMES:
+            for component in self.component_names:
                 comp = components[component]
                 if isinstance(comp, np.ndarray):
                     comp = torch.as_tensor(comp, dtype=torch.long)
@@ -231,17 +234,21 @@ def _collate_fn_beats(batch):
     lengths = torch.tensor([b["embedding"].shape[0] for b in batch], dtype=torch.long)
     max_patches = int(lengths.max().item())
 
+    has_components = "components" in batch[0]
+    # Derive component names from the data so the collate is scheme-agnostic
+    # (works for both the 9-head and the paper's 6-head decomposition).
+    component_names = list(batch[0]["components"].keys()) if has_components else []
+
     embeddings = torch.zeros(batch_size, max_patches, embed_dim, dtype=torch.float32)
     components = {c: torch.zeros(batch_size, max_patches, dtype=torch.long)
-                 for c in COMPONENT_NAMES}
+                 for c in component_names}
 
-    has_components = "components" in batch[0]
     for i, sample in enumerate(batch):
         emb = sample["embedding"]
         n = emb.shape[0]
         embeddings[i, :n] = emb
         if has_components:
-            for c in COMPONENT_NAMES:
+            for c in component_names:
                 comp = sample["components"][c]
                 m = min(len(comp), max_patches)
                 components[c][i, :m] = comp[:m]

@@ -623,7 +623,8 @@ class MultiTaskLoss(nn.Module):
         return total_loss, loss_dict
     
     @staticmethod
-    def compute_class_weights(train_dataset, gamma=0.5, w_max=10.0, device=None, return_counts=False):
+    def compute_class_weights(train_dataset, gamma=0.5, w_max=10.0, device=None,
+                              return_counts=False, component_names=None, chord_vocab=None):
         """
         Compute class weights from training data using the Class Re-weighting formula.
 
@@ -652,6 +653,12 @@ class MultiTaskLoss(nn.Module):
             device: Device to run computation and place output tensors on. Defaults
                 to CUDA when available, otherwise CPU.
             return_counts: If True, also return per-component class counts.
+            component_names: Optional list of component names to count over.
+                Defaults to the 9-component ``COMPONENT_NAMES``. Pass the
+                paper's 6-component names for the BEATs ``paper6`` scheme.
+            chord_vocab: Optional dict mapping component -> vocabulary list,
+                used to size each component's count vector. Defaults to the
+                9-component ``CHORD_VOCAB``.
 
         Returns:
             class_weights: Dict mapping component names to weight tensors on `device`.
@@ -660,6 +667,11 @@ class MultiTaskLoss(nn.Module):
         """
         import logging
         logger = logging.getLogger(__name__)
+
+        if component_names is None:
+            component_names = COMPONENT_NAMES
+        if chord_vocab is None:
+            chord_vocab = CHORD_VOCAB
 
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -670,13 +682,13 @@ class MultiTaskLoss(nn.Module):
         # int64 to allow safe accumulation across very large datasets.
         counts_by_component = {
             component: torch.zeros(
-                len(CHORD_VOCAB[component]),
+                len(chord_vocab[component]),
                 dtype=torch.long,
                 device=device,
             )
-            for component in COMPONENT_NAMES
+            for component in component_names
         }
-        vocab_sizes = {component: len(CHORD_VOCAB[component]) for component in COMPONENT_NAMES}
+        vocab_sizes = {component: len(chord_vocab[component]) for component in component_names}
 
         # Single dataset pass for all components using GPU bincount.
         n_samples = len(train_dataset)
@@ -686,7 +698,7 @@ class MultiTaskLoss(nn.Module):
                 continue
 
             sample_components = sample['components']
-            for component in COMPONENT_NAMES:
+            for component in component_names:
                 vocab_size = vocab_sizes[component]
                 component_data = sample_components.get(component, None)
                 if component_data is None:
@@ -714,7 +726,7 @@ class MultiTaskLoss(nn.Module):
 
         class_weights = {}
         class_counts = {}
-        for component in COMPONENT_NAMES:
+        for component in component_names:
             counts = counts_by_component[component]
             vocab_size = vocab_sizes[component]
             max_count_t = counts.max()
