@@ -97,6 +97,63 @@ def load_beats_backbone(checkpoint_path, source_path=None, freeze=True,
     return backbone
 
 
+def set_beats_trainable(backbone, unfreeze_last_n, unfreeze_final_norm=True):
+    """Unfreeze the last ``unfreeze_last_n`` BEATs encoder layers for fine-tuning.
+
+    Freezes every backbone parameter first, then re-enables gradients on the top
+    ``unfreeze_last_n`` transformer layers (and, optionally, the encoder's final
+    LayerNorm). All other layers stay frozen, so the bulk of the ~90M-param
+    backbone is preserved while only the highest-level representations adapt.
+
+    Args:
+        backbone: A loaded BEATs module.
+        unfreeze_last_n: Number of top encoder layers to make trainable. ``0``
+            keeps the whole backbone frozen.
+        unfreeze_final_norm: Also unfreeze ``encoder.layer_norm`` when present.
+
+    Returns:
+        dict with ``n_total_layers``, ``unfrozen_layers`` (indices) and
+        ``n_trainable_params`` (for logging).
+
+    Raises:
+        AttributeError: If the encoder's layer list can't be located, with an
+            actionable message (the BEATs internals must expose
+            ``encoder.layers``).
+    """
+    for param in backbone.parameters():
+        param.requires_grad = False
+
+    encoder = getattr(backbone, "encoder", None)
+    layers = getattr(encoder, "layers", None) if encoder is not None else None
+    if layers is None:
+        raise AttributeError(
+            "Could not locate 'backbone.encoder.layers'; cannot select BEATs "
+            "layers to unfreeze. Inspect the loaded backbone's module tree and "
+            "adjust set_beats_trainable() to match its attribute names."
+        )
+
+    n_total = len(layers)
+    n = max(0, min(int(unfreeze_last_n), n_total))
+    unfrozen_layers = []
+    for i in range(n_total - n, n_total):
+        for param in layers[i].parameters():
+            param.requires_grad = True
+        unfrozen_layers.append(i)
+
+    if unfreeze_final_norm and encoder is not None:
+        final_norm = getattr(encoder, "layer_norm", None)
+        if final_norm is not None:
+            for param in final_norm.parameters():
+                param.requires_grad = True
+
+    n_trainable = sum(p.numel() for p in backbone.parameters() if p.requires_grad)
+    return {
+        "n_total_layers": n_total,
+        "unfrozen_layers": unfrozen_layers,
+        "n_trainable_params": n_trainable,
+    }
+
+
 @torch.no_grad()
 def extract_beats_embeddings(backbone, waveform, device="cpu"):
     """Extract frame-level BEATs embeddings for a single mono waveform.
@@ -168,11 +225,15 @@ class BEATsChordDecomposer(nn.Module):
         class_weights: Optional dict mapping component -> class-weight tensor.
         component_weights: Optional dict of per-component loss weights.
         focal_gamma: Focal-loss focusing parameter (0 = standard CE).
-        backbone: Optional pre-loaded frozen BEATs module. When provided,
+        backbone: Optional pre-loaded BEATs module. When provided,
             ``forward`` accepts raw waveforms ``(batch, samples)`` and extracts
-            embeddings internally (for end-to-end inference). When ``None``,
-            ``forward`` expects pre-extracted embeddings ``(batch, n_patches,
-            input_dim)``.
+            embeddings internally (for end-to-end inference / fine-tuning). When
+            ``None``, ``forward`` expects pre-extracted embeddings ``(batch,
+            n_patches, input_dim)``.
+        backbone_trainable: If True, gradients flow through the backbone during
+            ``forward`` (use with :func:`set_beats_trainable` to fine-tune the
+            top layers). If False, the backbone runs under ``torch.no_grad()``
+            (frozen feature extractor). Has no effect when ``backbone`` is None.
         probs_out: If True, ``forward`` returns the raw logits dict.
         decomposition: Chord-decomposition scheme. ``'paper6'`` (default) uses
             the ChordFormer paper's 6 heads (root_triad, bass, 7th, 9th, 11th,
@@ -182,12 +243,13 @@ class BEATsChordDecomposer(nn.Module):
     def __init__(self, input_dim=BEATS_EMBED_DIM, head_type="linear",
                  hidden_dim=256, dropout=0.1, class_weights=None,
                  component_weights=None, focal_gamma=0.0, backbone=None,
-                 probs_out=False, decomposition="paper6"):
+                 backbone_trainable=False, probs_out=False, decomposition="paper6"):
         super().__init__()
         self.input_dim = input_dim
         self.head_type = head_type
         self.probs_out = probs_out
         self.backbone = backbone
+        self.backbone_trainable = backbone_trainable
         decomp = get_decomposition(decomposition)
         self.decomposition = decomp.scheme
         self.component_names = list(decomp.COMPONENT_NAMES)
@@ -218,10 +280,18 @@ class BEATsChordDecomposer(nn.Module):
         raise ValueError(f"Unknown head_type '{head_type}'. Use 'linear' or 'mlp'.")
 
     def _embed(self, x):
-        """Return frame-level embeddings from waveform or pass through."""
+        """Return frame-level embeddings from waveform or pass through.
+
+        When a backbone is attached and the input is a raw waveform
+        ``(batch, samples)``, run it through BEATs. If ``backbone_trainable`` is
+        set, keep the autograd graph so gradients reach the unfrozen top layers;
+        otherwise wrap extraction in ``torch.no_grad()`` (frozen extractor).
+        """
         if self.backbone is not None and x.dim() == 2:
             padding_mask = torch.zeros(x.shape[0], x.shape[1], dtype=torch.bool,
                                        device=x.device)
+            if self.backbone_trainable:
+                return self.backbone.extract_features(x, padding_mask=padding_mask)[0]
             with torch.no_grad():
                 return self.backbone.extract_features(x, padding_mask=padding_mask)[0]
         return x

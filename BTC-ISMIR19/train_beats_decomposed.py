@@ -35,9 +35,11 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
-from models.beats_chord_model import BEATsChordDecomposer, BEATS_EMBED_DIM
+from models.beats_chord_model import (BEATsChordDecomposer, BEATS_EMBED_DIM,
+                                       load_beats_backbone, set_beats_trainable)
 from models.btc_model_decomposed import MultiTaskLoss
 from data.beats_dataset import BEATsEmbeddingDataset, BEATsDataLoader
+from data.beats_audio_dataset import BEATsAudioDataset, BEATsAudioDataLoader
 from utils.decomposition_registry import get_decomposition, DECOMPOSITION_CHOICES
 from utils.hparams import HParams
 
@@ -168,17 +170,24 @@ def parse_component_weights(spec, component_names):
     return out
 
 
+def _batch_inputs(batch, device):
+    """Return the model input tensor: raw waveforms (fine-tuning) or
+    pre-extracted embeddings, whichever the collate produced."""
+    inputs = batch["waveforms"] if "waveforms" in batch else batch["embeddings"]
+    return inputs.to(device)
+
+
 def train_one_epoch(model, loader, optimizer, device, component_names, grad_clip=1.0):
     model.train()
     total_loss = 0.0
     comp_sums = {c: 0.0 for c in component_names}
     n_batches = 0
     for batch in loader:
-        embeddings = batch["embeddings"].to(device)
+        inputs = _batch_inputs(batch, device)
         labels = {c: batch["components"][c].to(device) for c in component_names}
 
         optimizer.zero_grad()
-        _, loss, _, comp_losses = model(embeddings, labels=labels)
+        _, loss, _, comp_losses = model(inputs, labels=labels)
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
         optimizer.step()
@@ -203,9 +212,9 @@ def validate(model, loader, device, component_names):
     seen = 0
     n_batches = 0
     for batch in loader:
-        embeddings = batch["embeddings"].to(device)
+        inputs = _batch_inputs(batch, device)
         labels = {c: batch["components"][c].to(device) for c in component_names}
-        predictions, loss, _, comp_losses = model(embeddings, labels=labels)
+        predictions, loss, _, comp_losses = model(inputs, labels=labels)
         total_loss += loss.item()
         n_batches += 1
         if comp_losses:
@@ -364,6 +373,24 @@ def main():
                         help="Disable W&B logging entirely (local JSON still written).")
     parser.add_argument("--smoke_test", action="store_true",
                         help="Run a self-contained smoke test on synthetic data and exit.")
+    # --- End-to-end fine-tuning of the BEATs backbone (Strategy A) ---
+    parser.add_argument("--finetune", action="store_true",
+                        help="Fine-tune the top BEATs layers end-to-end on raw audio "
+                             "(instead of training heads on pre-extracted embeddings). "
+                             "Requires --beats_checkpoint (or config.beats).")
+    parser.add_argument("--unfreeze_last_n", type=int, default=2,
+                        help="With --finetune: number of top BEATs encoder layers to "
+                             "unfreeze (default 2).")
+    parser.add_argument("--backbone_lr", type=float, default=1e-5,
+                        help="With --finetune: learning rate for the unfrozen backbone "
+                             "layers (kept << head LR to avoid catastrophic forgetting).")
+    parser.add_argument("--beats_checkpoint", type=str, default=None,
+                        help="Path to a BEATs .pt checkpoint (defaults to config.beats.checkpoint_path).")
+    parser.add_argument("--beats_source", type=str, default=None,
+                        help="Path to the cloned unilm/beats dir (defaults to config.beats.source_path).")
+    parser.add_argument("--audio_cache_size", type=int, default=8,
+                        help="With --finetune: number of decoded songs kept in the "
+                             "per-worker audio LRU cache.")
     args = parser.parse_args()
 
     if args.smoke_test:
@@ -394,20 +421,61 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Run name: %s | Output: %s", run_name, output_dir)
 
-    train_dataset = BEATsEmbeddingDataset(
-        root_dir=data_root, dataset_names=tuple(dataset_names), train=True,
-        kfold=args.kfold, beats_tag=args.beats_tag, mp3_string=mp3_str, decompose=True,
-        decomposition=args.decomposition)
-    val_dataset = BEATsEmbeddingDataset(
-        root_dir=data_root, dataset_names=tuple(dataset_names), train=False,
-        kfold=args.kfold, beats_tag=args.beats_tag, mp3_string=mp3_str, decompose=True,
-        decomposition=args.decomposition)
-    logger.info("Train samples: %d | Val samples: %d", len(train_dataset), len(val_dataset))
+    backbone = None
+    target_patches = None
+    if args.finetune:
+        beats_cfg = config.beats if "beats" in config else {}
+        ckpt = args.beats_checkpoint or beats_cfg.get("checkpoint_path")
+        src = args.beats_source or beats_cfg.get("source_path")
+        if not ckpt:
+            parser.error("--finetune requires --beats_checkpoint (or config.beats.checkpoint_path).")
+        logger.info("Fine-tuning mode: loading BEATs backbone for end-to-end training...")
+        backbone = load_beats_backbone(ckpt, source_path=src, freeze=True, device=device)
+        ft_info = set_beats_trainable(backbone, args.unfreeze_last_n)
+        logger.info("Unfroze %d/%d top BEATs layers (indices %s); backbone trainable params: %d",
+                    len(ft_info["unfrozen_layers"]), ft_info["n_total_layers"],
+                    ft_info["unfrozen_layers"], ft_info["n_trainable_params"])
 
-    train_loader = BEATsDataLoader(train_dataset, batch_size=args.batch_size,
-                                   shuffle=True, num_workers=args.num_workers)
-    val_loader = BEATsDataLoader(val_dataset, batch_size=args.batch_size,
-                                 shuffle=False, num_workers=args.num_workers)
+        # Determine the (fixed) patch count for one inst_len window via a single
+        # backbone forward, so labels resample to align with backbone output.
+        seg_samples = int(round(mp3_config["inst_len"] * 16000))
+        with torch.no_grad():
+            _dummy = torch.zeros(1, seg_samples, device=device)
+            _pm = torch.zeros(1, seg_samples, dtype=torch.bool, device=device)
+            target_patches = int(backbone.extract_features(_dummy, padding_mask=_pm)[0].shape[1])
+        logger.info("BEATs patch count per %.1fs window: %d", mp3_config["inst_len"], target_patches)
+        if args.batch_size > 8:
+            logger.warning("Fine-tuning runs the full ~90M backbone in the autograd graph "
+                           "(only the top %d layers receive gradients, but activations for "
+                           "all layers are retained). batch_size=%d may OOM on most GPUs; "
+                           "consider --batch_size 4-8.", args.unfreeze_last_n, args.batch_size)
+
+        train_dataset = BEATsAudioDataset(
+            config=config, data_root=data_root, dataset_names=tuple(dataset_names),
+            train=True, kfold=args.kfold, target_patches=target_patches,
+            decomposition=args.decomposition, audio_cache_size=args.audio_cache_size)
+        val_dataset = BEATsAudioDataset(
+            config=config, data_root=data_root, dataset_names=tuple(dataset_names),
+            train=False, kfold=args.kfold, target_patches=target_patches,
+            decomposition=args.decomposition, audio_cache_size=args.audio_cache_size)
+        train_loader = BEATsAudioDataLoader(train_dataset, batch_size=args.batch_size,
+                                            shuffle=True, num_workers=args.num_workers)
+        val_loader = BEATsAudioDataLoader(val_dataset, batch_size=args.batch_size,
+                                          shuffle=False, num_workers=args.num_workers)
+    else:
+        train_dataset = BEATsEmbeddingDataset(
+            root_dir=data_root, dataset_names=tuple(dataset_names), train=True,
+            kfold=args.kfold, beats_tag=args.beats_tag, mp3_string=mp3_str, decompose=True,
+            decomposition=args.decomposition)
+        val_dataset = BEATsEmbeddingDataset(
+            root_dir=data_root, dataset_names=tuple(dataset_names), train=False,
+            kfold=args.kfold, beats_tag=args.beats_tag, mp3_string=mp3_str, decompose=True,
+            decomposition=args.decomposition)
+        train_loader = BEATsDataLoader(train_dataset, batch_size=args.batch_size,
+                                       shuffle=True, num_workers=args.num_workers)
+        val_loader = BEATsDataLoader(val_dataset, batch_size=args.batch_size,
+                                     shuffle=False, num_workers=args.num_workers)
+    logger.info("Train samples: %d | Val samples: %d", len(train_dataset), len(val_dataset))
 
     config_cw_enabled = config.class_weights.get("enabled", True) if hasattr(config, "class_weights") else True
     if args.use_class_weights:
@@ -420,9 +488,17 @@ def main():
     class_weights = None
     if cw_enabled:
         logger.info("Computing class weights (gamma=%.2f, w_max=%.2f)...", args.gamma, args.w_max)
-        class_weights = MultiTaskLoss.compute_class_weights(
-            train_dataset, gamma=args.gamma, w_max=args.w_max, device=device,
-            component_names=component_names, chord_vocab=chord_vocab)
+        # For the audio dataset, count labels without decoding audio.
+        had_labels_only = getattr(train_dataset, "labels_only", None)
+        if had_labels_only is not None:
+            train_dataset.labels_only = True
+        try:
+            class_weights = MultiTaskLoss.compute_class_weights(
+                train_dataset, gamma=args.gamma, w_max=args.w_max, device=device,
+                component_names=component_names, chord_vocab=chord_vocab)
+        finally:
+            if had_labels_only is not None:
+                train_dataset.labels_only = had_labels_only
         for component, weights in class_weights.items():
             logger.info("  %s: min=%.3f max=%.3f mean=%.3f",
                         component, weights.min(), weights.max(), weights.mean())
@@ -433,18 +509,34 @@ def main():
         input_dim=BEATS_EMBED_DIM, head_type=args.head_type, hidden_dim=args.hidden_dim,
         dropout=args.dropout, class_weights=class_weights,
         component_weights=component_weights, focal_gamma=args.focal_gamma,
+        backbone=backbone, backbone_trainable=args.finetune,
         decomposition=args.decomposition).to(device)
     logger.info("Trainable params: %d", sum(p.numel() for p in model.parameters() if p.requires_grad))
 
-    # Optimizer (paper: AdamW). Only the lightweight heads are trainable.
-    if args.optimizer == "adamw":
-        optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate,
-                                weight_decay=args.weight_decay)
+    # Optimizer (paper: AdamW). In fine-tuning mode use discriminative LRs: the
+    # heads train at --learning_rate while the unfrozen backbone layers train at
+    # the much smaller --backbone_lr (avoids wrecking pretrained features).
+    optim_cls = optim.AdamW if args.optimizer == "adamw" else optim.Adam
+    if args.finetune:
+        backbone_params, head_params = [], []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            (backbone_params if name.startswith("backbone.") else head_params).append(param)
+        optimizer = optim_cls(
+            [{"params": head_params, "lr": args.learning_rate},
+             {"params": backbone_params, "lr": args.backbone_lr}],
+            weight_decay=args.weight_decay)
+        logger.info("Optimizer: %s(head_lr=%g, backbone_lr=%g, weight_decay=%g) | "
+                    "head params=%d, backbone params=%d",
+                    optimizer.__class__.__name__, args.learning_rate, args.backbone_lr,
+                    args.weight_decay, sum(p.numel() for p in head_params),
+                    sum(p.numel() for p in backbone_params))
     else:
-        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate,
-                               weight_decay=args.weight_decay)
-    logger.info("Optimizer: %s(lr=%g, weight_decay=%g)",
-                optimizer.__class__.__name__, args.learning_rate, args.weight_decay)
+        optimizer = optim_cls(model.parameters(), lr=args.learning_rate,
+                              weight_decay=args.weight_decay)
+        logger.info("Optimizer: %s(lr=%g, weight_decay=%g)",
+                    optimizer.__class__.__name__, args.learning_rate, args.weight_decay)
 
     # Scheduler (paper: ReduceLROnPlateau /10 after 5 stale epochs, early-stop at min_lr).
     if args.scheduler == "plateau":
@@ -485,6 +577,11 @@ def main():
         "scheduler_factor": args.scheduler_factor,
         "scheduler_patience": args.scheduler_patience,
         "scheduler_min_lr": args.scheduler_min_lr,
+        "finetune": args.finetune,
+        "unfreeze_last_n": args.unfreeze_last_n if args.finetune else 0,
+        "backbone_lr": args.backbone_lr if args.finetune else None,
+        "target_patches": target_patches,
+        "training_mode": "finetune_e2e" if args.finetune else "frozen_embeddings",
         "wandb_project": args.wandb_project,
         "start_time": datetime.now().isoformat(),
     }

@@ -59,6 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.hparams import HParams
 from utils.preprocess import Preprocess, FeatureTypes
+from utils.beats_segment_labels import build_segment_labels
 from models.beats_chord_model import load_beats_backbone, extract_beats_embeddings, BEATS_EMBED_DIM
 from data.beats_dataset import resample_sequence
 
@@ -72,68 +73,6 @@ AUGMENT_SETS = {
     "none": [0],
     "full": [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6],
 }
-
-
-def build_segment_labels(preprocessor, chord_info, inst_start_sec, shift_factor):
-    """Build per-frame label lists for one window (CQT frame rate).
-
-    Replicates the labelling logic of
-    ``Preprocess.generate_labels_features_voca`` (chord_id/root/quality/bass +
-    full label string), applying the pitch-shift transposition. Returns
-    ``None`` if the window cannot produce a full-length label list.
-    """
-    time_interval = preprocessor.time_interval
-    n_points = preprocessor.no_of_chord_datapoints_per_sequence
-    inst_len = preprocessor.config.mp3["inst_len"]
-
-    chord_list, root_list, quality_list, bass_list, label_list = [], [], [], [], []
-    cur_sec = inst_start_sec
-    while cur_sec < inst_start_sec + inst_len:
-        available = chord_info.loc[(chord_info["start"] <= cur_sec) &
-                                   (chord_info["end"] > cur_sec + time_interval)].copy()
-        if len(available) == 0:
-            available = chord_info.loc[
-                ((chord_info["start"] >= cur_sec) & (chord_info["start"] <= cur_sec + time_interval)) |
-                ((chord_info["end"] >= cur_sec) & (chord_info["end"] <= cur_sec + time_interval))
-            ].copy()
-
-        if len(available) == 1:
-            chord = available["chord_id"].iloc[0]
-            root = available["root"].iloc[0]
-            quality = available["quality"].iloc[0]
-            bass = available["bass"].iloc[0]
-            chord_label = available["chord_label"].iloc[0]
-        elif len(available) > 1:
-            available["max_start"] = available.apply(lambda r: max(r["start"], cur_sec), axis=1)
-            available["min_end"] = available.apply(lambda r: min(r.end, cur_sec + time_interval), axis=1)
-            available["chord_length"] = available["min_end"] - available["max_start"]
-            max_idx = available["chord_length"].idxmax()
-            chord = available.loc[max_idx, "chord_id"]
-            root = available.loc[max_idx, "root"]
-            quality = available.loc[max_idx, "quality"]
-            bass = available.loc[max_idx, "bass"]
-            chord_label = available.loc[max_idx, "chord_label"]
-        else:
-            chord, root, quality, bass, chord_label = 169, 12, 14, 12, "N"
-
-        if chord != 169 and chord != 168:
-            chord = (chord + shift_factor * 14) % 168
-        if root != 12:
-            root = (root + shift_factor) % 12
-        if bass != 12:
-            bass = (bass + shift_factor) % 12
-        chord_label = preprocessor.Chord_class.transpose_chord_label(chord_label, shift_factor)
-
-        chord_list.append(int(chord))
-        root_list.append(int(root))
-        quality_list.append(int(quality))
-        bass_list.append(int(bass))
-        label_list.append(chord_label)
-        cur_sec += time_interval
-
-    if len(chord_list) != n_points:
-        return None
-    return chord_list, root_list, quality_list, bass_list, label_list
 
 
 def process_song(preprocessor, backbone, song_name, lab_path, mp3_path, save_path,
@@ -179,14 +118,17 @@ def process_song(preprocessor, backbone, song_name, lab_path, mp3_path, save_pat
             wav = wav[:last_sample]
         origin_len_sec = wav.shape[0] / TARGET_SR
 
+        n_points = preprocessor.no_of_chord_datapoints_per_sequence
         idx = 0
         current_start = 0.0
         while current_start + inst_len < origin_len_sec:
             labels = build_segment_labels(preprocessor, chord_info, current_start, shift_factor)
-            if labels is None:
+            chord_list, root_list, quality_list, bass_list, label_list = labels
+            # Drop boundary windows that didn't yield a full-length label list,
+            # preserving the previous (return-None) behaviour of the cache.
+            if len(chord_list) != n_points:
                 current_start += skip_interval
                 continue
-            chord_list, root_list, quality_list, bass_list, label_list = labels
 
             etc = "%.1f_%.1f" % (current_start, current_start + inst_len)
             aug = "%.2f_%i" % (1.0, shift_factor)
