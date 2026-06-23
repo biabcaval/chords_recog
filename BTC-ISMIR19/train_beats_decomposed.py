@@ -458,6 +458,12 @@ def main():
             config=config, data_root=data_root, dataset_names=tuple(dataset_names),
             train=False, kfold=args.kfold, target_patches=target_patches,
             decomposition=args.decomposition, audio_cache_size=args.audio_cache_size)
+        # Decode all songs to RAM in THIS (main) process before the DataLoader
+        # forks workers. Workers then inherit the audio copy-on-write and never
+        # call librosa -- this avoids the librosa/numba fork deadlock and makes
+        # batch loading GPU-bound instead of decode-bound.
+        train_dataset.prebuild_audio_cache()
+        val_dataset.prebuild_audio_cache()
         train_loader = BEATsAudioDataLoader(train_dataset, batch_size=args.batch_size,
                                             shuffle=True, num_workers=args.num_workers)
         val_loader = BEATsAudioDataLoader(val_dataset, batch_size=args.batch_size,

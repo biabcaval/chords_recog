@@ -27,7 +27,9 @@ exercised on the training VM, not the local dev box.
 import json
 import os
 import logging
+import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
@@ -89,6 +91,11 @@ class BEATsAudioDataset(Dataset):
         self.data_root = data_root
 
         self._audio_cache = OrderedDict()
+        # Songs decoded up-front in the MAIN process (see prebuild_audio_cache).
+        # Forked DataLoader workers inherit this read-only via copy-on-write and
+        # therefore never call librosa themselves -- this both avoids the
+        # librosa/numba fork deadlock and makes __getitem__ a cheap array slice.
+        self._preloaded = {}      # song -> np.ndarray (full song @ sr)
         self.song_paths = {}      # song -> (lab_path, mp3_path)
         self.chord_infos = {}     # song -> DataFrame (cached lab parse)
         self.specs = []           # list of (song, start_sec)
@@ -196,6 +203,48 @@ class BEATsAudioDataset(Dataset):
             components[component] = comp.long()
         return components, label_list
 
+    def prebuild_audio_cache(self, max_workers=8):
+        """Decode every needed song to 16 kHz mono in the MAIN process (once).
+
+        This must run BEFORE the DataLoader spawns workers. Decoding here (not in
+        forked workers) sidesteps the librosa/numba fork deadlock, and the
+        resulting arrays are shared copy-on-write with workers, so per-segment
+        access becomes an in-RAM slice. Uses a thread pool because librosa's MP3
+        decode is largely I/O / ffmpeg-subprocess bound.
+
+        Args:
+            max_workers: Thread pool size for parallel decoding.
+        """
+        songs = sorted({song for song, _ in self.specs})
+        todo = [s for s in songs if s not in self._preloaded]
+        if not todo:
+            return
+        import librosa  # main-process import only
+
+        split = "train" if self.train else "val"
+        logger.info("Pre-decoding %d %s songs to %dkHz in RAM (one-time)...",
+                    len(todo), split, self.sr // 1000)
+        start = time.time()
+        done = 0
+
+        def _decode(song):
+            _, mp3_path = self.song_paths[song]
+            wav, _ = librosa.load(mp3_path, sr=self.sr, mono=True)
+            return song, np.asarray(wav, dtype=np.float32)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for song, wav in pool.map(_decode, todo):
+                self._preloaded[song] = wav
+                done += 1
+                if done % 100 == 0 or done == len(todo):
+                    gb = sum(a.nbytes for a in self._preloaded.values()) / 1e9
+                    logger.info("  decoded %d/%d %s songs (%.1f GB, %.0fs elapsed)",
+                                done, len(todo), split, gb, time.time() - start)
+
+        gb = sum(a.nbytes for a in self._preloaded.values()) / 1e9
+        logger.info("Pre-decode complete: %d %s songs, %.1f GB RAM, %.0fs.",
+                    len(self._preloaded), split, gb, time.time() - start)
+
     def _song_audio(self, mp3_path):
         """Decode a full song to 16 kHz mono with a small per-worker LRU cache."""
         cached = self._audio_cache.get(mp3_path)
@@ -210,8 +259,12 @@ class BEATsAudioDataset(Dataset):
         return wav
 
     def _segment_waveform(self, song, start_sec):
-        _, mp3_path = self.song_paths[song]
-        wav = self._song_audio(mp3_path)
+        # Prefer the RAM-preloaded song (no librosa in workers); fall back to the
+        # lazy per-worker LRU decode only if prebuild_audio_cache wasn't run.
+        wav = self._preloaded.get(song)
+        if wav is None:
+            _, mp3_path = self.song_paths[song]
+            wav = self._song_audio(mp3_path)
         start = int(round(start_sec * self.sr))
         seg = wav[start:start + self.seg_samples]
         out = np.zeros(self.seg_samples, dtype=np.float32)
