@@ -209,6 +209,67 @@ class MLPClassifier(nn.Module):
         return self.classifier(x)
 
 
+class FFNBlock(nn.Module):
+    """Transformer-style position-wise feed-forward block.
+
+    Applies the canonical FFN pattern with a pre-LayerNorm and a residual
+    connection: ``x + Dropout(Linear(Dropout(GELU(Linear(LN(x))))))``. The inner
+    Linear expands the width by ``expansion`` (paper/Transformer default 4) and
+    the second projects back to ``dim``, so blocks preserve their input/output
+    width and can be stacked with residuals.
+
+    Args:
+        dim: Feature width (kept constant across the block).
+        expansion: Hidden-width multiplier (``d_ff = dim * expansion``).
+        dropout: Dropout probability applied after the activation and after the
+            output projection (two independent draws, standard FFN regularisation).
+    """
+
+    def __init__(self, dim, expansion=4, dropout=0.1):
+        super().__init__()
+        hidden = dim * expansion
+        self.norm = nn.LayerNorm(dim)
+        self.ff = nn.Sequential(
+            nn.Linear(dim, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, dim),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        # Pre-norm residual keeps the width == dim so blocks are stackable.
+        return x + self.ff(self.norm(x))
+
+
+class DeepSharedTrunk(nn.Module):
+    """Stack of ``num_blocks`` shared :class:`FFNBlock`s feeding all heads.
+
+    Placed between the (frozen) BEATs embeddings and the lightweight per-
+    component heads, this deepens the trainable FFN capacity ONCE and shares it
+    across every head, rather than duplicating a deep stack per head. Output is a
+    LayerNorm'd tensor with the same width as the input, so downstream linear
+    heads stay simple and existing shared-feature consumers keep the same shape.
+
+    Args:
+        dim: Feature width (matches the BEATs embedding dim, e.g. 768).
+        num_blocks: Number of stacked FFN blocks (``>= 1``).
+        expansion: Hidden-width multiplier passed to each :class:`FFNBlock`.
+        dropout: Dropout probability inside each block.
+    """
+
+    def __init__(self, dim, num_blocks=2, expansion=4, dropout=0.1):
+        super().__init__()
+        self.blocks = nn.Sequential(*[
+            FFNBlock(dim, expansion=expansion, dropout=dropout)
+            for _ in range(num_blocks)
+        ])
+        self.out_norm = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        return self.out_norm(self.blocks(x))
+
+
 class BEATsChordDecomposer(nn.Module):
     """Multi-head chord decomposer on top of BEATs frame-level embeddings.
 
@@ -221,7 +282,15 @@ class BEATsChordDecomposer(nn.Module):
         input_dim: Embedding width fed to the heads (768 for BEATs).
         head_type: ``'linear'`` or ``'mlp'``.
         hidden_dim: Hidden width for the MLP heads.
-        dropout: Dropout probability inside each head.
+        dropout: Dropout probability inside each head AND inside the shared trunk.
+        head_layers: Number of shared :class:`FFNBlock`s inserted between the
+            embeddings and the per-component heads. ``0`` (default) disables the
+            trunk entirely (identity), reproducing the previous shallow-head
+            behaviour; ``>= 1`` deepens the trainable FFN capacity once and
+            shares it across all heads.
+        ffn_expansion: Hidden-width multiplier inside each trunk FFN block
+            (``d_ff = input_dim * ffn_expansion``; Transformer default 4). Only
+            used when ``head_layers >= 1``.
         class_weights: Optional dict mapping component -> class-weight tensor.
         component_weights: Optional dict of per-component loss weights.
         focal_gamma: Focal-loss focusing parameter (0 = standard CE).
@@ -243,10 +312,13 @@ class BEATsChordDecomposer(nn.Module):
     def __init__(self, input_dim=BEATS_EMBED_DIM, head_type="linear",
                  hidden_dim=256, dropout=0.1, class_weights=None,
                  component_weights=None, focal_gamma=0.0, backbone=None,
-                 backbone_trainable=False, probs_out=False, decomposition="paper6"):
+                 backbone_trainable=False, probs_out=False, decomposition="paper6",
+                 head_layers=0, ffn_expansion=4):
         super().__init__()
         self.input_dim = input_dim
         self.head_type = head_type
+        self.head_layers = int(head_layers)
+        self.ffn_expansion = int(ffn_expansion)
         self.probs_out = probs_out
         self.backbone = backbone
         self.backbone_trainable = backbone_trainable
@@ -255,6 +327,15 @@ class BEATsChordDecomposer(nn.Module):
         self.component_names = list(decomp.COMPONENT_NAMES)
         self.vocab_sizes = {c: len(decomp.CHORD_VOCAB[c]) for c in self.component_names}
         self.last_shared_features = None
+
+        # Optional deep shared FFN trunk between embeddings and heads. With
+        # head_layers=0 it is an identity, so the model matches the previous
+        # shallow-head behaviour exactly (and old checkpoints stay loadable).
+        if self.head_layers > 0:
+            self.trunk = DeepSharedTrunk(input_dim, num_blocks=self.head_layers,
+                                         expansion=self.ffn_expansion, dropout=dropout)
+        else:
+            self.trunk = nn.Identity()
 
         self.heads = nn.ModuleDict({
             component: self._build_head(head_type, input_dim, hidden_dim,
@@ -296,6 +377,14 @@ class BEATsChordDecomposer(nn.Module):
                 return self.backbone.extract_features(x, padding_mask=padding_mask)[0]
         return x
 
+    def _features(self, x):
+        """Embed (if needed) then run the shared FFN trunk.
+
+        Returns the per-patch shared features fed to every head. With an
+        identity trunk (``head_layers=0``) this is just the embeddings.
+        """
+        return self.trunk(self._embed(x))
+
     def forward(self, x, labels=None):
         """Forward pass.
 
@@ -311,10 +400,10 @@ class BEATsChordDecomposer(nn.Module):
             the decomposed model interface (the 3rd slot is attention weights,
             unused here).
         """
-        embeddings = self._embed(x)
-        self.last_shared_features = embeddings
+        features = self._features(x)
+        self.last_shared_features = features
 
-        logits = {component: self.heads[component](embeddings)
+        logits = {component: self.heads[component](features)
                   for component in self.component_names}
 
         if self.probs_out:
@@ -330,8 +419,8 @@ class BEATsChordDecomposer(nn.Module):
         return predictions, loss, None, component_losses
 
     def get_logits(self, x):
-        embeddings = self._embed(x)
-        return {component: self.heads[component](embeddings)
+        features = self._features(x)
+        return {component: self.heads[component](features)
                 for component in self.component_names}
 
     def get_predictions(self, logits):

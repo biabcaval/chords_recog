@@ -290,10 +290,14 @@ def run_smoke_test(args):
         logger.info("Collate OK: embeddings %s, lengths %s",
                     tuple(batch["embeddings"].shape), batch["lengths"].tolist())
 
-        for head_type in ("linear", "mlp"):
+        # Exercise shallow heads (head_layers=0) AND the deep shared FFN trunk
+        # (head_layers=2) so both code paths are covered by the smoke test.
+        for head_type, head_layers in (("linear", 0), ("mlp", 0), ("linear", 2)):
             model = BEATsChordDecomposer(head_type=head_type, focal_gamma=args.focal_gamma,
-                                         decomposition=decomposition).to(device)
+                                         decomposition=decomposition,
+                                         head_layers=head_layers).to(device)
             optimizer = optim.Adam(model.parameters(), lr=1e-3)
+            tag = f"{head_type},L{head_layers}"
 
             emb = batch["embeddings"].to(device)
             labels = {c: batch["components"][c].to(device) for c in component_names}
@@ -301,7 +305,7 @@ def run_smoke_test(args):
             for c in component_names:
                 b, p, v = logits[c].shape
                 assert v == len(chord_vocab[c]), f"{c}: {v} != {len(chord_vocab[c])}"
-            logger.info("[%s] logits shapes OK (e.g. %s=%s)", head_type,
+            logger.info("[%s] logits shapes OK (e.g. %s=%s)", tag,
                         component_names[0], tuple(logits[component_names[0]].shape))
 
             before = sum(pr.detach().abs().sum().item() for pr in model.parameters())
@@ -309,7 +313,7 @@ def run_smoke_test(args):
             after = sum(pr.detach().abs().sum().item() for pr in model.parameters())
             val = validate(model, loader, device, component_names)
             logger.info("[%s] train_loss=%.4f val_loss=%.4f params_changed=%s",
-                        head_type, train_loss, val["val_loss"], before != after)
+                        tag, train_loss, val["val_loss"], before != after)
             assert np.isfinite(train_loss) and np.isfinite(val["val_loss"])
             assert before != after, "Parameters did not update during training step"
 
@@ -333,6 +337,15 @@ def main():
                              "or 'full9' (project's 9 heads).")
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--head_layers", type=int, default=0,
+                        help="Number of shared FFN blocks (Transformer-style, "
+                             "pre-norm + residual) inserted between the frozen "
+                             "BEATs embeddings and the per-component heads. 0 "
+                             "(default) keeps the previous shallow heads.")
+    parser.add_argument("--ffn_expansion", type=int, default=4,
+                        help="Hidden-width multiplier inside each shared FFN "
+                             "block (d_ff = embed_dim * ffn_expansion; default 4). "
+                             "Only used when --head_layers >= 1.")
     parser.add_argument("--num_epochs", type=int, default=100,
                         help="Max epochs (cap). With --scheduler plateau, training "
                              "early-stops when LR <= scheduler_min_lr (paper criterion).")
@@ -516,7 +529,8 @@ def main():
         dropout=args.dropout, class_weights=class_weights,
         component_weights=component_weights, focal_gamma=args.focal_gamma,
         backbone=backbone, backbone_trainable=args.finetune,
-        decomposition=args.decomposition).to(device)
+        decomposition=args.decomposition,
+        head_layers=args.head_layers, ffn_expansion=args.ffn_expansion).to(device)
     logger.info("Trainable params: %d", sum(p.numel() for p in model.parameters() if p.requires_grad))
 
     # Optimizer (paper: AdamW). In fine-tuning mode use discriminative LRs: the
@@ -563,6 +577,8 @@ def main():
         "component_names": component_names,
         "hidden_dim": args.hidden_dim,
         "dropout": args.dropout,
+        "head_layers": args.head_layers,
+        "ffn_expansion": args.ffn_expansion,
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
         "batch_size": args.batch_size,

@@ -63,7 +63,9 @@ beats:
   beats_tag: 'beats_iter3_plus'  # subfolder tag for pre-extracted embeddings
   head_type: 'linear'            # 'linear' (paper baseline) or 'mlp'
   hidden_dim: 256                # MLP head hidden width (head_type=mlp only)
-  dropout: 0.1                   # dropout inside classifier heads
+  dropout: 0.1                   # dropout inside classifier heads AND shared trunk
+  head_layers: 0                 # shared FFN blocks (pre-norm+residual) before heads; 0=off (shallow heads)
+  ffn_expansion: 4               # d_ff = embed_dim * ffn_expansion inside each trunk block (head_layers>=1)
   augment: 'none'               # pitch-shift set for pre-extraction: 'none'=[0], 'full'=[-5..6]
   checkpoint_path: '/home/daniel.melo/BEATS_checkpoints/BEATs_iter3_plus_AS2M.pt'  # BEATs checkpoint (.pt)
   source_path: '/home/daniel.melo/unilm/beats'                                     # cloned unilm/beats dir with BEATs.py
